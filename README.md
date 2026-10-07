@@ -1,214 +1,128 @@
 # Spherical HG Flow
 
-条件付き Henyey–Greenstein (HG) 分布と，その残差を表現する
-**球面上の RQS coupling normalizing flow** の学習・参照推論実装です．
-点群を入力にするので，物理シミュレーションや CDF バッファの実装とは独立に開発できます．
+[`Somatic-Cell/rainbow`](https://github.com/Somatic-Cell/rainbow) が出力する
+**一つの波長・一つの入射方向の CDF** から，HG を基底分布にした球面 NF を学習します．
+保存 CDF の一次モーメント `hg.g` を読み込み，その値を固定したまま残差 NF を学習する構成です．
 
-```python
-g = model.hg_g(conditions)
-directions, log_pdf = model.sample_and_log_prob(conditions, num_samples=1024)
-log_pdf_at_other_directions = model.log_prob(other_directions, conditions)
-```
+主経路は `inspect-rainbow` → `train-rainbow` → `evaluate-rainbow` です．
+既存の `demo` / `train` / `evaluate` / `export` は **旧 v1 モデル用**として残しています．
+旧モデルの HG 用 MLP，方位角の絶対値への折り畳み，OptiX 向け export は，
+新しい学習経路の仕様ではありません．
 
-`conditions` の末尾次元は 2 で，順序は `[wavelength_nm, incident_cosine]`，
-出力は局所座標系の単位方向ベクトルです．確率変数の自由度は **2**，
-ベクトルの格納成分数は **3** です．返す PDF の基準測度は立体角 `sr^-1` です．
+## 今回の構成
 
-## 実装した構成
-
-| 部分 | 実装 |
+| 要素 | 単一条件 Rainbow ワークフロー |
 |---|---|
-| 条件 | 波長 nm と，入射伝搬方向・粒子軸のなす角の余弦 |
-| エンコーディング | `[0,1]` への正規化値 + Gaussian one-blob の区間積分 |
-| HG head | 小さな ReLU MLP，`g_limit * tanh(raw)` |
-| 基底 | 条件付き HG；解析的な CDF／逆 CDF と固有の球面 PDF |
-| 残差 | Zuko `GeneralCouplingTransform` を拡張した交互の 2D coupling |
-| スカラー写像 | `[0,1]` 上の rational-quadratic spline；解析的な逆写像 |
-| 端点 | 位置 0/1 を固定し，両端を含む `K+1` 個の正の slope を学習 |
-| 鏡映対称性 | 散乱面に対する方位角の折り畳みと，等確率の符号復元 |
-| 軸方向の入射 | 入射傾角の `sin` を gate として，軸方向で方位角依存性を消す |
-| 学習 | 平均散乱余弦で HG を事前学習 → HG を固定して残差 NLL を学習 |
-| 重み共有 | `weights.safetensors`，仕様 JSON，独立にロード可能な `model.pflow` |
-| 参照推論 | C++20 の loader/CLI と，CUDA からも呼ぶための allocation-free 数値ヘッダ |
+| 教師 | 保存された全立体角 CDF のセル内一定な立体角密度 |
+| 入力 | `metadata.json` と 3 個の `.npy` ファイルを持つ一条件のディレクトリ |
+| HG | 外部の `metadata["hg"]["g"]` を固定；HG head と事前学習は不要 |
+| 球面 NF | HG の累積確率座標の区間 RQS と，方位角の円周 RQS を交互に coupling |
+| 円周 | 全周を保持し，周期境界で slope を共有，conditioner も周期化 |
+| 対称性 | 鏡映をパラメータ共有で表現；上下の入射を同一視しない |
+| 学習 | CDF から固定点群を生成し，立体角に関する NLL で最尤学習 |
+| 評価 | 独立な validation / test 点群，HG と NF の forward KL，NF サンプルによる重要度 ESS |
+| 保存 | 推論・評価用の最良重みと，optimizer / RNG を含む再開用 checkpoint を分離 |
 
-Zuko は **1.6.0 に固定**しています．ライブラリを丸ごと fork せず，
-MLP，lazy distribution，coupling の仕組みを利用する拡張として実装しています．
-標準の NSF を名前だけ変更したモデルではありません．境界条件と対称性を持つ
-`BoundedRQSTransform` / `AxialSymmetricCouplingTransform` が実際の学習経路です．
-
-## 対象と前提
-
-粒子の形状・サイズ・姿勢モデルを固定した，軸対称粒子の**非偏光スカラー位相関数**を対象にします．
-粒子の上下対称性は仮定しません．`incident_cosine` の符号を保存します．
-サイズなども変える場合は，データ契約・conditioner・export 仕様を合わせて拡張してください．
-
-球面密度は，折り畳んだ座標チャートと鏡映の 2 分枝から構成します．
-球面全体で滑らかな単一の微分同相写像であることや，出射方向の極での密度の連続性までは
-保証しません．全立体角で正規化された密度としての変数変換を実装し，極の評価は `phi=0`
-に統一しています．数学的な定義は [MODEL.md](docs/MODEL.md) に記載しています．
-
-同梱の合成教師は，二つの HG と解析的な二次元角度分布の混合です．
-**2012 年の虹の物理モデルを実装したものではありません．** 実データに対する再現精度や，
-OptiX 上の実行速度をこの合成テストから推定しないでください．
+円周・区間 RQS は Rezende et al. (2020),
+[*Normalizing Flows on Tori and Spheres*](https://proceedings.mlr.press/v119/rezende20a.html)
+の Sections 2.1.2，2.2，2.3.1 で示される構成に基づきます．HG による再パラメータ化と
+粒子の鏡映・軸方向の入射対称性は，本プロジェクトで明示的に加える制約です．
+球面全体での密度の連続性や，論文中の全構成・全実験の再現を主張するものではありません．
+数式，データ契約と実装の対応は [単一条件の仕様](docs/RAINBOW_SINGLE_CONDITION.md) を参照してください．
 
 ## セットアップ
 
-Python 3.12 以上と，対象環境に対応する PyTorch を使います．
-PyTorch のインストール方法は [公式案内](https://pytorch.org/get-started/locally/) に従ってください．
-CPU だけで試す場合の例です．
+Python 3.12 と，実行環境に対応する PyTorch を使用します．CPU で開始する場合の
+Windows PowerShell の例です．仮想環境の有効化を行わず，その実行ファイルを直接呼びます．
 
-```bash
+```powershell
 python -m venv .venv
-source .venv/bin/activate
-python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-python -m pip install -e '.[dev]'
-pytest -q
+.\.venv\Scripts\python.exe -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-検証に使った依存関係の固定値は `requirements-validation.txt` に記録しています．
-C++ との比較テストは `g++` または `clang++` を使用します．コンパイラがない場合は
-該当テストが skip になるため，結果の `skipped` も確認してください．
+CUDA で学習する場合は，最初の PyTorch インストールを
+[PyTorch 公式案内](https://pytorch.org/get-started/locally/) の対応ビルドに変更し，
+学習コマンドに `--device cuda` を指定します．CPU での検証結果を CUDA の検証結果とは扱いません．
+Zuko は既存プロジェクトと同じ **1.6.0** を使い，ライブラリ全体の fork は不要です．
 
-## まず波長を固定して動かす
+Linux では `python -m venv .venv` の後に `source .venv/bin/activate` を実行し，
+同じ `pip install` と，以下の `phaseflow` コマンドを使用できます．
+`requirements-validation.txt` は旧 v0.1 の検証環境の記録です．
 
-以下は **550 nm に固定して入射方向を変える**，短い動作確認です．
-学習条件を軽くするため，モデルも `configs/smoke.json` で小さくしています．
+## 一条件から学習する
 
-```bash
-phaseflow demo \
-  --output data/fixed_wavelength.npz \
-  --wavelengths 550 \
-  --incident-cosines -0.75 -0.25 0.25 0.75 \
-  --points-per-condition 2048
+`--record` には，データセット全体の親ディレクトリではなく，次の 4 ファイルを直接含む
+一条件のレコードを指定します．点群の NPZ への事前変換は不要です．
 
-phaseflow train \
-  --data data/fixed_wavelength.npz \
-  --config configs/smoke.json \
-  --output runs/fixed_wavelength
-
-phaseflow evaluate \
-  --data data/fixed_wavelength.npz \
-  --checkpoint runs/fixed_wavelength/checkpoint.pt \
-  --split validation \
-  --sample-count 512 \
-  --output runs/fixed_wavelength/evaluation.json
-
-phaseflow export \
-  --checkpoint runs/fixed_wavelength/checkpoint.pt \
-  --output exports/fixed_wavelength
-```
-
-一つの入射方向に固定する場合は `--incident-cosines 0.25` とし，
-`--wavelengths 400 500 600 700` のように波長を変えられます．両方を固定する場合は
-config の `validation_fraction` を明示的に `0` にしてください．その評価は in-sample です．
-
-もう少し大きな出発点は `configs/example.json` です．設定は最適化済みの推奨値ではなく，
-比較実験の基準です．RQS の幅・高さの下限も表現能力に影響するため，記録して比較します．
-
-## CDF 側との接続
-
-CDF を使って得た，全立体角の正規化された目標分布からの方向サンプルを渡します．
-NPZ 保存を経由する必要はありません．
-
-```python
-from phaseflow.data import PhasePointCloud
-from phaseflow.model import ModelConfig
-from phaseflow.training import TrainingConfig, train_model
-
-cloud = PhasePointCloud(
-    conditions=conditions,  # [C,2]: wavelength_nm, incident_cosine
-    outgoing=local_unit_directions,  # [N,3]
-    condition_index=condition_index,  # [N], values in [0,C)
-    mode="target_samples",
-    metadata={"source": "your_cdf_sampler", "normalization": "full_sphere"},
-)
-result = train_model(cloud, ModelConfig(), TrainingConfig(), "runs/cdf_samples")
-```
-
-`target_samples` に教師 PDF をもう一度重みとして掛けません．
-方向の積分グリッドを使う場合だけ，`mode="quadrature"` とし，
-`weights = phase_pdf * solid_angle_weight` の**積分質量**を渡します．
-二つの形式，単位，座標変換，必須メタデータは [DATA_CONTRACT.md](docs/DATA_CONTRACT.md) を参照してください．
-
-## 学習と再開
-
-HG は `E[cos(scattering_angle)]` を教師に学習します．その後 HG を固定することで，
-残差 NF と HG が同じ偏りを取り合い，`g` の解釈が曖昧になることを抑えます．
-残差を学習した最終分布の平均余弦が，HG head の `g` と完全一致する制約はありません．
-評価では両方を区別します．
-教師の平均余弦が設定した `g_limit` に達する場合は，事前学習を開始せず設定の見直しを要求します．
-教師値の切り詰めは行いません．
-
-`joint_steps > 0` にすると，共同学習を明示的に追加できます．
-その場合は HG の log PDF と HG 座標への依存を含む完全な NLL を使い，
-正の `moment_regularization` を必須にしています．
-
-条件の組を丸ごと train / validation に分けます．validation 条件は HG の事前学習にも
-使いません．checkpoint には重み，optimizer，学習段階，乱数，サンプラー状態，条件 split，
-データ fingerprint，config を保存します．
-
-```bash
-phaseflow train --data data/fixed_wavelength.npz --config configs/smoke.json \
-  --output runs/resume_example --max-steps-this-run 60
-
-phaseflow train --data data/fixed_wavelength.npz --config configs/smoke.json \
-  --output runs/resume_example --resume runs/resume_example/checkpoint.pt
-```
-
-同一実行環境の CPU で，残差学習中の float64 再開と，共同学習中の float32 再開が，
-中断しない実行の重みと bit-for-bit で一致することをテストしています．
-環境をまたぐ厳密再現性や CUDA の同等性は保証していません．
-
-## C++ / OptiX への重み共有
-
-```bash
-g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Icpp/include \
-  cpp/src/model.cpp cpp/src/phaseflow_cli.cpp -o phaseflow_cli
-./phaseflow_cli exports/fixed_wavelength/model.pflow
-```
-
-CLI は標準入力から，例えば次の行を受け取ります．
-
-```text
-g 550 0.25
-sample 550 0.25 0.3 0.7
-eval 550 0.25 0.6 0 0.8
-```
-
-`sample` は方向，log PDF，PDF，g を返し，`eval` は log PDF，PDF，g を返します．
-JSON の配列順を推測する必要がないように，バイナリ仕様には行列配置，offset，
-feature 順序，座標，単位，version を記録しています．詳細と OptiX 側の upload 手順は
-[EXPORT_FORMAT.md](docs/EXPORT_FORMAT.md) を参照してください．
-
-現段階では，Python の MLP/RQS はモデル dtype に従い，HG と方向座標は float64 です．
-C++ 参照実装は FP32 の重みを読み，演算を double で行います．
-強い前方散乱の精度確認を優先した構成です．CUDA ヘッダの nvcc コンパイル，
-OptiX device upload，実レンダラとの結合，速度測定は別途必要です．
-
-レンダラでは，NF を proposal として使う場合の `q` と，輸送式に使う物理位相関数 `p` を
-区別してください．NEE の MIS には任意方向で評価した同じ `q` を使います．
-物理位相関数そのものを NF で置き換えれば，その近似誤差は描画結果にも入ります．
-
-## ファイル構成
-
-| パス | 内容 |
+| ファイル | 内容 |
 |---|---|
-| `src/phaseflow/model.py` | HG head，球面の sample/PDF，Zuko Distribution API |
-| `src/phaseflow/coupling.py` | 軸方向の入射極限を扱う Zuko coupling 拡張 |
-| `src/phaseflow/splines.py` | 両端 slope を含む bounded RQS と解析的逆写像 |
-| `src/phaseflow/hg.py`, `geometry.py` | 安定化した HG と散乱座標系 |
-| `src/phaseflow/data.py`, `training.py` | 点群，重み付き積分，段階学習，再開 |
-| `src/phaseflow/export.py`, `cpp/` | 重み形式と native 参照推論 |
-| `configs/`, `tests/`, `reports/` | 設定，検証，実際の実行記録 |
+| `metadata.json` | 波長，入射方向，フレーム，`hg.g`，生成・品質情報 |
+| `phi_cdf.npy` | 方位角の周辺 CDF |
+| `theta_given_phi_cdf.npy` | 方位角セルごとの条件付き CDF |
+| `u_edges.npy` | `u=(1-cos(theta))/2` の実際のセル境界 |
 
-開発時の契約は [AGENTS.md](AGENTS.md)，検証手順は [DEVELOPMENT.md](docs/DEVELOPMENT.md)，
-実行した結果は [VALIDATION.md](reports/VALIDATION.md) に記録しています．
+```powershell
+$record = 'D:\rainbow\output\records\i0000\w0000'
+.\.venv\Scripts\phaseflow.exe inspect-rainbow --record $record
+.\.venv\Scripts\phaseflow.exe train-rainbow --record $record --config configs/rainbow_single.json --output runs/rainbow_single
+.\.venv\Scripts\phaseflow.exe evaluate-rainbow --record $record --checkpoint runs/rainbow_single/best.pt --samples 65536 --seed 2026 --output runs/rainbow_single/evaluation.json
+```
 
-## 参照
+パスは実際に生成したレコードに置き換えてください．`i0000/w0000` はパス構造の例で，
+推奨する物理条件を意味しません．最初は波長と入射方向を両方固定し，
+この一条件について CDF サンプラ，HG 基底，残差学習と独立評価を確認します．
 
-- [Zuko documentation](https://zuko.readthedocs.io/stable/)
-- Rezende et al., [Normalizing Flows on Tori and Spheres](https://proceedings.mlr.press/v119/rezende20a.html), 2020.
-- Durkan et al., [Neural Spline Flows](https://arxiv.org/abs/1906.04032), 2019.
-- Müller et al., [Neural Importance Sampling](https://tom94.net/data/publications/mueller19neural/mueller19neural.pdf), 2019.
-- [PBRT: Phase Functions](https://pbr-book.org/4ed/Volume_Scattering/Phase_Functions)
-- [NromFlowHG2Mie](https://github.com/Somatic-Cell/NromFlowHG2Mie): safetensors と JSON による重み共有の考え方を参照．モデルコードは引き継いでいません．
+`configs/rainbow_single.json` は再現可能な出発点です．実データで最適化済みの設定ではありません．
+validation は同じ物理条件からの独立な点群で，条件間の汎化評価ではありません．
+`g` は点群から再推定せず，保存された CDF に対応する値を使用します．
+
+### 中断して再開する
+
+```powershell
+.\.venv\Scripts\phaseflow.exe train-rainbow --record $record --config configs/rainbow_single.json --output runs/rainbow_resume --max-steps-this-run 100
+.\.venv\Scripts\phaseflow.exe train-rainbow --record $record --config configs/rainbow_single.json --output runs/rainbow_resume --resume runs/rainbow_resume/checkpoint.pt
+```
+
+再開には `checkpoint.pt` を指定します．`best.pt` は validation で選んだ評価・推論用の重みで，
+optimizer と乱数状態を引き継ぐ再開用ファイルではありません．
+再開時は同じ入力ファイルと設定を用い，別の実験では出力ディレクトリも分けます．
+
+## PDF と座標の規約
+
+PDF はすべて立体角 `sr^-1` に関する密度です．サンプリングした点に教師 PDF をもう一度
+掛けることや，画像上の各セルを等重みとして NLL / KL を計算することはしません．
+CDF のセル質量を立体角で割ることにより，任意方向で教師 PDF を評価できます．
+
+`rainbow` の入射傾斜角を `alpha`，粒子の有向軸を `-y` とすると，入射条件は
+`incident_cosine = sin(alpha)` です．フレームをメタデータから読み，方位角の対称面を
+NF の局所座標に明示的に合わせます．詳細は
+[座標と測度](docs/RAINBOW_SINGLE_CONDITION.md#座標と立体角の規約) を参照してください．
+
+## 検証範囲と今後の接続
+
+この変更では，合成した Rainbow 形式のレコードを用いてデータ契約と学習経路を検証します．
+実行した検査と合成教師での数値結果は [検証報告](reports/RAINBOW_VALIDATION.md) に記録します．
+**実際のソルバ出力での近似精度，ソルバの物理的収束，CUDA / OptiX 上の速度は別の検証対象です．**
+新しい単一条件モデルの checkpoint は，旧 `phaseflow export` / `model.pflow` 形式とは互換ではありません．
+旧 export が新モデルを誤って書き出すことは拒否します．
+
+複数条件の学習，条件エンコーディング，条件間の `g` の供給・補間，新モデルの native export と
+OptiX 推論は今後の実装範囲です．今回のモデルから条件間の補間性能を推定しないでください．
+
+| パス | 役割 |
+|---|---|
+| `docs/RAINBOW_SINGLE_CONDITION.md` | 現在のモデル・データ・学習・評価の仕様 |
+| `configs/rainbow_single.json` | 単一条件の学習設定 |
+| `src/phaseflow/rainbow.py` | CDF 読み込み・検証，教師 sample / PDF，フレーム変換 |
+| `src/phaseflow/single_condition.py` | 単一条件の学習・評価・再開 |
+| `src/phaseflow/sphere_model.py` | 外部 HG と円周・区間 coupling のモデル |
+| `src/phaseflow/sphere_splines.py` | 円周境界と鏡映のパラメータ制約 |
+| `src/phaseflow/hg.py`, `geometry.py` | HG と局所方向の数値処理 |
+| `docs/MODEL.md`, `docs/DATA_CONTRACT.md` | 旧 v1 モデル・点群形式の記録 |
+| `docs/EXPORT_FORMAT.md`, `cpp/` | 旧 v1 専用の native 形式・参照実装 |
+| `examples/`, `reports/VALIDATION.md` | 旧 v0.1 の合成教師・検証記録 |
+
+開発時の契約は [AGENTS.md](AGENTS.md) に記載しています．リポジトリ直下で
+`pytest -q` と `ruff check .` を実行してください．C++ テストが通ることは，新モデルの
+native 推論が実装されたことを意味しません．

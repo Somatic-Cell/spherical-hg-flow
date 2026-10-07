@@ -234,6 +234,12 @@ def read_checkpoint(
 ) -> dict[str, Any]:
     """Read only tensor/primitive payloads; no arbitrary pickled model objects."""
     checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+    if isinstance(checkpoint, dict) and checkpoint.get("family") == "rainbow_single_condition":
+        raise ValueError(
+            "This is a Rainbow single-condition checkpoint. Use evaluate-rainbow for evaluation. "
+            "Native/OptiX export of the new circular model is not implemented; export v1 only "
+            "supports the legacy folded model."
+        )
     if (
         not isinstance(checkpoint, dict)
         or checkpoint.get("checkpoint_version") != CHECKPOINT_VERSION

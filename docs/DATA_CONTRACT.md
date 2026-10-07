@@ -1,3 +1,10 @@
+> **Legacy v1 point-cloud contract.** The content below applies to `PhasePointCloud`
+> and the historical `train` / `evaluate` commands. The new `train-rainbow` workflow
+> reads a validated solver record directly, uses external g, and keeps independent
+> point streams for a single fixed condition. Its contract is in
+> [RAINBOW_SINGLE_CONDITION.md](RAINBOW_SINGLE_CONDITION.md). In particular, the old
+> instruction to treat a single condition as in-sample does not apply to it.
+
 # Point-cloud and CDF adapter contract, version 1
 
 The learning pipeline depends on directions and conditions, not on a particular

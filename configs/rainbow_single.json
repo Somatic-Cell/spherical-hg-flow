@@ -1,0 +1,32 @@
+{
+  "schema_version": 2,
+  "family": "rainbow_single_condition",
+  "model": {
+    "num_coupling_layers": 4,
+    "num_bins": 16,
+    "hidden_features": [64, 64],
+    "mirror_symmetry": true,
+    "min_bin_width": 0.00001,
+    "min_bin_height": 0.00001,
+    "min_derivative": 0.0001,
+    "activation": "silu"
+  },
+  "training": {
+    "seed": 415,
+    "device": "cpu",
+    "dtype": "float64",
+    "train_samples": 65536,
+    "validation_samples": 32768,
+    "test_samples": 65536,
+    "proposal_samples": 16384,
+    "batch_size": 1024,
+    "steps": 2000,
+    "learning_rate": 0.001,
+    "eval_every": 100,
+    "checkpoint_every": 100,
+    "eval_batch_size": 4096,
+    "grad_clip_norm": 10.0,
+    "deterministic": true,
+    "cpu_threads": 1
+  }
+}

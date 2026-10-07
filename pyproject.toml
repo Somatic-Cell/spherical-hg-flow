@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spherical-hg-flow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Conditional Henyey-Greenstein residual spline flows for axisymmetric particle phase functions"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -78,6 +78,13 @@ def export_model(model: PhaseFlow, output_directory: str | os.PathLike[str]) -> 
     not a claim that the native and PyTorch FP32 arithmetic are bitwise equal.
     Unsupported architectures or nonfinite parameters fail before writing files.
     """
+    from .model import PhaseFlow
+
+    if not isinstance(model, PhaseFlow):
+        raise ValueError(
+            "Native export v1 only supports the legacy PhaseFlow model. The new single-condition "
+            "circular sphere model requires a new native format and cannot be exported as v1."
+        )
     config = model.config
     if config.activation != "relu":
         raise ValueError("Export format v1 supports only ReLU hidden activations")

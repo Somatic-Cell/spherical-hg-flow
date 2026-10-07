@@ -1,3 +1,10 @@
+> **Historical v0.1 development notes.** The stage schedule, folded-chart
+> requirements and native parity checks below describe the legacy model. Current
+> development follows [AGENTS.md](../AGENTS.md) and
+> [RAINBOW_SINGLE_CONDITION.md](RAINBOW_SINGLE_CONDITION.md). General reproducibility
+> and precision principles still apply; legacy tests do not validate the new
+> external-g / full-circle model or its future native implementation.
+
 # Development and verification
 
 Install the project in editable mode and use the source tree's tests:

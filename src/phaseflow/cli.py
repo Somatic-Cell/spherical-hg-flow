@@ -51,6 +51,30 @@ def _progress(entry: dict[str, Any]) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Conditional HG-base spherical normalizing flow")
     commands = parser.add_subparsers(dest="command", required=True)
+    inspect = commands.add_parser("inspect-rainbow", help="validate one Rainbow CDF record")
+    inspect.add_argument("--record", required=True, type=Path)
+    rainbow_train = commands.add_parser(
+        "train-rainbow", help="train a circular/interval RQS flow from one Rainbow CDF and its g"
+    )
+    rainbow_train.add_argument("--record", required=True, type=Path)
+    rainbow_train.add_argument("--config", required=True, type=Path)
+    rainbow_train.add_argument("--output", "--output-dir", required=True, type=Path)
+    rainbow_train.add_argument("--resume", type=Path)
+    rainbow_train.add_argument("--max-steps-this-run", type=int)
+    rainbow_train.add_argument("--device")
+    rainbow_train.add_argument("--quiet", action="store_true")
+    rainbow_eval = commands.add_parser(
+        "evaluate-rainbow", help="independent same-condition NLL, forward KL and importance ESS"
+    )
+    rainbow_eval.add_argument("--record", required=True, type=Path)
+    rainbow_eval.add_argument("--checkpoint", required=True, type=Path)
+    rainbow_eval.add_argument("--samples", type=int, default=65536)
+    rainbow_eval.add_argument("--proposal-samples", type=int)
+    rainbow_eval.add_argument("--seed", type=int, default=2026)
+    rainbow_eval.add_argument("--batch-size", type=int, default=4096)
+    rainbow_eval.add_argument("--device", default="cpu")
+    rainbow_eval.add_argument("--cpu-threads", type=int, default=1)
+    rainbow_eval.add_argument("--output", type=Path)
     demo = commands.add_parser(
         "demo",
         aliases=["make-demo"],
@@ -116,6 +140,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
+    if arguments.command in ("inspect-rainbow", "train-rainbow", "evaluate-rainbow"):
+        return _rainbow_main(arguments)
     if arguments.command in ("demo", "make-demo"):
         if arguments.output.exists():
             parser.error(f"{arguments.output} already exists; choose a new output path")
@@ -196,6 +222,91 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     parser.error("unknown command")
     return 2
+
+
+def _rainbow_main(arguments: argparse.Namespace) -> int:
+    from .rainbow import RainbowReference
+    from .single_condition import (
+        FAMILY,
+        SingleTrainingConfig,
+        evaluate_single_condition,
+        load_single_checkpoint,
+        train_single_condition,
+    )
+    from .sphere_model import SphereFlowConfig
+
+    def progress(entry: dict[str, Any]) -> None:
+        value = {key: entry[key] for key in ("global_step", "loss") if key in entry}
+        if "validation" in entry:
+            value["validation_nll"] = entry["validation"]["nll"]
+            value["validation_forward_kl"] = entry["validation"]["forward_kl_estimate"]
+        print(json.dumps(value, sort_keys=True, allow_nan=False), flush=True)
+
+    with RainbowReference(arguments.record) as reference:
+        if arguments.command == "inspect-rainbow":
+            _print_json(reference.summary())
+            return 0
+        if arguments.command == "train-rainbow":
+            with arguments.config.open(encoding="utf-8") as handle:
+                config = json.load(handle)
+            if (
+                not isinstance(config, dict)
+                or set(config) != {"schema_version", "family", "model", "training"}
+                or config["schema_version"] != 2
+                or config["family"] != FAMILY
+            ):
+                raise ValueError(
+                    "Rainbow config requires schema_version=2, family="
+                    + FAMILY
+                    + ", and explicit model/training objects"
+                )
+            model_config = SphereFlowConfig.from_dict(config["model"])
+            training_values = config["training"].copy()
+            if arguments.device is not None:
+                training_values["device"] = arguments.device
+            training_config = SingleTrainingConfig.from_dict(training_values)
+            result = train_single_condition(
+                reference,
+                model_config,
+                training_config,
+                arguments.output,
+                resume=arguments.resume,
+                max_steps_this_run=arguments.max_steps_this_run,
+                callback=None if arguments.quiet else progress,
+            )
+            _print_json(
+                {
+                    "checkpoint": str(result.checkpoint_path.resolve()),
+                    "best_checkpoint": str(result.best_path.resolve()),
+                    "global_step": result.global_step,
+                    "complete": result.complete,
+                    "metrics": result.metrics,
+                }
+            )
+            return 0
+        import torch
+
+        if arguments.cpu_threads < 1:
+            raise ValueError("cpu-threads must be positive")
+        torch.set_num_threads(arguments.cpu_threads)
+        model, checkpoint = load_single_checkpoint(arguments.checkpoint, device=arguments.device)
+        if checkpoint["dataset_fingerprint"] != reference.fingerprint():
+            raise ValueError("evaluation record differs from the model's single-condition teacher")
+        report = evaluate_single_condition(
+            model,
+            reference,
+            samples=arguments.samples,
+            seed=arguments.seed,
+            batch_size=arguments.batch_size,
+            proposal_samples=arguments.proposal_samples,
+        )
+        report["checkpoint"] = str(arguments.checkpoint.resolve())
+        report["checkpoint_step"] = checkpoint["global_step"]
+        report["training_code_fingerprint"] = checkpoint["code_fingerprint"]
+        if arguments.output is not None:
+            atomic_json(arguments.output, report)
+        _print_json(report)
+        return 0
 
 
 if __name__ == "__main__":

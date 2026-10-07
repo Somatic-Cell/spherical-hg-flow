@@ -1,3 +1,9 @@
+> **Legacy v0.1 example artifacts.** The checkpoints and native exports below use
+> the old HG-head / folded-chart model and remain examples for the legacy commands.
+> They are not Rainbow solver output or checkpoints for the new circular-RQS model.
+> Start new single-condition experiments with
+> [RAINBOW_SINGLE_CONDITION.md](../docs/RAINBOW_SINGLE_CONDITION.md).
+
 # Synthetic reference artifacts
 
 These files come from the recorded `configs/smoke.json` run: wavelength 550 nm,

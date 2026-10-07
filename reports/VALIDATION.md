@@ -1,3 +1,10 @@
+> **Historical validation of v0.1 only.** The 103-test result and all measurements
+> below were obtained for the old folded-chart model with an HG MLP. They do not
+> validate the new Rainbow adapter, external-g circular-RQS model, or its learning
+> accuracy. The old native comparison applies only to format v1. Current scope and
+> verification requirements are in
+> [RAINBOW_SINGLE_CONDITION.md](../docs/RAINBOW_SINGLE_CONDITION.md).
+
 # Validation record — v0.1.0
 
 Recorded on 2026-10-07. This is implementation validation using an analytic

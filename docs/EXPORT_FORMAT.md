@@ -1,3 +1,10 @@
+> **Legacy native format v1 only.** Every layout, API and renderer instruction
+> below applies to the historical folded-chart model with an HG MLP. The new
+> single-condition circular-RQS checkpoints are not compatible with this format
+> and cannot be exported through it. New-model native / OptiX inference requires
+> a separately versioned implementation. See
+> [RAINBOW_SINGLE_CONDITION.md](RAINBOW_SINGLE_CONDITION.md).
+
 # Native inference and export format v1
 
 `phaseflow export --checkpoint run/checkpoint.pt --output exported` writes three

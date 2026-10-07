@@ -1,3 +1,9 @@
+> **Legacy v1 model specification.** The content below describes the historical
+> v0.1 model with a learned HG head and folded-azimuth chart. It is retained for
+> those checkpoints and native format v1. The current full-circle RQS model with
+> external fixed g is specified in [RAINBOW_SINGLE_CONDITION.md](RAINBOW_SINGLE_CONDITION.md).
+> Do not apply the legacy model requirements below to the new Rainbow workflow.
+
 # Model and density contract
 
 ## Conditions and physical frame
