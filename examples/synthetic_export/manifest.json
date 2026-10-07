@@ -1,0 +1,308 @@
+{
+  "format": "phaseflow",
+  "version": 1,
+  "native_file": "model.pflow",
+  "native_sha256": "fe4acc2da2fba28c5cf75046fc9d6110b0ec311c3ba42f1a0eaa75c78455c5ae",
+  "native_bytes": 15492,
+  "weights_file": "weights.safetensors",
+  "weight_dtype": "float32",
+  "weight_byte_order": "little",
+  "weight_matrix_layout": "row_major_out_features_in_features",
+  "native_reference_arithmetic": "float64",
+  "rounded_pole_sample_policy": "invalid; no clamping, density substitution, or retry",
+  "cuda_validation": "not_compiled_or_executed_in_this_project_environment",
+  "condition_order": [
+    "wavelength_nm",
+    "incident_cosine"
+  ],
+  "incident_cosine_definition": "particle_axis dot incident_propagation_direction",
+  "normalized_conditions": [
+    "(wavelength_nm-lambda_min)/(lambda_max-lambda_min)",
+    "(incident_cosine+1)/2"
+  ],
+  "encoding": {
+    "type": "raw_then_integrated_gaussian_one_blob",
+    "order": [
+      "s_lambda",
+      "s_eta",
+      "lambda_bins",
+      "eta_bins"
+    ],
+    "sigma": 0.125,
+    "renormalize_boundary_mass": false
+  },
+  "g_head": "g_limit * tanh(MLP(encoded_conditions))",
+  "conditioner_input_order": [
+    "retained_coordinate",
+    "encoded_conditions",
+    "raw_g"
+  ],
+  "spline_logits_order": [
+    "widths[K]",
+    "heights[K]",
+    "derivatives[K+1]"
+  ],
+  "axial_incidence_symmetry": {
+    "enabled": true,
+    "strength": "a=sqrt((1-incident_cosine)*(1+incident_cosine))",
+    "radial_conditioner_retained_input": "0.5+a*(folded_azimuth-0.5)",
+    "azimuth_mass_blend_before_normalization": "a*constrained_mass+(1-a)/num_bins",
+    "azimuth_derivative_blend": "a*constrained_derivative+(1-a)"
+  },
+  "flow_direction": "data_to_base; sampling traverses inverse layers in reverse order",
+  "density_measure": "solid_angle_sr^-1",
+  "coordinates": {
+    "direction": "local_z_incident_propagation_x_projected_particle_axis",
+    "square": [
+      "HG_CDF(direction.z; g)",
+      "abs(atan2(y,x))/pi"
+    ],
+    "uniform_domain": "(0,1) x [0,1)",
+    "mirror_sign": "negative if u[1]<0.5, positive otherwise",
+    "base_folded_azimuth": "2*u[1] mod 1",
+    "pole_azimuth": "canonical zero for evaluation"
+  },
+  "config": {
+    "wavelength_min_nm": 380.0,
+    "wavelength_max_nm": 720.0,
+    "g_limit": 0.999,
+    "g_hidden_features": [
+      16
+    ],
+    "hidden_features": [
+      24,
+      24
+    ],
+    "num_coupling_layers": 2,
+    "num_bins": 8,
+    "one_blob_bins": 8,
+    "min_bin_width": 1e-05,
+    "min_bin_height": 1e-05,
+    "min_derivative": 0.0001,
+    "activation": "relu",
+    "include_g_context": true
+  },
+  "workspace": {
+    "max_network_width": 25,
+    "scalar_count_per_query": 69
+  },
+  "networks": [
+    {
+      "first_layer": 0,
+      "num_layers": 2,
+      "input_size": 18,
+      "output_size": 1
+    },
+    {
+      "first_layer": 2,
+      "num_layers": 3,
+      "input_size": 20,
+      "output_size": 25
+    },
+    {
+      "first_layer": 5,
+      "num_layers": 3,
+      "input_size": 20,
+      "output_size": 25
+    }
+  ],
+  "dense_layers": [
+    {
+      "input_size": 18,
+      "output_size": 16,
+      "weight_offset": 0,
+      "bias_offset": 288
+    },
+    {
+      "input_size": 16,
+      "output_size": 1,
+      "weight_offset": 304,
+      "bias_offset": 320
+    },
+    {
+      "input_size": 20,
+      "output_size": 24,
+      "weight_offset": 321,
+      "bias_offset": 801
+    },
+    {
+      "input_size": 24,
+      "output_size": 24,
+      "weight_offset": 825,
+      "bias_offset": 1401
+    },
+    {
+      "input_size": 24,
+      "output_size": 25,
+      "weight_offset": 1425,
+      "bias_offset": 2025
+    },
+    {
+      "input_size": 20,
+      "output_size": 24,
+      "weight_offset": 2050,
+      "bias_offset": 2530
+    },
+    {
+      "input_size": 24,
+      "output_size": 24,
+      "weight_offset": 2554,
+      "bias_offset": 3130
+    },
+    {
+      "input_size": 24,
+      "output_size": 25,
+      "weight_offset": 3154,
+      "bias_offset": 3754
+    }
+  ],
+  "couplings": [
+    {
+      "network_index": 1,
+      "retained_index": 1
+    },
+    {
+      "network_index": 2,
+      "retained_index": 0
+    }
+  ],
+  "tensors": [
+    {
+      "name": "g.layer0.weight",
+      "shape": [
+        16,
+        18
+      ],
+      "element_offset": 0,
+      "element_count": 288
+    },
+    {
+      "name": "g.layer0.bias",
+      "shape": [
+        16
+      ],
+      "element_offset": 288,
+      "element_count": 16
+    },
+    {
+      "name": "g.layer1.weight",
+      "shape": [
+        1,
+        16
+      ],
+      "element_offset": 304,
+      "element_count": 16
+    },
+    {
+      "name": "g.layer1.bias",
+      "shape": [
+        1
+      ],
+      "element_offset": 320,
+      "element_count": 1
+    },
+    {
+      "name": "coupling.0.layer0.weight",
+      "shape": [
+        24,
+        20
+      ],
+      "element_offset": 321,
+      "element_count": 480
+    },
+    {
+      "name": "coupling.0.layer0.bias",
+      "shape": [
+        24
+      ],
+      "element_offset": 801,
+      "element_count": 24
+    },
+    {
+      "name": "coupling.0.layer1.weight",
+      "shape": [
+        24,
+        24
+      ],
+      "element_offset": 825,
+      "element_count": 576
+    },
+    {
+      "name": "coupling.0.layer1.bias",
+      "shape": [
+        24
+      ],
+      "element_offset": 1401,
+      "element_count": 24
+    },
+    {
+      "name": "coupling.0.layer2.weight",
+      "shape": [
+        25,
+        24
+      ],
+      "element_offset": 1425,
+      "element_count": 600
+    },
+    {
+      "name": "coupling.0.layer2.bias",
+      "shape": [
+        25
+      ],
+      "element_offset": 2025,
+      "element_count": 25
+    },
+    {
+      "name": "coupling.1.layer0.weight",
+      "shape": [
+        24,
+        20
+      ],
+      "element_offset": 2050,
+      "element_count": 480
+    },
+    {
+      "name": "coupling.1.layer0.bias",
+      "shape": [
+        24
+      ],
+      "element_offset": 2530,
+      "element_count": 24
+    },
+    {
+      "name": "coupling.1.layer1.weight",
+      "shape": [
+        24,
+        24
+      ],
+      "element_offset": 2554,
+      "element_count": 576
+    },
+    {
+      "name": "coupling.1.layer1.bias",
+      "shape": [
+        24
+      ],
+      "element_offset": 3130,
+      "element_count": 24
+    },
+    {
+      "name": "coupling.1.layer2.weight",
+      "shape": [
+        25,
+        24
+      ],
+      "element_offset": 3154,
+      "element_count": 600
+    },
+    {
+      "name": "coupling.1.layer2.bias",
+      "shape": [
+        25
+      ],
+      "element_offset": 3754,
+      "element_count": 25
+    }
+  ],
+  "weights_sha256": "fc12e47942203dab874cad7f8c91e6a3f5ed64575106441e2db01cc90e70c53e"
+}

@@ -1,0 +1,414 @@
+{
+  "checkpoint_reload_nll_abs_error": 0.0,
+  "commands": [
+    [
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/.venv/bin/python",
+      "-m",
+      "phaseflow",
+      "demo",
+      "--output",
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/runs/final_smoke_v1/points.npz",
+      "--wavelengths",
+      "550",
+      "--incident-cosines",
+      "-0.75",
+      "-0.25",
+      "0.25",
+      "0.75",
+      "--points-per-condition",
+      "2048"
+    ],
+    [
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/.venv/bin/python",
+      "-m",
+      "phaseflow",
+      "train",
+      "--data",
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/runs/final_smoke_v1/points.npz",
+      "--config",
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/configs/smoke.json",
+      "--output",
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/runs/final_smoke_v1/training",
+      "--quiet"
+    ],
+    [
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/.venv/bin/python",
+      "-m",
+      "phaseflow",
+      "evaluate",
+      "--data",
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/runs/final_smoke_v1/points.npz",
+      "--checkpoint",
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/runs/final_smoke_v1/training/checkpoint.pt",
+      "--split",
+      "validation",
+      "--sample-count",
+      "2048",
+      "--output",
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/runs/final_smoke_v1/evaluation.json"
+    ],
+    [
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/.venv/bin/python",
+      "-m",
+      "phaseflow",
+      "export",
+      "--checkpoint",
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/runs/final_smoke_v1/training/checkpoint.pt",
+      "--output",
+      "/workspace/scratch/ae46757a28eb/spherical-hg-flow/runs/final_smoke_v1/export"
+    ]
+  ],
+  "completed": {
+    "joint": 0,
+    "residual": 80,
+    "warmup": 40
+  },
+  "cuda_optix_validation": "not_run",
+  "data": {
+    "coordinate_frame": "incident_z_particle_axis_x",
+    "coverage": "full_sphere",
+    "data_mode": "target_samples",
+    "fingerprint": "50304dd0b4c7c464d75c601170a7a5c40ff6b46223d2ffb4828879dbd52841ef",
+    "metadata": {
+      "analytic_moment_g": [
+        0.10406250000000002,
+        0.16572916666666665,
+        0.22656250000000003,
+        0.2865625
+      ],
+      "jitter_or_smoothing": "none",
+      "purpose": "synthetic_implementation_test_only_not_a_rainbow_simulation",
+      "quadrature_weights": "density_times_solid_angle_measure",
+      "seed": 17,
+      "source": "analytic_hg_mixture_plus_polynomial_lobe",
+      "target_sample_weights": "none"
+    },
+    "moment_g_targets": [
+      0.09636276803376764,
+      0.17461788379484514,
+      0.20422647774587235,
+      0.26143456040752167
+    ],
+    "num_conditions": 4,
+    "num_points": 8192,
+    "points_per_condition": [
+      2048,
+      2048,
+      2048,
+      2048
+    ],
+    "schema_version": 1
+  },
+  "evaluation": {
+    "base_g_mse": 0.002517291539260163,
+    "checkpoint": "/workspace/scratch/ae46757a28eb/spherical-hg-flow/runs/final_smoke_v1/training/checkpoint.pt",
+    "condition_weighting": "equal_per_condition",
+    "conditions": [
+      {
+        "base_g": 0.21126194298267365,
+        "base_g_error": -0.05017261742484802,
+        "condition_index": 3,
+        "fitted_hg_nll": 2.415065366514713,
+        "incident_cosine": 0.75,
+        "learned_moment_estimate": 0.2195701043429344,
+        "learned_moment_standard_error": 0.013715018864564386,
+        "nll": 2.3645422678045644,
+        "nll_improvement_over_fitted_hg": 0.050523098710148595,
+        "sample_count": 2048,
+        "sample_eval_log_pdf_max_abs_error": 1.944767176187412e-06,
+        "target_moment_g": 0.26143456040752167,
+        "wavelength_nm": 550.0
+      }
+    ],
+    "data_source": {
+      "analytic_moment_g": [
+        0.10406250000000002,
+        0.16572916666666665,
+        0.22656250000000003,
+        0.2865625
+      ],
+      "jitter_or_smoothing": "none",
+      "purpose": "synthetic_implementation_test_only_not_a_rainbow_simulation",
+      "quadrature_weights": "density_times_solid_angle_measure",
+      "seed": 17,
+      "source": "analytic_hg_mixture_plus_polynomial_lobe",
+      "target_sample_weights": "none"
+    },
+    "dataset_fingerprint": "50304dd0b4c7c464d75c601170a7a5c40ff6b46223d2ffb4828879dbd52841ef",
+    "density_measure": "solid_angle_sr",
+    "mean_fitted_hg_nll": 2.415065366514713,
+    "mean_nll": 2.3645422678045644,
+    "num_conditions": 1,
+    "reference_kind": "empirical_target_samples",
+    "scope": "held_out_conditions"
+  },
+  "export_bytes": 15492,
+  "final_metrics": {
+    "train": {
+      "base_g_mse": 0.0004780893864583726,
+      "condition_weighting": "equal_per_condition",
+      "conditions": [
+        {
+          "base_g": 0.11473846435546875,
+          "base_g_error": 0.018375696321701107,
+          "condition_index": 0,
+          "fitted_hg_nll": 2.5151884810422978,
+          "incident_cosine": -0.75,
+          "nll": 2.495625299026645,
+          "nll_improvement_over_fitted_hg": 0.019563182015652547,
+          "target_moment_g": 0.09636276803376764,
+          "wavelength_nm": 550.0
+        },
+        {
+          "base_g": 0.14911377429962158,
+          "base_g_error": -0.025504109495223554,
+          "condition_index": 1,
+          "fitted_hg_nll": 2.4803690463104764,
+          "incident_cosine": -0.25,
+          "nll": 2.4385782164955305,
+          "nll_improvement_over_fitted_hg": 0.04179082981494586,
+          "target_moment_g": 0.17461788379484514,
+          "wavelength_nm": 550.0
+        },
+        {
+          "base_g": 0.18310439586639404,
+          "base_g_error": -0.02112208187947831,
+          "condition_index": 2,
+          "fitted_hg_nll": 2.460015794935555,
+          "incident_cosine": 0.25,
+          "nll": 2.420193052700836,
+          "nll_improvement_over_fitted_hg": 0.039822742234719044,
+          "target_moment_g": 0.20422647774587235,
+          "wavelength_nm": 550.0
+        }
+      ],
+      "data_source": {
+        "analytic_moment_g": [
+          0.10406250000000002,
+          0.16572916666666665,
+          0.22656250000000003,
+          0.2865625
+        ],
+        "jitter_or_smoothing": "none",
+        "purpose": "synthetic_implementation_test_only_not_a_rainbow_simulation",
+        "quadrature_weights": "density_times_solid_angle_measure",
+        "seed": 17,
+        "source": "analytic_hg_mixture_plus_polynomial_lobe",
+        "target_sample_weights": "none"
+      },
+      "density_measure": "solid_angle_sr",
+      "mean_fitted_hg_nll": 2.485191107429443,
+      "mean_nll": 2.451465522741004,
+      "num_conditions": 3,
+      "reference_kind": "empirical_target_samples",
+      "scope": "in_sample_conditions"
+    },
+    "validation": {
+      "base_g_mse": 0.002517291539260163,
+      "condition_weighting": "equal_per_condition",
+      "conditions": [
+        {
+          "base_g": 0.21126194298267365,
+          "base_g_error": -0.05017261742484802,
+          "condition_index": 3,
+          "fitted_hg_nll": 2.415065366514713,
+          "incident_cosine": 0.75,
+          "nll": 2.3645422678045644,
+          "nll_improvement_over_fitted_hg": 0.050523098710148595,
+          "target_moment_g": 0.26143456040752167,
+          "wavelength_nm": 550.0
+        }
+      ],
+      "data_source": {
+        "analytic_moment_g": [
+          0.10406250000000002,
+          0.16572916666666665,
+          0.22656250000000003,
+          0.2865625
+        ],
+        "jitter_or_smoothing": "none",
+        "purpose": "synthetic_implementation_test_only_not_a_rainbow_simulation",
+        "quadrature_weights": "density_times_solid_angle_measure",
+        "seed": 17,
+        "source": "analytic_hg_mixture_plus_polynomial_lobe",
+        "target_sample_weights": "none"
+      },
+      "density_measure": "solid_angle_sr",
+      "mean_fitted_hg_nll": 2.415065366514713,
+      "mean_nll": 2.3645422678045644,
+      "num_conditions": 1,
+      "reference_kind": "empirical_target_samples",
+      "scope": "held_out_conditions"
+    }
+  },
+  "initial_metrics": {
+    "train": {
+      "base_g_mse": 0.027161880872201682,
+      "condition_weighting": "equal_per_condition",
+      "conditions": [
+        {
+          "base_g": 0.0,
+          "base_g_error": -0.09636276803376764,
+          "condition_index": 0,
+          "fitted_hg_nll": 2.53102424696929,
+          "incident_cosine": -0.75,
+          "nll": 2.531024256864592,
+          "nll_improvement_over_fitted_hg": -9.89530235528946e-09,
+          "target_moment_g": 0.09636276803376764,
+          "wavelength_nm": 550.0
+        },
+        {
+          "base_g": 0.0,
+          "base_g_error": -0.17461788379484514,
+          "condition_index": 1,
+          "fitted_hg_nll": 2.53102424696929,
+          "incident_cosine": -0.25,
+          "nll": 2.53102425517657,
+          "nll_improvement_over_fitted_hg": -8.207280188798904e-09,
+          "target_moment_g": 0.17461788379484514,
+          "wavelength_nm": 550.0
+        },
+        {
+          "base_g": 0.0,
+          "base_g_error": -0.20422647774587235,
+          "condition_index": 2,
+          "fitted_hg_nll": 2.53102424696929,
+          "incident_cosine": 0.25,
+          "nll": 2.531024256369827,
+          "nll_improvement_over_fitted_hg": -9.400537237524986e-09,
+          "target_moment_g": 0.20422647774587235,
+          "wavelength_nm": 550.0
+        }
+      ],
+      "data_source": {
+        "analytic_moment_g": [
+          0.10406250000000002,
+          0.16572916666666665,
+          0.22656250000000003,
+          0.2865625
+        ],
+        "jitter_or_smoothing": "none",
+        "purpose": "synthetic_implementation_test_only_not_a_rainbow_simulation",
+        "quadrature_weights": "density_times_solid_angle_measure",
+        "seed": 17,
+        "source": "analytic_hg_mixture_plus_polynomial_lobe",
+        "target_sample_weights": "none"
+      },
+      "density_measure": "solid_angle_sr",
+      "mean_fitted_hg_nll": 2.53102424696929,
+      "mean_nll": 2.5310242561369964,
+      "num_conditions": 3,
+      "reference_kind": "empirical_target_samples",
+      "scope": "in_sample_conditions"
+    },
+    "validation": {
+      "base_g_mse": 0.0683480293754741,
+      "condition_weighting": "equal_per_condition",
+      "conditions": [
+        {
+          "base_g": 0.0,
+          "base_g_error": -0.26143456040752167,
+          "condition_index": 3,
+          "fitted_hg_nll": 2.53102424696929,
+          "incident_cosine": 0.75,
+          "nll": 2.5310242549146356,
+          "nll_improvement_over_fitted_hg": -7.945345714688301e-09,
+          "target_moment_g": 0.26143456040752167,
+          "wavelength_nm": 550.0
+        }
+      ],
+      "data_source": {
+        "analytic_moment_g": [
+          0.10406250000000002,
+          0.16572916666666665,
+          0.22656250000000003,
+          0.2865625
+        ],
+        "jitter_or_smoothing": "none",
+        "purpose": "synthetic_implementation_test_only_not_a_rainbow_simulation",
+        "quadrature_weights": "density_times_solid_angle_measure",
+        "seed": 17,
+        "source": "analytic_hg_mixture_plus_polynomial_lobe",
+        "target_sample_weights": "none"
+      },
+      "density_measure": "solid_angle_sr",
+      "mean_fitted_hg_nll": 2.53102424696929,
+      "mean_nll": 2.5310242549146356,
+      "num_conditions": 1,
+      "reference_kind": "empirical_target_samples",
+      "scope": "held_out_conditions"
+    }
+  },
+  "model": {
+    "activation": "relu",
+    "g_hidden_features": [
+      16
+    ],
+    "g_limit": 0.999,
+    "hidden_features": [
+      24,
+      24
+    ],
+    "include_g_context": true,
+    "min_bin_height": 1e-05,
+    "min_bin_width": 1e-05,
+    "min_derivative": 0.0001,
+    "num_bins": 8,
+    "num_coupling_layers": 2,
+    "one_blob_bins": 8,
+    "wavelength_max_nm": 720.0,
+    "wavelength_min_nm": 380.0
+  },
+  "native": {
+    "comparison": "FP32_weights_with_double_arithmetic",
+    "compiler": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0",
+    "max_abs_direction_error": 2.7755575615628914e-16,
+    "max_abs_eval_log_pdf_error": 2.886579864025407e-15,
+    "max_abs_sample_log_pdf_error": 5.329070518200751e-15,
+    "queries": 8,
+    "status": "passed"
+  },
+  "parameters": 3779,
+  "purpose": "synthetic_implementation_validation_not_rainbow_physics",
+  "runtime": {
+    "device": "cpu",
+    "dtype": "float32",
+    "numpy_version": "2.5.3",
+    "python_version": "3.12.14",
+    "torch_version": "2.8.0+cpu"
+  },
+  "source_sha256": "b48ef75e7a8d85d0460ca425da562214b8d7def94c5c6188bc88690d8fff2909",
+  "split": {
+    "train": [
+      0,
+      1,
+      2
+    ],
+    "validation": [
+      3
+    ]
+  },
+  "timing_scope": "CPU CLI including imports, setup, evaluations and checkpoint writes",
+  "training": {
+    "batch_size": 256,
+    "checkpoint_every": 20,
+    "cpu_threads": 1,
+    "deterministic": true,
+    "device": "cpu",
+    "dtype": "float32",
+    "eval_batch_size": 2048,
+    "eval_every": 20,
+    "grad_clip_norm": 10.0,
+    "joint_steps": 0,
+    "lr_flow": 0.002,
+    "lr_g": 0.003,
+    "lr_joint": 0.0001,
+    "moment_regularization": 1.0,
+    "point_sampling": "mass",
+    "residual_steps": 80,
+    "seed": 415,
+    "validation_fraction": 0.25,
+    "warmup_steps": 40
+  },
+  "training_cli_wall_seconds": 2.7444928649993017
+}

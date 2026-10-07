@@ -1,0 +1,11 @@
+# Exact Python package versions used with Python 3.12 for recorded CPU validation.
+# Install torch from the official CPU wheel index for that validation.
+torch==2.8.0
+zuko==1.6.0
+numpy==2.5.3
+safetensors==0.8.0
+pytest==9.1.1
+ruff==0.16.10
+build==1.6.1
+setuptools==78.1.0
+wheel==0.48.0

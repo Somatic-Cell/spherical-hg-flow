@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "model": {
+    "wavelength_min_nm": 380.0,
+    "wavelength_max_nm": 720.0,
+    "g_limit": 0.999,
+    "g_hidden_features": [16],
+    "hidden_features": [24, 24],
+    "num_coupling_layers": 2,
+    "num_bins": 8,
+    "one_blob_bins": 8,
+    "min_bin_width": 0.00001,
+    "min_bin_height": 0.00001,
+    "min_derivative": 0.0001,
+    "activation": "relu",
+    "include_g_context": true
+  },
+  "training": {
+    "seed": 415,
+    "device": "cpu",
+    "dtype": "float32",
+    "batch_size": 256,
+    "warmup_steps": 40,
+    "residual_steps": 80,
+    "joint_steps": 0,
+    "lr_g": 0.003,
+    "lr_flow": 0.002,
+    "lr_joint": 0.0001,
+    "moment_regularization": 1.0,
+    "validation_fraction": 0.25,
+    "point_sampling": "mass",
+    "eval_every": 20,
+    "checkpoint_every": 20,
+    "eval_batch_size": 2048,
+    "grad_clip_norm": 10.0,
+    "deterministic": true,
+    "cpu_threads": 1
+  }
+}
