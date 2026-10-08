@@ -22,10 +22,12 @@ CDF サンプル点群，NF の PDF を同じ座標とアスペクト比で比�
 | 円周 | 全周を保持し，周期境界で slope を共有，conditioner も周期化 |
 | 対称性 | 鏡映をパラメータ共有で表現；上下の入射を同一視しない |
 | 学習 | CDF から固定点群を生成し，立体角に関する NLL で最尤学習 |
-| 実行 | CUDA が既定；固定点群を GPU に置き，MLP は FP32，HG と RQS は FP64 |
+| 実行 | CUDA が既定；固定点群を GPU に置き，MLP・HG・RQS・方向は FP32 |
 | 評価 | 独立な validation / test 点群，HG と NF の forward KL，NF サンプルによる重要度 ESS |
 | 可視化 | 保存 CDF の PDF，CDF 点群，NF PDF；ソルバ座標で共通の軸・対数色尺度 |
 | 保存 | 推論・評価用の最良重みと，optimizer / RNG を含む再開用 checkpoint を分離 |
+| 監視 | TensorBoard，JSONL，NLL / KL・勾配・学習率の learning curves |
+| 精度比較 | 同じ重みの FP64 参照と FP16 重み丸めを固定点上で比較 |
 
 円周・区間 RQS は Rezende et al. (2020),
 [*Normalizing Flows on Tori and Spheres*](https://proceedings.mlr.press/v119/rezende20a.html)
@@ -36,28 +38,46 @@ CDF サンプル点群，NF の PDF を同じ座標とアスペクト比で比�
 
 ## セットアップ
 
-Python 3.12 と，実行環境に対応する CUDA 版 PyTorch を使用します．以下は
-PyTorch 2.8.0 / CUDA 12.8 wheel を使う Windows PowerShell の例です．
-仮想環境の有効化を行わず，その実行ファイルを直接呼びます．
+Windows のバッチは **Python 3.14 / PyTorch 2.14.1 / CUDA 13.0 wheel** を対象とします．
+公式の [cu130 wheel 一覧](https://download.pytorch.org/whl/cu130/torch/) に
+Python 3.14 / Windows x64 用ビルドがあります．既存の CUDA 版 PyTorch を使います．
+インストール先・学習・監視の Python は，すべて `environment.bat` で一度だけ指定します．
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --force-reinstall torch==2.14.1 --index-url https://download.pytorch.org/whl/cu130
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.version.cuda); assert torch.cuda.is_available(), 'CUDA is unavailable'; print(torch.cuda.get_device_name(0))"
+```bat
+set "PHASEFLOW_PYTHON=py"
+set "PHASEFLOW_PYTHON_ARGS=-3.14"
 ```
 
-`--force-reinstall` は，以前のセットアップで同じバージョン番号の CPU wheel が
-入っている場合にも，指定した CUDA wheel へ入れ替えるために付けています．
-GPU とドライバに合うビルドは [PyTorch 公式案内](https://pytorch.org/get-started/locally/) と
-[2.8.0 のインストール一覧](https://pytorch.org/get-started/previous-versions/#v280) で確認してください．
+既存の仮想環境を使う場合は，上の二行を次のように変更します．
+
+```bat
+set "PHASEFLOW_PYTHON=C:\path\to\your\environment\Scripts\python.exe"
+set "PHASEFLOW_PYTHON_ARGS="
+```
+
+リポジトリ直下で実行してください．別のバッチから呼ぶ場合は `call` を付けます．
+
+```bat
+call execute.bat setup
+call execute.bat check
+```
+
+`setup` は同じ Python へ本プロジェクトと `.[dev,monitor]` を editable install します．
+既存の torch は正確なバージョンで指定して保持し，torch がない場合だけ要求する cu130 wheel を
+インストールします．異なる既存ビルドを黙って入れ替えません．通常実行時にネットワーク経由の
+インストールは行いません．`check` は実際の `sys.executable`，`phaseflow.__file__`，GPU を表示します．
+本プロジェクトが別の Python や別 checkout に入っていた場合は，CDF 読み込み前に手順を示して止まります．
+
+従来の `run_rainbow_python314.bat` も同じ `execute.bat` へ転送します．
+`execute.bat` に別の `.venv\Scripts\python.exe` を直接書く必要はありません．
 既定設定は `cuda` です．CUDA が利用できなければ理由を表示して停止し，自動的に CPU へ
 切り替えません．複数の GPU がある場合は `--device cuda:1` のように選べます．
 Zuko は既存プロジェクトと同じ **1.6.0** を使い，ライブラリ全体の fork は不要です．
 
-Linux では `python -m venv .venv` の後に `source .venv/bin/activate` を実行し，
-同じ `pip install` と，以下の `phaseflow` コマンドを使用できます．
-`requirements-validation.txt` は CPU の回帰検証に用いる固定バージョンの一覧です．
+Linux では使用する CUDA 版 PyTorch を入れた同じ Python から `python -m pip install -e ".[dev,monitor]"`
+を実行し，`python -m phaseflow` を使います．ライブラリ自体の下限は Python 3.12 です．
+`requirements-validation.txt` は以前の CPU 回帰検証の固定バージョン一覧で，Windows の
+Python 3.14 / cu130 環境を上書きするためのファイルではありません．
 CPU の数学・小規模テストを実行する場合だけ，対応する CPU 版 PyTorch と明示的な
 `--device cpu` を使います．CPU での検証結果を CUDA の検証結果とは扱いません．
 
@@ -73,15 +93,13 @@ CPU の数学・小規模テストを実行する場合だけ，対応する CPU
 | `theta_given_phi_cdf.npy` | 方位角セルごとの条件付き CDF |
 | `u_edges.npy` | `u=(1-cos(theta))/2` の実際のセル境界 |
 
-```powershell
-$record = 'D:\rainbow\output\records\i0000\w0000'
-.\.venv\Scripts\phaseflow.exe inspect-rainbow --record $record
-.\.venv\Scripts\phaseflow.exe train-rainbow --record $record --config configs/rainbow_single.json --output runs/rainbow_single
-.\.venv\Scripts\phaseflow.exe evaluate-rainbow --record $record --checkpoint runs/rainbow_single/best.pt --samples 65536 --seed 2026 --output runs/rainbow_single/evaluation.json
+```bat
+call execute.bat
 ```
 
-パスは実際に生成したレコードに置き換えてください．`i0000/w0000` はパス構造の例で，
-推奨する物理条件を意味しません．最初は波長と入射方向を両方固定し，
+`execute.bat` の `RECORD`，`CONFIG`，`OUTPUT`，`DEVICE` を実験に合わせて変更します．
+現在の `RECORD` は push された `..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800`
+を保持しています．実験ごとに空の `OUTPUT` を指定してください．最初は波長と入射方向を両方固定し，
 この一条件について CDF サンプラ，HG 基底，残差学習と独立評価を確認します．
 
 `configs/rainbow_single.json` は再現可能な出発点です．実データで最適化済みの設定ではありません．
@@ -95,16 +113,100 @@ GPU に一度転送します．minibatch の抽出と最適化は GPU 上で行�
 CPU → GPU コピーを避けます．固定 pool が VRAM に収まる点数を指定してください．
 
 提供設定の `training.dtype="float32"` は MLP の重みと計算精度です．
-`model.spline_dtype="float64"` により，HG の確率座標，RQS の制約・逆写像・Jacobian，
-方向と log PDF は FP64 に保ちます．外部 `g` も丸めません．MLP まで FP64 に揃えた比較は
-`training.dtype="float64"` で実行できます．TF32，AMP / FP16 の暗黙の有効化はありません．
+`model.spline_dtype="model"` と `model.geometry_dtype="model"` により，HG・RQS・方向と log PDF も
+FP32 にします．極付近の微小角度は方向の横成分から計算し，`z` が 1 に丸まっただけでは
+その情報を捨てません．外部 `g` の原値は metadata に保持し，実行用定数をその値から作ります．
+CDF と教師の統計集計は FP64 のままです．TF32，AMP / FP16 は暗黙に有効化しません．
+
+短い学習を終えたら，同じ重みで数値精度と FP16 重み丸めの影響を評価します．
+次のバッチは `execute.bat` の `RECORD` / `OUTPUT` / `DEVICE` をそのまま使います．
+
+```bat
+call execute.bat precision
+```
+
+`precision.json` は同じ評価点での NLL / KL 差と標準誤差，log PDF 誤差分位点，
+同じ乱数からの方向差，sample 時と eval 時の PDF 整合性を記録します．
+`fp16_weights_vs_float32` は FP16 に丸めた重みを FP32 に戻して評価する比較です．
+CoopVec の積和・活性化・丸め・行列レイアウトを再現した native 検証ではありません．
 
 学習率，点数，batch size と更新回数は以前の出発点を維持しています．特定 GPU で速度を
 最適化したハイパーパラメータではありません．CPU は小規模な正しさの検証用として残しています．
 
+### 学習中の loss を監視する
+
+学習とは別の CMD ウィンドウで実行します．
+
+```bat
+call monitor.bat
+```
+
+[http://127.0.0.1:6006](http://127.0.0.1:6006) で `runs/` 以下の実験を比較できます．
+既定の `log_every=20` 更新で，各更新の生 NLL・勾配ノルム・学習率をまとめて反映します．
+`eval_every=100` 更新で独立な validation と固定 training subset を評価します．
+`nll/train_minibatch`，`nll/train_fixed_subset`，`nll/validation`，`kl/validation` と
+`kl_standard_error/validation` が主な監視項目です．HG baseline，処理点数，経過時間も記録します．
+勾配ノルムは clipping 前です．速度表示はその起動の評価・保存等を含む平均で，GPU kernel のベンチマークではありません．
+
+`history.jsonl` は学習中から読み取れ，`history.json` は checkpoint 保存時の確定履歴です．
+既定設定では終了・制御された中断の後に `learning_curves.png` を保存します．
+図は次のコマンドでも再生成できます．
+
+```bat
+call environment.bat
+"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-history ^
+  --history "runs\rainbow_single_gpu\history.jsonl" ^
+  --output "runs\rainbow_single_gpu\learning_curves.png"
+```
+
+連続密度の NLL は負になり得るため，loss と KL の縦軸は線形です．表示のためのクリップや
+平滑化は保存データに加えません．KL の誤差棒は ±1.96 Monte Carlo SE で，seed 間のばらつきではありません．
+TensorBoard が不要なら `training.tensorboard=false` としても JSON / JSONL は残ります．
+[`SummaryWriter` の公式説明](https://docs.pytorch.org/docs/stable/tensorboard.html) も参照してください．
+
+### 単一 CDF での探索
+
+最初は全方向を含む一条件を用い，LR → 学習点数 → モデル容量の順に絞ります．
+`training.data_seed=2026` を固定し，`training.seed` だけを変えれば，同じ CDF 点群で
+初期化・minibatch の反復実験ができます．N を変えると現 sampler では小さい点群が大きい点群の prefix になり，
+その性質をテストしています．条件エンコーディングは少数の入射角・波長を含む次段階で比較します．
+探索候補，評価指標，鏡映の根拠と独自設計の範囲は [実験計画](docs/SINGLE_CDF_EXPERIMENTS.md) にまとめています．
+
+### 学習率 A → 点数 B をバッチで自動比較する
+
+`sweep.bat` の `RECORD` を，動作確認済みの `execute.bat` と同じ値にします．
+`EXISTING_RUN` は既に学習した実験のディレクトリ，`OUTPUT` は新しい探索の保存先です．
+最初のコマンドは既存の `best.pt` について，120〜150 度の教師確率質量と
+教師 / HG / NF の角度断面図を追加します．学習は行いません．
+
+```bat
+call sweep.bat diagnose
+call sweep.bat
+```
+
+探索は A で LR = `3e-4, 1e-3, 3e-3` を N = `65536` で比較し，
+最小の **validation NLL** を得た LR で B の N = `4096, 16384, 65536, 262144` を比較します．
+モデル，各 seed，batch size，更新回数と評価点群は基準設定を共有します．
+B の N = `65536` は選ばれた A の同一実験を再利用するので，既定では 6 回の学習です．
+学習損失は既存の NLL のままです．
+
+結果は `runs/rainbow_sweep_gpu/summary.csv`，`summary.md`，`summary.json`，`summary.png` に集計し，
+LR の選択根拠を `selection.json` に保存します．各試行には学習曲線，TensorBoard，
+既存の 3 種類のマップと角度診断が残ります．別の CMD で次を実行すると全試行を監視できます．
+
+```bat
+call monitor.bat runs\rainbow_sweep_gpu
+```
+
+同じ `sweep.bat` を再実行すると，設定・データ・コード・実行環境が一致する探索を再開します．
+同じ保存先へ複数プロセスを同時起動しないでください．設定を変える場合は新しい `OUTPUT` にします．
+既定の B は更新回数を固定する比較で，epoch 数を固定する比較ではありません．
+[探索手順・集計の読み方・135 度付近の診断と論文の損失](docs/SWEEP_AND_RAINBOW_LOSS.md)
+に詳しい仕様を記載しています．
+
 ### 完了後の 3 種類のマップ
 
-予定した更新が完了すると，validation で選んだ最良重みから `runs/rainbow_single/plots/` に
+予定した更新が完了すると，validation で選んだ最良重みから `runs/rainbow_single_gpu/plots/` に
 次の図を自動保存します．
 
 | ファイル | 内容 |
@@ -125,8 +227,12 @@ NF フレームの方位角はソルバ座標へ戻して描き，教師の厳�
 
 図だけを再生成することもできます．このコマンドも NF の評価には既定で CUDA を使います．
 
-```powershell
-.\.venv\Scripts\phaseflow.exe plot-rainbow --record $record --checkpoint runs/rainbow_single/best.pt --output runs/rainbow_single/plots --samples 32768 --seed 2027
+```bat
+call environment.bat
+"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-rainbow ^
+  --record "..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800" ^
+  --checkpoint "runs\rainbow_single_gpu\best.pt" ^
+  --output "runs\rainbow_single_gpu\plots" --samples 32768 --seed 2027
 ```
 
 `--write-pdf` で PDF 形式も保存します．学習時の自動出力を省略する場合は `--no-plots` を
@@ -135,16 +241,18 @@ NF フレームの方位角はソルバ座標へ戻して描き，教師の厳�
 
 ### 中断して再開する
 
-```powershell
-.\.venv\Scripts\phaseflow.exe train-rainbow --record $record --config configs/rainbow_single.json --output runs/rainbow_resume --max-steps-this-run 100
-.\.venv\Scripts\phaseflow.exe train-rainbow --record $record --config configs/rainbow_single.json --output runs/rainbow_resume --resume runs/rainbow_resume/checkpoint.pt
+```bat
+call execute.bat resume
 ```
 
 再開には `checkpoint.pt` を指定します．`best.pt` は validation で選んだ評価・推論用の重みで，
 optimizer と乱数状態を引き継ぐ再開用ファイルではありません．
 再開時は同じ入力ファイルと設定を用い，別の実験では出力ディレクトリも分けます．
-予定更新の途中で停止した場合には最終 test と自動図はまだ作られません．以前の version 2
-checkpoint は評価・推論用に読み込めますが，更新した乱数方式で厳密な途中再開は行いません．
+途中停止の時点では最終 test と三種類の PDF 比較図を作りません．学習曲線の履歴は残ります．
+制御された停止には `train-rainbow --max-steps-this-run 200` を使い，予定した `steps` は変更しません．
+学習を延長する可能性がある場合は，初めから例えば `steps=4000` として 2000 更新で一時停止し，
+同じ設定で再開します．旧 version 2 / 3 checkpoint は評価・推論用に読み込めますが，
+FP32 化した v0.4 の厳密な再開には新しい version 4 checkpoint を使います．
 
 ## PDF と座標の規約
 
@@ -160,8 +268,9 @@ NF の局所座標に明示的に合わせます．詳細は
 ## 検証範囲と今後の接続
 
 この変更では，合成した Rainbow 形式のレコードを用いてデータ契約と学習経路を検証します．
-実行した検査と合成教師での数値結果は [GPU 経路・可視化の検証報告](reports/GPU_PLOTS_VALIDATION.md)
-に記録します．[v0.2 のアダプタ・学習報告](reports/RAINBOW_VALIDATION.md) は以前の実装の記録です．
+実行した検査と合成教師での数値結果は [FP32・監視の検証報告](reports/FP32_MONITORING_VALIDATION.md)
+に記録します．[v0.3 の GPU 経路・可視化報告](reports/GPU_PLOTS_VALIDATION.md) と
+[v0.2 のアダプタ・学習報告](reports/RAINBOW_VALIDATION.md) は以前の実装の記録です．
 **実際のソルバ出力での近似精度，ソルバの物理的収束，CUDA / OptiX 上の速度は別の検証対象です．**
 新しい単一条件モデルの checkpoint は，旧 `phaseflow export` / `model.pflow` 形式とは互換ではありません．
 旧 export が新モデルを誤って書き出すことは拒否します．
@@ -176,6 +285,9 @@ OptiX 推論は今後の実装範囲です．今回のモデルから条件間�
 | `src/phaseflow/rainbow.py` | CDF 読み込み・検証，教師 sample / PDF，フレーム変換 |
 | `src/phaseflow/single_condition.py` | 単一条件の学習・評価・再開 |
 | `src/phaseflow/plotting.py` | ソルバ座標に揃えた教師 PDF・CDF 点群・NF PDF の描画 |
+| `src/phaseflow/monitoring.py` | TensorBoard / JSONL の学習監視・履歴からの図の再生成 |
+| `src/phaseflow/precision.py` | 同じ重みの FP32 / FP64 比較・FP16 重み丸めの診断 |
+| `environment.bat`, `execute.bat`, `monitor.bat` | 共通 Python によるセットアップ・学習・監視 |
 | `src/phaseflow/sphere_model.py` | 外部 HG と円周・区間 coupling のモデル |
 | `src/phaseflow/sphere_splines.py` | 円周境界と鏡映のパラメータ制約 |
 | `src/phaseflow/hg.py`, `geometry.py` | HG と局所方向の数値処理 |
@@ -190,7 +302,8 @@ native 推論が実装されたことを意味しません．
 GPU を利用できる環境では，次の検査で CUDA 上の精度・学習・再開・描画の評価経路を確認します．
 最初に CUDA が使えることを必ず確認し，GPU テストが全て skip された結果を合格と扱いません．
 
-```powershell
-.\.venv\Scripts\python.exe -c "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; print(torch.cuda.get_device_name(0))"
-.\.venv\Scripts\python.exe -m pytest -m cuda -q
+```bat
+call environment.bat
+"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -c "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; print(torch.cuda.get_device_name(0))"
+"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m pytest -m cuda -q
 ```

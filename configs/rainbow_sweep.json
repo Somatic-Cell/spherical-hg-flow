@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "sweep": {
+    "learning_rates": [0.0003, 0.001, 0.003],
+    "train_samples": [4096, 16384, 65536, 262144],
+    "baseline_train_samples": 65536
+  },
+  "diagnostics": {
+    "enabled": true,
+    "theta_band_degrees": [120.0, 150.0],
+    "source_phi_degrees": [-90.0, 0.0, 90.0],
+    "eval_batch_size": 4096,
+    "dpi": 140
+  }
+}

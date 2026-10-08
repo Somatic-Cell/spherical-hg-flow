@@ -219,6 +219,12 @@ conditioner は，方位角自体の数値に代えて周期的な特徴を受�
 
 ### 鏡映対称性のパラメータ共有
 
+物理的な鏡映対称性や，不変な基底と equivariant な写像から不変な密度を作る原理は既存です．
+後者は [Köhler et al. (2020), Theorem 1](https://proceedings.mlr.press/v119/kohler20a/kohler20a.pdf)
+を参照してください．以下の HG 座標・反転 RQS パラメータ共有・偶関数 conditioner の組合せは，
+その原理を今回のモデルに適用するために加えた具体的な設計です．Rezende et al. の論文に
+この雨滴用の構成がそのまま書かれているわけではなく，新規性を確立したとの主張も行いません．
+
 既定値 `mirror_symmetry=true` では，`num_bins=2H` を全周の bin 数とします．
 独立な `H` 個の幅・高さから，それぞれ
 
@@ -256,6 +262,10 @@ $$
 凸結合します．厳密に `eta=±1` なら，円周変換は恒等写像で，`t` の conditioner も
 方位角に依存しません．上下それぞれの入射条件で方位角一様な密度になります．
 
+軸入射での方位角一様性は物理的な要請ですが，非軸入射まで上記の凸結合で減衰させる形は
+本プロジェクトの設計選択です．例えば幅には `(1-A)/K` の下限が加わり，非軸入射でも
+表現族を制限します．この gate は，物理から一意に導かれた最適形でも原論文の指定でもありません．
+
 出射の極は座標が退化する零測度の点です．モデルの明示的な極への PDF クエリは
 NF 座標の `phi=0` を代表値にします．教師のセル PDF はソルバ座標の `phi_s=0` を代表値にします．
 この代表値の違いは積分・学習対象に影響しませんが，極での点比較は滑らかな極限の検証にはなりません．
@@ -286,8 +296,11 @@ NF 座標の `phi=0` を代表値にします．教師のセル PDF はソルバ
 | Validation / checkpoint 間隔 | 100 更新 |
 | Device | CUDA；利用できなければ停止 |
 | Conditioner の重み・MLP | float32 |
-| HG・方向・RQS・返却 log PDF | float64 |
-| Seed | 415 |
+| HG・方向・RQS・返却 log PDF | float32 |
+| 教師 CDF・教師 log PDF・評価統計の reduction | float64 |
+| Live log 間隔 / TensorBoard | 20 更新 / 有効 |
+| 固定 training monitor subset | 学習 pool の先頭 8,192 点まで |
+| 初期化・minibatch seed / data seed | 415 / 2026 |
 
 Bin 下限は数値上の設定であると同時に表現可能な集中度を制限します．値を変更した比較では
 他の設定とともに記録します．強い前方散乱があることだけを理由に，教師の前方領域を削除しません．
@@ -300,26 +313,41 @@ Bin 下限は数値上の設定であると同時に表現可能な集中度を�
 ### GPU 上の学習経路
 
 設定の `training.device` は `cuda`，`training.dtype` は `float32`，
-`model.spline_dtype` は `float64` が出発点です．CUDA が利用できない場合に，
+`model.spline_dtype` と `model.geometry_dtype` は `model` が出発点です．CUDA が利用できない場合に，
 自動的に CPU へ切り替える処理はありません．`cuda:1` などで使用する GPU を選べます．
 CPU 上の小規模な数学・統合テストには `--device cpu` を明示します．
 
 保存 CDF の読み込み・検証と教師点群の初回生成は CPU 上で行います．生成した固定学習点群と
 validation 点群を選択した device に一度転送し，学習時の minibatch の抽出も同じ device 上で
 行います．更新のたびに NumPy の点群を切り出して CPU から GPU へ転送しません．
-したがって固定点群は VRAM に収まる必要があります．学習・validation の方向と PDF 用の
-FP64 tensor だけなら，合わせて概ね `32 * (train_samples + validation_samples)` byte です．
-これに MLP，optimizer，batch の中間値などのメモリが加わります．
+したがって固定点群は VRAM に収まる必要があります．既定の方向は一点 12 byte の FP32，
+validation と固定 training monitor subset の教師 log PDF は一点 8 byte の FP64 です．
+これに MLP，optimizer，batch と評価統計の中間値などのメモリが加わります．
 
-損失と勾配の有限性を device 上で記録し，validation・checkpoint・中断の境界でまとめて
+損失と勾配の有限性を device 上で記録し，log・validation・checkpoint・中断の境界でまとめて
 CPU 側へ取り出します．不正な更新を検出した場合は更新位置を報告し，失敗した重みを
 成功した checkpoint として保存しません．パラメータごとに CPU と同期する検査は避けます．
 CUDA の Adam は foreach を使い，TF32 と AMP / FP16 は自動的に有効化しません．
 GPU 向けのデータ移動・実行構成ですが，特定 GPU での速度を測定した設定ではありません．
 
-教師点群と proposal の乱数は NumPy PCG64 と `SeedSequence([seed, stream_id])` から作ります．
+v0.4 の FP32 経路では，極付近の `1-mu` / `1+mu` を方向の横成分から安定に求めます．
+HG の逆写像も端点までの距離を保持して方向を再構成します．`z` が FP32 で 1 に丸まったこと
+だけを理由に，非零の横成分を消しません．`hg.g` の元の Python binary64 値は metadata と
+checkpoint に保持し，`1-g` と `1+g` の実行用定数をその値から直接 FP32 化します．
+g のクリップ・教師点群の jitter・密度の floor は加えていません．
+
+`geometry_dtype` を持たない旧 checkpoint は従来の FP64 幾何計算を保持します．
+新方式の FP64 参照は両 dtype を `model` としたまま重みと入力を FP64 にして作ります．
+`precision-rainbow` は同じ固定点で FP32 / FP64 と FP16 重み丸めを比較します．
+FP16 重みを FP32 に戻して行う計算は重み丸め誤差を調べるもので，OptiX CoopVec の実行を
+再現するものではありません．既存の native export は引き続き旧 v1 モデル専用です．
+
+教師点群と proposal の乱数は NumPy PCG64 と `SeedSequence([data_seed, stream_id])` から作ります．
 train，validation，test，proposal は独立な stream です．minibatch は別の stream から得た seed を
 持つ，選択 device 上の専用 `torch.Generator` で抽出し，その状態を checkpoint に保存します．
+提供設定は `data_seed=2026` を固定し，初期化・minibatch の `seed=415` と分けています．
+`data_seed=null` は従来の `seed` と同じ値を使います．モデル反復で `seed` だけを変更すれば
+同じ教師点・validation / test で比較できます．N の違いによる教師点の prefix 一致も検査しています．
 CPU と CUDA の乱数列が一致するとは仮定しません．教師点群は 52-bit midpoint grid 上の
 開区間一様値から生成するので，乱数の端点を丸めて回避する処理はありません．
 
@@ -333,7 +361,11 @@ CPU と CUDA の乱数列が一致するとは仮定しません．教師点群�
 | `config.json` | 適用したモデル・学習設定 |
 | `data_summary.json` | 条件，フレーム，生成情報，入力 4 ファイルの SHA-256，CDF 検証結果 |
 | `sample_split.json` | stream，点数，学習・validation 点群の hash |
-| `history.json` | 更新時の損失と，予定された validation の履歴 |
+| `history.json` | checkpoint 保存時の全更新の NLL・勾配・予算と予定評価の履歴 |
+| `history.jsonl` | 既定 20 更新ごとに追記する同じ数値履歴；学習中にも読める |
+| `monitoring.jsonl` | 起動単位の経過時間・処理点数・速度；数値履歴とは分離 |
+| `tensorboard/` | 任意の TensorBoard scalar event；提供設定では有効 |
+| `learning_curves.png` | NLL・KL と Monte Carlo 誤差・勾配・学習率の図 |
 | `checkpoint.pt` | 最新の更新地点，optimizer，RNG，最良重みを含む再開用状態 |
 | `best.pt` | validation で選択した評価・推論用モデル |
 | `metrics.json` | 初期・最良 validation，完了フラグ，完了後の最終 test |
@@ -343,9 +375,15 @@ CPU と CUDA の乱数列が一致するとは仮定しません．教師点群�
 照合してから，点群と乱数状態を復元します．別のコード・device・設定へ移ることを，
 同じ実験の厳密な再開として扱いません．`best.pt` は optimizer を含まないので再開できません．
 checkpoint は primitive / tensor の状態を `weights_only=True` で読み込みます．
-新しい再開状態は checkpoint version 3 です．以前の version 2 は，保存されたモデルの
-精度設定を保持した評価・推論用として読み込めます．minibatch の乱数方式と実装が変わっているため，
-version 2 からの再開を同じ実験の厳密な続行とは扱いません．
+新しい再開状態は checkpoint version 4 です．以前の version 2 / 3 は，保存されたモデルの
+精度設定を保持した評価・推論用として読み込めます．計算・監視・状態の仕様が変わっているため，
+旧 version からの再開を同じ実験の厳密な続行とは扱いません．
+
+再開時は checkpoint 内の履歴で JSONL を作り直し，TensorBoard も `purge_step=0` を使って
+その scalar 履歴を再送します．異常終了の直前に log へ出たが checkpoint にはない更新を，
+再開後の結果に混在させません．時間計測は起動ごとに分け，bit 単位で一致する履歴へは含めません．
+`training.tensorboard=false` でも JSON / JSONL の監視は使えます．有効時に TensorBoard が
+未インストールなら，学習前にセットアップ手順を示して停止します．
 
 PyTorch / CUDA の再現性には実行環境による範囲があります．この実装は同じ設定・入力・実装・
 記録環境での再開を検証対象とし，別の GPU や PyTorch バージョンでの同一乱数列・bit 単位の
@@ -486,11 +524,11 @@ with RainbowReference("path/to/one_record") as reference:
     model = SingleConditionSphereFlow(
         hg_g=reference.g,
         incident_cosine=float(reference.condition[1]),
-        config=SphereFlowConfig(spline_dtype="float64"),
+        config=SphereFlowConfig(spline_dtype="model", geometry_dtype="model"),
         dtype=torch.float32,
         device="cuda",
     )
-    model_log_pdf = model.log_prob(torch.as_tensor(directions, device="cuda"))
+    model_log_pdf = model.log_prob(torch.as_tensor(directions, dtype=torch.float32, device="cuda"))
     sampled, sampled_log_pdf = model.sample_and_log_prob(4096)
     teacher_at_model_samples = reference.log_prob(sampled.detach().cpu().numpy())
 ```
@@ -510,16 +548,15 @@ memory map は使用できません．metadata は copy として取得でき，
 
 ## 数値精度と今後の範囲
 
-HG，方向，返却する log PDF は float64 です．ネットワークの重み・MLP の計算精度は
-`training.dtype`，RQS の計算精度は `model.spline_dtype` で分けて指定します．
-提供する GPU 設定ではそれぞれ `float32` と `float64` です．conditioner 用の特徴を作ってから
-MLP の dtype へ変換し，得られた logits を spline の dtype に戻して正のパラメータ制約・
-RQS・逆写像・Jacobian を計算します．方向を FP32 に落として前方の角度差を失う処理はしません．
+v0.4 の提供設定では，重み・MLP・HG・方向・RQS・返却する log PDF は FP32 です．
+`training.dtype="float32"`，`model.spline_dtype="model"`，`model.geometry_dtype="model"`
+を明示します．教師 CDF，教師 log PDF と統計の集計は FP64 です．極付近は方向の横成分と
+端点までの距離を保持し，`z` の丸めだけで微小角度を消さない計算を使います．
 
-`SphereFlowConfig` 自体の省略時の `spline_dtype="model"` は，spline の精度をモデルの
-重みと同じにする選択肢です．旧 checkpoint の意味を保つための既定値で，提供設定ファイルでは
-明示的に `float64` を指定します．MLP も FP64 に揃えた精度比較には `training.dtype="float64"`
-を使います．どちらの精度設定も checkpoint に保存します．
+旧設定・checkpoint の `geometry_dtype` 省略時は FP64 幾何計算として解釈します．
+FP64 参照を作る場合は両 dtype を `model` とした同じ重みを FP64 に変換し，固定点で比較します．
+FP64 で別に学習する場合は `training.dtype="float64"` とし，学習軌跡も変わる別実験として扱います．
+重み，幾何と spline の精度設定は checkpoint に保存します．
 
 外部 `g` は Python の binary64 値として保存し，ネットワークを `.float()` にしても値を
 丸めたり `g_limit` に置き換えたりしません．NF の逆変換に渡す開区間一様値は，実際の spline 精度が

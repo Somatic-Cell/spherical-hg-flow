@@ -1,0 +1,35 @@
+{
+  "candidates": [
+    {
+      "learning_rate": 0.0003,
+      "run_directory": "stage_a/lr_0.0003",
+      "selected_step": 20,
+      "trial_id": "A_lr_0.0003",
+      "validation_kl": 0.11661573239398598,
+      "validation_nll": 2.4491953381802887
+    },
+    {
+      "learning_rate": 0.001,
+      "run_directory": "stage_a/lr_0.001",
+      "selected_step": 20,
+      "trial_id": "A_lr_0.001",
+      "validation_kl": 0.08043454956059753,
+      "validation_nll": 2.4130141553469002
+    },
+    {
+      "learning_rate": 0.003,
+      "run_directory": "stage_a/lr_0.003",
+      "selected_step": 15,
+      "trial_id": "A_lr_0.003",
+      "validation_kl": 0.04592683185619711,
+      "validation_nll": 2.3785064376425
+    }
+  ],
+  "manifest_sha256": "2dba945ab03d5324672bec3d3ae835fef57055200c766ec9d9982d2204d7b104",
+  "rule": "minimum best_validation.nll in A; exact ties use smaller learning_rate",
+  "schema": "phaseflow.sequential_sweep.v1",
+  "selected_learning_rate": 0.003,
+  "selected_trial_id": "A_lr_0.003",
+  "selected_validation_nll": 2.3785064376425,
+  "test_used": false
+}

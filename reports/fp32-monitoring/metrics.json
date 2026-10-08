@@ -1,0 +1,102 @@
+{
+  "best_validation": {
+    "base_g": 0.1987210964506126,
+    "density_measure": "solid_angle_sr",
+    "forward_kl_estimate": 0.007755271532485449,
+    "forward_kl_standard_error": 0.003350418744376438,
+    "hg_forward_kl_estimate": 0.11122757204659861,
+    "hg_forward_kl_standard_error": 0.00981847712030385,
+    "hg_nll": 2.475207173032686,
+    "nll": 2.371734872518573,
+    "nll_improvement_over_hg": 0.10347230051411316,
+    "nll_improvement_standard_error": 0.008793048385432068,
+    "nll_standard_error": 0.011597388783225082,
+    "sample_count": 2048,
+    "target_entropy_estimate": 2.363979600986088,
+    "target_g": 0.1987210964506126
+  },
+  "complete": true,
+  "condition": {
+    "hg_g": 0.1987210964506126,
+    "incident_cosine": 0.3420201433256687,
+    "wavelength_nm": 550.0
+  },
+  "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+  "family": "rainbow_single_condition",
+  "generalization_scope": "same condition only; no claim about unseen wavelength/incidence",
+  "global_step": 100,
+  "initial_validation": {
+    "base_g": 0.1987210964506126,
+    "density_measure": "solid_angle_sr",
+    "forward_kl_estimate": 0.11122757484056633,
+    "forward_kl_standard_error": 0.009818477136507292,
+    "hg_forward_kl_estimate": 0.11122757204659861,
+    "hg_forward_kl_standard_error": 0.00981847712030385,
+    "hg_nll": 2.475207173032686,
+    "nll": 2.475207175826654,
+    "nll_improvement_over_hg": -2.7939677238464355e-09,
+    "nll_improvement_standard_error": 5.42667247964763e-10,
+    "nll_standard_error": 0.007358403870150916,
+    "sample_count": 2048,
+    "target_entropy_estimate": 2.363979600986088,
+    "target_g": 0.1987210964506126
+  },
+  "selected_step": 100,
+  "selection": "minimum validation NLL at scheduled evaluations",
+  "test": {
+    "base_g": 0.1987210964506126,
+    "code_fingerprint": "1280c84d98be314e9cd54aad4203d8ed01ed522f2fc8a2856e749a7e7767f474",
+    "condition": {
+      "incident_cosine": 0.3420201433256687,
+      "wavelength_nm": 550.0
+    },
+    "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+    "density_measure": "solid_angle_sr",
+    "forward_kl_estimate": 0.007855181840008328,
+    "forward_kl_standard_error": 0.00321233613290791,
+    "hg_forward_kl_estimate": 0.11539370761182366,
+    "hg_forward_kl_standard_error": 0.009688376167213525,
+    "hg_nll": 2.4693775876658037,
+    "nll": 2.3618390618939884,
+    "nll_improvement_over_hg": 0.10753852577181533,
+    "nll_improvement_standard_error": 0.008815081836693188,
+    "nll_standard_error": 0.011699759425411049,
+    "precision": {
+      "conditioner": "float32",
+      "hg_geometry_log_pdf": "float32",
+      "spline": "float32",
+      "teacher_and_statistical_reduction": "float64"
+    },
+    "proposal": {
+      "ess_definition": "sum(w)^2 / (N * sum(w^2)); w=p_omega/q_omega",
+      "importance_weight_mean": 0.9900446926284262,
+      "learned_moment_error": 0.02261269322405496,
+      "learned_moment_estimate": 0.22133378967466755,
+      "learned_moment_standard_error": 0.024052075925138094,
+      "log_importance_weight_mean": -0.01000519280334694,
+      "reference_support_hits": 512,
+      "relative_ess": 0.9770760530206531,
+      "sample_count": 512,
+      "sample_eval_log_pdf_max_abs_error": 1.430511474609375e-06,
+      "status": "ok",
+      "uniform_midpoint_bits": 23
+    },
+    "runtime": {
+      "cpu_threads": 1,
+      "deterministic_algorithms": true,
+      "device": "cpu",
+      "dtype": "float32",
+      "matmul_allow_tf32": false,
+      "numpy_version": "2.5.3",
+      "package_version": "0.4.0",
+      "python_version": "3.14.8",
+      "torch_version": "2.14.1+cpu",
+      "zuko_version": "1.6.0"
+    },
+    "sample_count": 2048,
+    "scope": "final_independent_test_points_same_condition",
+    "seed": 2026,
+    "target_entropy_estimate": 2.3539838800539803,
+    "target_g": 0.1987210964506126
+  }
+}

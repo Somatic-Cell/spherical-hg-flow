@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,25 @@ def _parser() -> argparse.ArgumentParser:
         "--no-plots", action="store_true", help="explicitly skip plots after completed training"
     )
     rainbow_train.add_argument("--quiet", action="store_true")
+    rainbow_sweep = commands.add_parser(
+        "sweep-rainbow", help="compare learning rates, then point counts with validation selection"
+    )
+    rainbow_sweep.add_argument("--record", required=True, type=Path)
+    rainbow_sweep.add_argument("--config", required=True, type=Path)
+    rainbow_sweep.add_argument("--sweep-config", required=True, type=Path)
+    rainbow_sweep.add_argument("--output", "--output-dir", required=True, type=Path)
+    rainbow_sweep.add_argument("--device")
+    rainbow_sweep.add_argument("--max-trials-this-run", type=int)
+    rainbow_sweep.add_argument("--no-plots", action="store_true")
+    rainbow_sweep.add_argument("--quiet", action="store_true")
+    rainbow_diagnose = commands.add_parser(
+        "diagnose-rainbow", help="angular band mass and PDF profiles for an existing selected model"
+    )
+    rainbow_diagnose.add_argument("--record", required=True, type=Path)
+    rainbow_diagnose.add_argument("--run", required=True, type=Path)
+    rainbow_diagnose.add_argument("--sweep-config", required=True, type=Path)
+    rainbow_diagnose.add_argument("--output", type=Path)
+    rainbow_diagnose.add_argument("--device", default="cuda")
     rainbow_eval = commands.add_parser(
         "evaluate-rainbow", help="independent same-condition NLL, forward KL and importance ESS"
     )
@@ -91,6 +111,23 @@ def _parser() -> argparse.ArgumentParser:
     rainbow_plot.add_argument("--dpi", type=int, default=160)
     rainbow_plot.add_argument("--write-pdf", action="store_true")
     rainbow_plot.add_argument("--cpu-threads", type=int, default=1)
+    history_plot = commands.add_parser(
+        "plot-history", help="regenerate learning curves from saved JSON/JSONL, including live logs"
+    )
+    history_plot.add_argument("--history", required=True, type=Path)
+    history_plot.add_argument("--output", required=True, type=Path)
+    history_plot.add_argument("--dpi", type=int, default=160)
+    precision = commands.add_parser(
+        "precision-rainbow", help="paired FP32/FP64 and FP16 weight-rounding diagnostics"
+    )
+    precision.add_argument("--record", required=True, type=Path)
+    precision.add_argument("--checkpoint", required=True, type=Path)
+    precision.add_argument("--output", type=Path)
+    precision.add_argument("--samples", type=int, default=4096)
+    precision.add_argument("--seed", type=int, default=2028)
+    precision.add_argument("--batch-size", type=int, default=4096)
+    precision.add_argument("--device", default="cuda")
+    precision.add_argument("--cpu-threads", type=int, default=1)
     demo = commands.add_parser(
         "demo",
         aliases=["make-demo"],
@@ -157,9 +194,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
     if arguments.command in (
-        "inspect-rainbow", "train-rainbow", "evaluate-rainbow", "plot-rainbow"
+        "inspect-rainbow", "train-rainbow", "evaluate-rainbow", "plot-rainbow", "precision-rainbow",
+        "sweep-rainbow", "diagnose-rainbow",
     ):
         return _rainbow_main(arguments)
+    if arguments.command == "plot-history":
+        from .monitoring import plot_training_history
+
+        _print_json(plot_training_history(
+            arguments.history, arguments.output, dpi=arguments.dpi,
+        ))
+        return 0
     if arguments.command in ("demo", "make-demo"):
         if arguments.output.exists():
             parser.error(f"{arguments.output} already exists; choose a new output path")
@@ -242,59 +287,141 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _read_rainbow_config(path: Path, device: str | None = None):
+    from .plotting import RainbowPlotConfig
+    from .single_condition import FAMILY, SingleTrainingConfig
+    from .sphere_model import SphereFlowConfig
+
+    with path.open(encoding="utf-8") as handle:
+        config = json.load(handle)
+    if (
+        not isinstance(config, dict)
+        or not {"schema_version", "family", "model", "training"} <= set(config)
+        or set(config) - {"schema_version", "family", "model", "training", "visualization"}
+        or config["schema_version"] != 2
+        or config["family"] != FAMILY
+    ):
+        raise ValueError(
+            "Rainbow config requires schema_version=2, family="
+            + FAMILY
+            + ", and explicit model/training objects"
+        )
+    model_config = SphereFlowConfig.from_dict(config["model"])
+    if not isinstance(config["training"], dict):
+        raise ValueError("training config must be an object")
+    training_values = config["training"].copy()
+    if device is not None:
+        training_values["device"] = device
+    training_config = SingleTrainingConfig.from_dict(training_values)
+    visualization = config.get("visualization", {})
+    if not isinstance(visualization, dict):
+        raise ValueError("visualization config must be an object")
+    visualization = visualization.copy()
+    enabled = visualization.pop("enabled", True)
+    if type(enabled) is not bool:
+        raise ValueError("visualization.enabled must be boolean")
+    return model_config, training_config, enabled, RainbowPlotConfig.from_dict(visualization)
+
+
+def _read_sweep_config(path: Path):
+    from .angular_diagnostics import AngularDiagnosticConfig
+    from .sweep import SweepConfig
+
+    with path.open(encoding="utf-8") as handle:
+        config = json.load(handle)
+    if (
+        not isinstance(config, dict)
+        or config.get("schema_version") != 1
+        or not {"schema_version", "sweep", "diagnostics"} == set(config)
+        or not isinstance(config["diagnostics"], dict)
+    ):
+        raise ValueError("sweep config requires schema_version=1, sweep and diagnostics objects")
+    sweep_config = SweepConfig.from_dict(config["sweep"])
+    diagnostics = config["diagnostics"].copy()
+    enabled = diagnostics.pop("enabled", True)
+    if type(enabled) is not bool:
+        raise ValueError("diagnostics.enabled must be boolean")
+    diagnostic_config = AngularDiagnosticConfig.from_dict(diagnostics)
+    return sweep_config, enabled, diagnostic_config
+
+
 def _rainbow_main(arguments: argparse.Namespace) -> int:
     from .rainbow import RainbowReference
     from .single_condition import (
-        FAMILY,
-        SingleTrainingConfig,
         evaluate_single_condition,
         load_single_checkpoint,
         train_single_condition,
     )
-    from .sphere_model import SphereFlowConfig
 
     def progress(entry: dict[str, Any]) -> None:
-        value = {key: entry[key] for key in ("global_step", "loss") if key in entry}
+        value = {key: entry[key] for key in (
+            "global_step", "loss", "gradient_norm_before_clip", "examples_seen", "effective_passes"
+        ) if key in entry}
         if "validation" in entry:
             value["validation_nll"] = entry["validation"]["nll"]
             value["validation_forward_kl"] = entry["validation"]["forward_kl_estimate"]
+        if "train_monitor" in entry:
+            value["train_fixed_subset_nll"] = entry["train_monitor"]["nll"]
         print(json.dumps(value, sort_keys=True, allow_nan=False), flush=True)
 
     with RainbowReference(arguments.record) as reference:
         if arguments.command == "inspect-rainbow":
             _print_json(reference.summary())
             return 0
-        if arguments.command == "train-rainbow":
-            from .plotting import RainbowPlotConfig
-
-            with arguments.config.open(encoding="utf-8") as handle:
-                config = json.load(handle)
-            if (
-                not isinstance(config, dict)
-                or not {"schema_version", "family", "model", "training"} <= set(config)
-                or set(config) - {"schema_version", "family", "model", "training", "visualization"}
-                or config["schema_version"] != 2
-                or config["family"] != FAMILY
-            ):
-                raise ValueError(
-                    "Rainbow config requires schema_version=2, family="
-                    + FAMILY
-                    + ", and explicit model/training objects"
-                )
-            model_config = SphereFlowConfig.from_dict(config["model"])
-            training_values = config["training"].copy()
-            if arguments.device is not None:
-                training_values["device"] = arguments.device
-            training_config = SingleTrainingConfig.from_dict(training_values)
-            visualization = config.get("visualization", {})
-            if not isinstance(visualization, dict):
-                raise ValueError("visualization config must be an object")
-            visualization = visualization.copy()
-            enabled = visualization.pop("enabled", True)
-            if type(enabled) is not bool:
-                raise ValueError("visualization.enabled must be boolean")
+        if arguments.command in ("train-rainbow", "sweep-rainbow"):
+            model_config, training_config, enabled, plot_config = _read_rainbow_config(
+                arguments.config, arguments.device,
+            )
             make_plots = enabled and not arguments.no_plots
-            plot_config = RainbowPlotConfig.from_dict(visualization)
+            if arguments.command == "sweep-rainbow":
+                from . import angular_diagnostics
+                from .sweep import run_single_condition_sweep
+
+                sweep_config, diagnose, diagnostic_config = _read_sweep_config(
+                    arguments.sweep_config,
+                )
+
+                def diagnostics(model, source, trial_directory):
+                    _, trial_config, _, _ = _read_rainbow_config(trial_directory / "config.json")
+                    return angular_diagnostics.evaluate_angular_diagnostics(
+                        model, source, trial_directory / "diagnostics",
+                        train_samples=trial_config.train_samples,
+                        batch_size=trial_config.batch_size,
+                        config=diagnostic_config,
+                        checkpoint_path=trial_directory / "best.pt",
+                    )
+
+                def sweep_progress(entry):
+                    print(json.dumps(entry, sort_keys=True, allow_nan=False), flush=True)
+
+                report = run_single_condition_sweep(
+                    reference, model_config, training_config, arguments.output,
+                    sweep_config=sweep_config,
+                    make_plots=make_plots,
+                    plot_config=plot_config,
+                    callback=None if arguments.quiet else sweep_progress,
+                    max_trials_this_run=arguments.max_trials_this_run,
+                    diagnostic_callback=diagnostics if diagnose else None,
+                    diagnostic_config=(
+                        {
+                            "id": "phaseflow.angular_diagnostics.v1",
+                            "configuration": diagnostic_config.to_dict(),
+                            "implementation_sha256": hashlib.sha256(
+                                Path(angular_diagnostics.__file__).read_bytes()
+                            ).hexdigest(),
+                        } if diagnose else None
+                    ),
+                )
+                _print_json({
+                    "complete": report["status"] == "complete",
+                    "status": report["status"],
+                    "output_directory": str(arguments.output.resolve()),
+                    "summary": str((arguments.output / "summary.json").resolve()),
+                    "table": str((arguments.output / "summary.csv").resolve()),
+                    "report": str((arguments.output / "summary.md").resolve()),
+                    "plot": str((arguments.output / "summary.png").resolve()),
+                })
+                return 0
             result = train_single_condition(
                 reference,
                 model_config,
@@ -320,11 +447,48 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
                 }
             )
             return 0
+        if arguments.command == "diagnose-rainbow":
+            import torch
+
+            from .angular_diagnostics import evaluate_angular_diagnostics
+
+            model_config, training_config, _, _ = _read_rainbow_config(
+                arguments.run / "config.json",
+            )
+            _, _, diagnostic_config = _read_sweep_config(arguments.sweep_config)
+            torch.set_num_threads(training_config.cpu_threads)
+            checkpoint_path = arguments.run / "best.pt"
+            model, checkpoint = load_single_checkpoint(checkpoint_path, device=arguments.device)
+            if checkpoint["dataset_fingerprint"] != reference.fingerprint():
+                raise ValueError("diagnostic record differs from the model's single-condition teacher")
+            if (
+                checkpoint["kind"] != "inference"
+                or checkpoint["model_config"] != model_config.to_dict()
+                or checkpoint["dtype"] != training_config.dtype
+            ):
+                raise ValueError("selected checkpoint and saved run configuration disagree")
+            _print_json(evaluate_angular_diagnostics(
+                model, reference, arguments.output or arguments.run / "diagnostics",
+                train_samples=training_config.train_samples,
+                batch_size=training_config.batch_size,
+                config=diagnostic_config,
+                checkpoint_path=checkpoint_path,
+            ))
+            return 0
         import torch
 
         if arguments.cpu_threads < 1:
             raise ValueError("cpu-threads must be positive")
         torch.set_num_threads(arguments.cpu_threads)
+        if arguments.command == "precision-rainbow":
+            from .precision import evaluate_precision
+
+            _print_json(evaluate_precision(
+                arguments.checkpoint, reference, arguments.output,
+                device=arguments.device, samples=arguments.samples,
+                seed=arguments.seed, batch_size=arguments.batch_size,
+            ))
+            return 0
         model, checkpoint = load_single_checkpoint(arguments.checkpoint, device=arguments.device)
         if checkpoint["dataset_fingerprint"] != reference.fingerprint():
             raise ValueError("evaluation record differs from the model's single-condition teacher")

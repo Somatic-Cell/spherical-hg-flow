@@ -1,0 +1,2726 @@
+{
+  "manifest_sha256": "2dba945ab03d5324672bec3d3ae835fef57055200c766ec9d9982d2204d7b104",
+  "schema": "phaseflow.sequential_sweep.v1",
+  "scope": "single condition, fixed seed; synthetic inputs are not optical validation",
+  "selection": {
+    "candidates": [
+      {
+        "learning_rate": 0.0003,
+        "run_directory": "stage_a/lr_0.0003",
+        "selected_step": 20,
+        "trial_id": "A_lr_0.0003",
+        "validation_kl": 0.11661573239398598,
+        "validation_nll": 2.4491953381802887
+      },
+      {
+        "learning_rate": 0.001,
+        "run_directory": "stage_a/lr_0.001",
+        "selected_step": 20,
+        "trial_id": "A_lr_0.001",
+        "validation_kl": 0.08043454956059753,
+        "validation_nll": 2.4130141553469002
+      },
+      {
+        "learning_rate": 0.003,
+        "run_directory": "stage_a/lr_0.003",
+        "selected_step": 15,
+        "trial_id": "A_lr_0.003",
+        "validation_kl": 0.04592683185619711,
+        "validation_nll": 2.3785064376425
+      }
+    ],
+    "manifest_sha256": "2dba945ab03d5324672bec3d3ae835fef57055200c766ec9d9982d2204d7b104",
+    "rule": "minimum best_validation.nll in A; exact ties use smaller learning_rate",
+    "schema": "phaseflow.sequential_sweep.v1",
+    "selected_learning_rate": 0.003,
+    "selected_trial_id": "A_lr_0.003",
+    "selected_validation_nll": 2.3785064376425,
+    "test_used": false
+  },
+  "selection_metric": "validation_nll",
+  "status": "complete",
+  "test_used_for_selection": false,
+  "trials": [
+    {
+      "checkpoint_bytes": 14719,
+      "diagnostics": {
+        "artifacts": {
+          "arrays": {
+            "path": "angular_profiles.npz",
+            "sha256": "c6f296747b462ba0aa9640a2acc12e8c2ff067c68af1c3622a6c23192dd9d798"
+          },
+          "figure": {
+            "path": "angular_profiles.png",
+            "sha256": "536991c2e45434d878e188ccea6ea53694e38202c6451cca5273b6b834538538"
+          },
+          "report": {
+            "path": "angular_diagnostics.json"
+          }
+        },
+        "band": {
+          "band_choice": "configurable_reporting_region_not_a_certified_rainbow_boundary",
+          "conditional_kl": null,
+          "exactness": "exact_saved_cell_integral_up_to_floating_point_roundoff",
+          "hg_method": "analytic_HG_CDF_difference_rationalized_without_tail_subtraction",
+          "nf_band_mass": null,
+          "solid_angle_sr": 2.2998054391128626,
+          "source_phi_degrees": [
+            -180.0,
+            180.0
+          ],
+          "target_mass_method": "saved_phi_marginal_times_exact_piecewise_linear_u_CDF_difference",
+          "theta_degrees": [
+            120.0,
+            150.0
+          ],
+          "u_boundaries": [
+            0.7499999999999999,
+            0.9330127018922194
+          ],
+          "zero_fraction_denominator": "solid_angle_of_the_reporting_band"
+        },
+        "checkpoint": {
+          "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/sweep/stage_a/lr_0.0003/best.pt",
+          "sha256": "19d6041ee8e7454c12d3e177f1d1a0d3078f44a3a1fbb1b2d304d1d137334e51"
+        },
+        "condition": {
+          "hg_g": 0.1987210964506126,
+          "incident_cosine": 0.3420201433256687,
+          "incident_inclination_degrees": 20.0,
+          "wavelength_nm": 550.0
+        },
+        "configuration": {
+          "dpi": 140,
+          "eval_batch_size": 4096,
+          "source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_band_degrees": [
+            120.0,
+            150.0
+          ]
+        },
+        "configuration_sha256": "8e942ac4f836261f64b2c049fc9169d4dc5c2f630aafd452190a4d5f3fdb6b2e",
+        "coordinates": {
+          "density_measure": "solid_angle_sr",
+          "frame": "recorded_solver_source",
+          "solid_angle": "4*pi*du*dv_source",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "theta_pi": "backward",
+          "theta_zero": "forward",
+          "u": "(1-cos(theta))/2"
+        },
+        "data_provenance": {
+          "density_measure": "solid_angle_sr",
+          "files": {
+            "metadata.json": {
+              "bytes": 2042,
+              "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+            },
+            "phi_cdf.npy": {
+              "bytes": 328,
+              "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+            },
+            "theta_given_phi_cdf.npy": {
+              "bytes": 3392,
+              "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+            },
+            "u_edges.npy": {
+              "bytes": 264,
+              "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+            }
+          },
+          "metadata": {
+            "azimuth_periodic": true,
+            "cdf_axis_order": [
+              "phi_cell",
+              "theta_edge"
+            ],
+            "cell_model": "constant_density_per_spherical_cell",
+            "complete": true,
+            "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+            "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+            "density_measure": "solid_angle_sr",
+            "diffraction_policy": {
+              "computed": false
+            },
+            "direction_convention": "physical_propagation",
+            "dtype": "<f8",
+            "hg": {
+              "axis_particle_frame": [
+                0.9396926207859084,
+                -0.3420201433256687,
+                0.0
+              ],
+              "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+              "g": 0.1987210964506126,
+              "g_source": 0.73,
+              "method": "first_moment_of_saved_cell_pdf",
+              "target": "saved_cdf"
+            },
+            "incident_inclination_degrees": 20.0,
+            "input_polarization": "unpolarized",
+            "material": {
+              "wavelength_convention": "vacuum_nm"
+            },
+            "normalization": "integral_p_domega_equals_one",
+            "order": "C",
+            "particle_frame_handedness": "right",
+            "particle_up_axis": [
+              0,
+              1,
+              0
+            ],
+            "phi_count": 24,
+            "phi_range_rad": [
+              -3.141592653589793,
+              3.141592653589793
+            ],
+            "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+            "quality": {
+              "allow_underresolved": true,
+              "angular_convergence_certified": false
+            },
+            "sampling_frame_columns": [
+              [
+                0.0,
+                -0.3420201433256687,
+                0.9396926207859084
+              ],
+              [
+                0.0,
+                -0.9396926207859084,
+                -0.3420201433256687
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+            "sampling_frame_map": "local_column_to_particle_column",
+            "schema": "rainbow.phase_cdf.numpy.v2",
+            "shape_polar_axis": [
+              0,
+              -1,
+              0
+            ],
+            "source_commit": "synthetic_fixture_no_solver_commit",
+            "source_dirty_at_configure": false,
+            "storage_processing": {
+              "additional_filter": "none",
+              "coarsening_tv": 0.04
+            },
+            "theta_count": 16,
+            "theta_pi": "backward",
+            "theta_zero": "forward",
+            "wavelength_nm": 550.0
+          },
+          "nf_frame_columns": [
+            [
+              -0.3420201433256687,
+              0.0,
+              0.9396926207859084
+            ],
+            [
+              -0.9396926207859084,
+              0.0,
+              -0.3420201433256687
+            ],
+            [
+              0.0,
+              -1.0,
+              0.0
+            ]
+          ],
+          "pole_pdf_representative": "source_phi_zero",
+          "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/synthetic_record",
+          "saved_g_check": 0.19872109645061267,
+          "saved_mass_check": 1.0,
+          "schema": "phaseflow.rainbow_reference.v1",
+          "source_repository": "https://github.com/Somatic-Cell/rainbow",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "uniform_domain": "[0,1)",
+          "uniform_order": [
+            "phi_marginal",
+            "u_given_phi"
+          ]
+        },
+        "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+        "expected_counts": {
+          "batch_size": 128,
+          "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+          "observed_train_band_samples": null,
+          "train_samples": 65536
+        },
+        "expected_minibatch_band_samples": 13.912412027008184,
+        "expected_train_band_samples": 7123.15495782819,
+        "hg_band_probability_width": 0.1173388038661644,
+        "implementation_sha256": "7d9c0d959e96e4ba4f6bb67a0cf6eaeb14de9a8faaa0e8a637f95769a61d24d9",
+        "model": {
+          "configuration": {
+            "activation": "silu",
+            "geometry_dtype": "model",
+            "hidden_features": [
+              16,
+              16
+            ],
+            "min_bin_height": 1e-05,
+            "min_bin_width": 1e-05,
+            "min_derivative": 0.0001,
+            "mirror_symmetry": true,
+            "num_bins": 8,
+            "num_coupling_layers": 2,
+            "spline_dtype": "model"
+          },
+          "density_evaluation_dtype": "torch.float32",
+          "device": "cpu",
+          "family": "single_condition_circular_hg",
+          "parameter_dtype": "torch.float32"
+        },
+        "profiles": {
+          "actual_source_phi_degrees": [
+            -97.5,
+            -7.5,
+            82.5
+          ],
+          "array_order": [
+            "requested_phi_profile",
+            "native_theta_cell"
+          ],
+          "density_floor": null,
+          "nf_and_hg_pdf": "point_evaluation_at_native_u_midpoints_not_cell_averages",
+          "no_within_cell_resolution_claim": true,
+          "phi_cell_indices": [
+            5,
+            11,
+            17
+          ],
+          "phi_choice": "nearest_periodic_native_cell_center_ties_choose_lowest_cell_index",
+          "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
+          "requested_source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_count": 16,
+          "zero_log_pdf": "negative_infinity_in_NPZ_omitted_curve_with_gray_cell_span_in_figure",
+          "zero_reference_cells_per_profile": [
+            0,
+            0,
+            0
+          ]
+        },
+        "reference_band_mass_exact": 0.10869071896100144,
+        "reference_band_zero_solid_angle_fraction": 0.0,
+        "reference_zero_solid_angle_fraction": 0.0,
+        "schema": "phaseflow.angular_diagnostics.v1",
+        "scope": "report_only_same_condition_no_model_selection",
+        "source_kind": "synthetic_fixture"
+      },
+      "effective_passes": 0.0390625,
+      "elapsed_seconds": 1.6522960679994867,
+      "global_step": 20,
+      "learning_rate": 0.0003,
+      "parameter_bytes": 5016,
+      "parameter_count": 1254,
+      "processed_examples": 2560,
+      "reuse_of": null,
+      "run_directory": "stage_a/lr_0.0003",
+      "sample_split": {
+        "data_seed": 2026,
+        "minibatch_rng": {
+          "device": "cpu",
+          "engine": "torch.Generator",
+          "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches"
+        },
+        "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
+        "scope": "one_fixed_condition; independent point streams; no condition holdout",
+        "seed": 415,
+        "streams": {
+          "minibatches": 2,
+          "proposal": 4,
+          "test": 3,
+          "train": 0,
+          "validation": 1
+        },
+        "test_samples": 1024,
+        "train_samples": 65536,
+        "training_points_sha256": "e917667e1e0a9a79ea08fcbd2dbda33a0c7729640e913c41a8aec6c7c2e72463",
+        "uniforms": "52-bit open midpoint grid",
+        "validation_points_sha256": "60a726d83d9be429981be7868076c49ea1c2ba6e0dafc003b0f6294b607fa453",
+        "validation_samples": 512
+      },
+      "selected_step": 20,
+      "stage": "A",
+      "status": "complete",
+      "test_hg_kl": 0.11831993648344538,
+      "test_kl": 0.10440990472240258,
+      "test_kl_standard_error": 0.013026953620340018,
+      "test_nll": 2.4629666896071285,
+      "test_relative_ess": 0.834073455655683,
+      "train_monitor_nll_at_selected_step": 2.473496754653752,
+      "train_samples": 65536,
+      "training_config": {
+        "batch_size": 128,
+        "checkpoint_every": 5,
+        "cpu_threads": 1,
+        "data_seed": 2026,
+        "deterministic": true,
+        "device": "cpu",
+        "dtype": "float32",
+        "eval_batch_size": 512,
+        "eval_every": 5,
+        "grad_clip_norm": 10.0,
+        "learning_rate": 0.0003,
+        "log_every": 5,
+        "proposal_samples": 512,
+        "seed": 415,
+        "steps": 20,
+        "tensorboard": true,
+        "test_samples": 1024,
+        "train_monitor_samples": 512,
+        "train_samples": 65536,
+        "validation_samples": 512
+      },
+      "trial_id": "A_lr_0.0003",
+      "validation_hg_kl": 0.13167036902887225,
+      "validation_kl": 0.11661573239398598,
+      "validation_kl_standard_error": 0.017726919672035272,
+      "validation_nll": 2.4491953381802887
+    },
+    {
+      "checkpoint_bytes": 14719,
+      "diagnostics": {
+        "artifacts": {
+          "arrays": {
+            "path": "angular_profiles.npz",
+            "sha256": "d679ae0bf5c84554e8ce647b586dc7647a1dd9eae2a3c20324d3969681bb0dcb"
+          },
+          "figure": {
+            "path": "angular_profiles.png",
+            "sha256": "75ec25b9f58b87cbea32b2af6f138657478543e556f0459d03cf83c271d74a14"
+          },
+          "report": {
+            "path": "angular_diagnostics.json"
+          }
+        },
+        "band": {
+          "band_choice": "configurable_reporting_region_not_a_certified_rainbow_boundary",
+          "conditional_kl": null,
+          "exactness": "exact_saved_cell_integral_up_to_floating_point_roundoff",
+          "hg_method": "analytic_HG_CDF_difference_rationalized_without_tail_subtraction",
+          "nf_band_mass": null,
+          "solid_angle_sr": 2.2998054391128626,
+          "source_phi_degrees": [
+            -180.0,
+            180.0
+          ],
+          "target_mass_method": "saved_phi_marginal_times_exact_piecewise_linear_u_CDF_difference",
+          "theta_degrees": [
+            120.0,
+            150.0
+          ],
+          "u_boundaries": [
+            0.7499999999999999,
+            0.9330127018922194
+          ],
+          "zero_fraction_denominator": "solid_angle_of_the_reporting_band"
+        },
+        "checkpoint": {
+          "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/sweep/stage_a/lr_0.001/best.pt",
+          "sha256": "c08cc2f0c4ed33a9726f1ac6a0afa329696c4db71fab7a40b2cdbb7e6497a57c"
+        },
+        "condition": {
+          "hg_g": 0.1987210964506126,
+          "incident_cosine": 0.3420201433256687,
+          "incident_inclination_degrees": 20.0,
+          "wavelength_nm": 550.0
+        },
+        "configuration": {
+          "dpi": 140,
+          "eval_batch_size": 4096,
+          "source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_band_degrees": [
+            120.0,
+            150.0
+          ]
+        },
+        "configuration_sha256": "8e942ac4f836261f64b2c049fc9169d4dc5c2f630aafd452190a4d5f3fdb6b2e",
+        "coordinates": {
+          "density_measure": "solid_angle_sr",
+          "frame": "recorded_solver_source",
+          "solid_angle": "4*pi*du*dv_source",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "theta_pi": "backward",
+          "theta_zero": "forward",
+          "u": "(1-cos(theta))/2"
+        },
+        "data_provenance": {
+          "density_measure": "solid_angle_sr",
+          "files": {
+            "metadata.json": {
+              "bytes": 2042,
+              "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+            },
+            "phi_cdf.npy": {
+              "bytes": 328,
+              "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+            },
+            "theta_given_phi_cdf.npy": {
+              "bytes": 3392,
+              "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+            },
+            "u_edges.npy": {
+              "bytes": 264,
+              "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+            }
+          },
+          "metadata": {
+            "azimuth_periodic": true,
+            "cdf_axis_order": [
+              "phi_cell",
+              "theta_edge"
+            ],
+            "cell_model": "constant_density_per_spherical_cell",
+            "complete": true,
+            "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+            "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+            "density_measure": "solid_angle_sr",
+            "diffraction_policy": {
+              "computed": false
+            },
+            "direction_convention": "physical_propagation",
+            "dtype": "<f8",
+            "hg": {
+              "axis_particle_frame": [
+                0.9396926207859084,
+                -0.3420201433256687,
+                0.0
+              ],
+              "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+              "g": 0.1987210964506126,
+              "g_source": 0.73,
+              "method": "first_moment_of_saved_cell_pdf",
+              "target": "saved_cdf"
+            },
+            "incident_inclination_degrees": 20.0,
+            "input_polarization": "unpolarized",
+            "material": {
+              "wavelength_convention": "vacuum_nm"
+            },
+            "normalization": "integral_p_domega_equals_one",
+            "order": "C",
+            "particle_frame_handedness": "right",
+            "particle_up_axis": [
+              0,
+              1,
+              0
+            ],
+            "phi_count": 24,
+            "phi_range_rad": [
+              -3.141592653589793,
+              3.141592653589793
+            ],
+            "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+            "quality": {
+              "allow_underresolved": true,
+              "angular_convergence_certified": false
+            },
+            "sampling_frame_columns": [
+              [
+                0.0,
+                -0.3420201433256687,
+                0.9396926207859084
+              ],
+              [
+                0.0,
+                -0.9396926207859084,
+                -0.3420201433256687
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+            "sampling_frame_map": "local_column_to_particle_column",
+            "schema": "rainbow.phase_cdf.numpy.v2",
+            "shape_polar_axis": [
+              0,
+              -1,
+              0
+            ],
+            "source_commit": "synthetic_fixture_no_solver_commit",
+            "source_dirty_at_configure": false,
+            "storage_processing": {
+              "additional_filter": "none",
+              "coarsening_tv": 0.04
+            },
+            "theta_count": 16,
+            "theta_pi": "backward",
+            "theta_zero": "forward",
+            "wavelength_nm": 550.0
+          },
+          "nf_frame_columns": [
+            [
+              -0.3420201433256687,
+              0.0,
+              0.9396926207859084
+            ],
+            [
+              -0.9396926207859084,
+              0.0,
+              -0.3420201433256687
+            ],
+            [
+              0.0,
+              -1.0,
+              0.0
+            ]
+          ],
+          "pole_pdf_representative": "source_phi_zero",
+          "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/synthetic_record",
+          "saved_g_check": 0.19872109645061267,
+          "saved_mass_check": 1.0,
+          "schema": "phaseflow.rainbow_reference.v1",
+          "source_repository": "https://github.com/Somatic-Cell/rainbow",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "uniform_domain": "[0,1)",
+          "uniform_order": [
+            "phi_marginal",
+            "u_given_phi"
+          ]
+        },
+        "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+        "expected_counts": {
+          "batch_size": 128,
+          "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+          "observed_train_band_samples": null,
+          "train_samples": 65536
+        },
+        "expected_minibatch_band_samples": 13.912412027008184,
+        "expected_train_band_samples": 7123.15495782819,
+        "hg_band_probability_width": 0.1173388038661644,
+        "implementation_sha256": "7d9c0d959e96e4ba4f6bb67a0cf6eaeb14de9a8faaa0e8a637f95769a61d24d9",
+        "model": {
+          "configuration": {
+            "activation": "silu",
+            "geometry_dtype": "model",
+            "hidden_features": [
+              16,
+              16
+            ],
+            "min_bin_height": 1e-05,
+            "min_bin_width": 1e-05,
+            "min_derivative": 0.0001,
+            "mirror_symmetry": true,
+            "num_bins": 8,
+            "num_coupling_layers": 2,
+            "spline_dtype": "model"
+          },
+          "density_evaluation_dtype": "torch.float32",
+          "device": "cpu",
+          "family": "single_condition_circular_hg",
+          "parameter_dtype": "torch.float32"
+        },
+        "profiles": {
+          "actual_source_phi_degrees": [
+            -97.5,
+            -7.5,
+            82.5
+          ],
+          "array_order": [
+            "requested_phi_profile",
+            "native_theta_cell"
+          ],
+          "density_floor": null,
+          "nf_and_hg_pdf": "point_evaluation_at_native_u_midpoints_not_cell_averages",
+          "no_within_cell_resolution_claim": true,
+          "phi_cell_indices": [
+            5,
+            11,
+            17
+          ],
+          "phi_choice": "nearest_periodic_native_cell_center_ties_choose_lowest_cell_index",
+          "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
+          "requested_source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_count": 16,
+          "zero_log_pdf": "negative_infinity_in_NPZ_omitted_curve_with_gray_cell_span_in_figure",
+          "zero_reference_cells_per_profile": [
+            0,
+            0,
+            0
+          ]
+        },
+        "reference_band_mass_exact": 0.10869071896100144,
+        "reference_band_zero_solid_angle_fraction": 0.0,
+        "reference_zero_solid_angle_fraction": 0.0,
+        "schema": "phaseflow.angular_diagnostics.v1",
+        "scope": "report_only_same_condition_no_model_selection",
+        "source_kind": "synthetic_fixture"
+      },
+      "effective_passes": 0.0390625,
+      "elapsed_seconds": 1.7495999509992544,
+      "global_step": 20,
+      "learning_rate": 0.001,
+      "parameter_bytes": 5016,
+      "parameter_count": 1254,
+      "processed_examples": 2560,
+      "reuse_of": null,
+      "run_directory": "stage_a/lr_0.001",
+      "sample_split": {
+        "data_seed": 2026,
+        "minibatch_rng": {
+          "device": "cpu",
+          "engine": "torch.Generator",
+          "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches"
+        },
+        "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
+        "scope": "one_fixed_condition; independent point streams; no condition holdout",
+        "seed": 415,
+        "streams": {
+          "minibatches": 2,
+          "proposal": 4,
+          "test": 3,
+          "train": 0,
+          "validation": 1
+        },
+        "test_samples": 1024,
+        "train_samples": 65536,
+        "training_points_sha256": "e917667e1e0a9a79ea08fcbd2dbda33a0c7729640e913c41a8aec6c7c2e72463",
+        "uniforms": "52-bit open midpoint grid",
+        "validation_points_sha256": "60a726d83d9be429981be7868076c49ea1c2ba6e0dafc003b0f6294b607fa453",
+        "validation_samples": 512
+      },
+      "selected_step": 20,
+      "stage": "A",
+      "status": "complete",
+      "test_hg_kl": 0.11831993648344538,
+      "test_kl": 0.0704622436690133,
+      "test_kl_standard_error": 0.010736743651753117,
+      "test_nll": 2.429019028553739,
+      "test_relative_ess": 0.8828757240083897,
+      "train_monitor_nll_at_selected_step": 2.440142404055223,
+      "train_samples": 65536,
+      "training_config": {
+        "batch_size": 128,
+        "checkpoint_every": 5,
+        "cpu_threads": 1,
+        "data_seed": 2026,
+        "deterministic": true,
+        "device": "cpu",
+        "dtype": "float32",
+        "eval_batch_size": 512,
+        "eval_every": 5,
+        "grad_clip_norm": 10.0,
+        "learning_rate": 0.001,
+        "log_every": 5,
+        "proposal_samples": 512,
+        "seed": 415,
+        "steps": 20,
+        "tensorboard": true,
+        "test_samples": 1024,
+        "train_monitor_samples": 512,
+        "train_samples": 65536,
+        "validation_samples": 512
+      },
+      "trial_id": "A_lr_0.001",
+      "validation_hg_kl": 0.13167036902887225,
+      "validation_kl": 0.08043454956059753,
+      "validation_kl_standard_error": 0.01441273559252574,
+      "validation_nll": 2.4130141553469002
+    },
+    {
+      "checkpoint_bytes": 14719,
+      "diagnostics": {
+        "artifacts": {
+          "arrays": {
+            "path": "angular_profiles.npz",
+            "sha256": "2ab001676e7fb718f721c31d0f06d35c84a4c454d81fd15dbb5840ec3c9bf999"
+          },
+          "figure": {
+            "path": "angular_profiles.png",
+            "sha256": "f2cf5ec9bc434739fd390bcf015e088f5717cbc02c394c4d2804d939843f3cfc"
+          },
+          "report": {
+            "path": "angular_diagnostics.json"
+          }
+        },
+        "band": {
+          "band_choice": "configurable_reporting_region_not_a_certified_rainbow_boundary",
+          "conditional_kl": null,
+          "exactness": "exact_saved_cell_integral_up_to_floating_point_roundoff",
+          "hg_method": "analytic_HG_CDF_difference_rationalized_without_tail_subtraction",
+          "nf_band_mass": null,
+          "solid_angle_sr": 2.2998054391128626,
+          "source_phi_degrees": [
+            -180.0,
+            180.0
+          ],
+          "target_mass_method": "saved_phi_marginal_times_exact_piecewise_linear_u_CDF_difference",
+          "theta_degrees": [
+            120.0,
+            150.0
+          ],
+          "u_boundaries": [
+            0.7499999999999999,
+            0.9330127018922194
+          ],
+          "zero_fraction_denominator": "solid_angle_of_the_reporting_band"
+        },
+        "checkpoint": {
+          "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/sweep/stage_a/lr_0.003/best.pt",
+          "sha256": "7aca795a91e2f9496efb0033b65070fee6b9461a1362a11b5137a26f004acb3f"
+        },
+        "condition": {
+          "hg_g": 0.1987210964506126,
+          "incident_cosine": 0.3420201433256687,
+          "incident_inclination_degrees": 20.0,
+          "wavelength_nm": 550.0
+        },
+        "configuration": {
+          "dpi": 140,
+          "eval_batch_size": 4096,
+          "source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_band_degrees": [
+            120.0,
+            150.0
+          ]
+        },
+        "configuration_sha256": "8e942ac4f836261f64b2c049fc9169d4dc5c2f630aafd452190a4d5f3fdb6b2e",
+        "coordinates": {
+          "density_measure": "solid_angle_sr",
+          "frame": "recorded_solver_source",
+          "solid_angle": "4*pi*du*dv_source",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "theta_pi": "backward",
+          "theta_zero": "forward",
+          "u": "(1-cos(theta))/2"
+        },
+        "data_provenance": {
+          "density_measure": "solid_angle_sr",
+          "files": {
+            "metadata.json": {
+              "bytes": 2042,
+              "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+            },
+            "phi_cdf.npy": {
+              "bytes": 328,
+              "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+            },
+            "theta_given_phi_cdf.npy": {
+              "bytes": 3392,
+              "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+            },
+            "u_edges.npy": {
+              "bytes": 264,
+              "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+            }
+          },
+          "metadata": {
+            "azimuth_periodic": true,
+            "cdf_axis_order": [
+              "phi_cell",
+              "theta_edge"
+            ],
+            "cell_model": "constant_density_per_spherical_cell",
+            "complete": true,
+            "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+            "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+            "density_measure": "solid_angle_sr",
+            "diffraction_policy": {
+              "computed": false
+            },
+            "direction_convention": "physical_propagation",
+            "dtype": "<f8",
+            "hg": {
+              "axis_particle_frame": [
+                0.9396926207859084,
+                -0.3420201433256687,
+                0.0
+              ],
+              "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+              "g": 0.1987210964506126,
+              "g_source": 0.73,
+              "method": "first_moment_of_saved_cell_pdf",
+              "target": "saved_cdf"
+            },
+            "incident_inclination_degrees": 20.0,
+            "input_polarization": "unpolarized",
+            "material": {
+              "wavelength_convention": "vacuum_nm"
+            },
+            "normalization": "integral_p_domega_equals_one",
+            "order": "C",
+            "particle_frame_handedness": "right",
+            "particle_up_axis": [
+              0,
+              1,
+              0
+            ],
+            "phi_count": 24,
+            "phi_range_rad": [
+              -3.141592653589793,
+              3.141592653589793
+            ],
+            "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+            "quality": {
+              "allow_underresolved": true,
+              "angular_convergence_certified": false
+            },
+            "sampling_frame_columns": [
+              [
+                0.0,
+                -0.3420201433256687,
+                0.9396926207859084
+              ],
+              [
+                0.0,
+                -0.9396926207859084,
+                -0.3420201433256687
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+            "sampling_frame_map": "local_column_to_particle_column",
+            "schema": "rainbow.phase_cdf.numpy.v2",
+            "shape_polar_axis": [
+              0,
+              -1,
+              0
+            ],
+            "source_commit": "synthetic_fixture_no_solver_commit",
+            "source_dirty_at_configure": false,
+            "storage_processing": {
+              "additional_filter": "none",
+              "coarsening_tv": 0.04
+            },
+            "theta_count": 16,
+            "theta_pi": "backward",
+            "theta_zero": "forward",
+            "wavelength_nm": 550.0
+          },
+          "nf_frame_columns": [
+            [
+              -0.3420201433256687,
+              0.0,
+              0.9396926207859084
+            ],
+            [
+              -0.9396926207859084,
+              0.0,
+              -0.3420201433256687
+            ],
+            [
+              0.0,
+              -1.0,
+              0.0
+            ]
+          ],
+          "pole_pdf_representative": "source_phi_zero",
+          "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/synthetic_record",
+          "saved_g_check": 0.19872109645061267,
+          "saved_mass_check": 1.0,
+          "schema": "phaseflow.rainbow_reference.v1",
+          "source_repository": "https://github.com/Somatic-Cell/rainbow",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "uniform_domain": "[0,1)",
+          "uniform_order": [
+            "phi_marginal",
+            "u_given_phi"
+          ]
+        },
+        "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+        "expected_counts": {
+          "batch_size": 128,
+          "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+          "observed_train_band_samples": null,
+          "train_samples": 65536
+        },
+        "expected_minibatch_band_samples": 13.912412027008184,
+        "expected_train_band_samples": 7123.15495782819,
+        "hg_band_probability_width": 0.1173388038661644,
+        "implementation_sha256": "7d9c0d959e96e4ba4f6bb67a0cf6eaeb14de9a8faaa0e8a637f95769a61d24d9",
+        "model": {
+          "configuration": {
+            "activation": "silu",
+            "geometry_dtype": "model",
+            "hidden_features": [
+              16,
+              16
+            ],
+            "min_bin_height": 1e-05,
+            "min_bin_width": 1e-05,
+            "min_derivative": 0.0001,
+            "mirror_symmetry": true,
+            "num_bins": 8,
+            "num_coupling_layers": 2,
+            "spline_dtype": "model"
+          },
+          "density_evaluation_dtype": "torch.float32",
+          "device": "cpu",
+          "family": "single_condition_circular_hg",
+          "parameter_dtype": "torch.float32"
+        },
+        "profiles": {
+          "actual_source_phi_degrees": [
+            -97.5,
+            -7.5,
+            82.5
+          ],
+          "array_order": [
+            "requested_phi_profile",
+            "native_theta_cell"
+          ],
+          "density_floor": null,
+          "nf_and_hg_pdf": "point_evaluation_at_native_u_midpoints_not_cell_averages",
+          "no_within_cell_resolution_claim": true,
+          "phi_cell_indices": [
+            5,
+            11,
+            17
+          ],
+          "phi_choice": "nearest_periodic_native_cell_center_ties_choose_lowest_cell_index",
+          "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
+          "requested_source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_count": 16,
+          "zero_log_pdf": "negative_infinity_in_NPZ_omitted_curve_with_gray_cell_span_in_figure",
+          "zero_reference_cells_per_profile": [
+            0,
+            0,
+            0
+          ]
+        },
+        "reference_band_mass_exact": 0.10869071896100144,
+        "reference_band_zero_solid_angle_fraction": 0.0,
+        "reference_zero_solid_angle_fraction": 0.0,
+        "schema": "phaseflow.angular_diagnostics.v1",
+        "scope": "report_only_same_condition_no_model_selection",
+        "source_kind": "synthetic_fixture"
+      },
+      "effective_passes": 0.0390625,
+      "elapsed_seconds": 1.8247402810011408,
+      "global_step": 20,
+      "learning_rate": 0.003,
+      "parameter_bytes": 5016,
+      "parameter_count": 1254,
+      "processed_examples": 2560,
+      "reuse_of": null,
+      "run_directory": "stage_a/lr_0.003",
+      "sample_split": {
+        "data_seed": 2026,
+        "minibatch_rng": {
+          "device": "cpu",
+          "engine": "torch.Generator",
+          "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches"
+        },
+        "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
+        "scope": "one_fixed_condition; independent point streams; no condition holdout",
+        "seed": 415,
+        "streams": {
+          "minibatches": 2,
+          "proposal": 4,
+          "test": 3,
+          "train": 0,
+          "validation": 1
+        },
+        "test_samples": 1024,
+        "train_samples": 65536,
+        "training_points_sha256": "e917667e1e0a9a79ea08fcbd2dbda33a0c7729640e913c41a8aec6c7c2e72463",
+        "uniforms": "52-bit open midpoint grid",
+        "validation_points_sha256": "60a726d83d9be429981be7868076c49ea1c2ba6e0dafc003b0f6294b607fa453",
+        "validation_samples": 512
+      },
+      "selected_step": 15,
+      "stage": "A",
+      "status": "complete",
+      "test_hg_kl": 0.11831993648344538,
+      "test_kl": 0.03748723239665737,
+      "test_kl_standard_error": 0.00787972036732515,
+      "test_nll": 2.3960440172813833,
+      "test_relative_ess": 0.9366580699560623,
+      "train_monitor_nll_at_selected_step": 2.4105631050188094,
+      "train_samples": 65536,
+      "training_config": {
+        "batch_size": 128,
+        "checkpoint_every": 5,
+        "cpu_threads": 1,
+        "data_seed": 2026,
+        "deterministic": true,
+        "device": "cpu",
+        "dtype": "float32",
+        "eval_batch_size": 512,
+        "eval_every": 5,
+        "grad_clip_norm": 10.0,
+        "learning_rate": 0.003,
+        "log_every": 5,
+        "proposal_samples": 512,
+        "seed": 415,
+        "steps": 20,
+        "tensorboard": true,
+        "test_samples": 1024,
+        "train_monitor_samples": 512,
+        "train_samples": 65536,
+        "validation_samples": 512
+      },
+      "trial_id": "A_lr_0.003",
+      "validation_hg_kl": 0.13167036902887225,
+      "validation_kl": 0.04592683185619711,
+      "validation_kl_standard_error": 0.010506343981993148,
+      "validation_nll": 2.3785064376425
+    },
+    {
+      "checkpoint_bytes": 14719,
+      "diagnostics": {
+        "artifacts": {
+          "arrays": {
+            "path": "angular_profiles.npz",
+            "sha256": "c679b701c4f0f4f1f0f4120c30123efdb5af74668e96c7d12d6caba097f90927"
+          },
+          "figure": {
+            "path": "angular_profiles.png",
+            "sha256": "1cb2bd58e733eda4be983e16439e440515c9cdd136b87a3596c8396d31acd17b"
+          },
+          "report": {
+            "path": "angular_diagnostics.json"
+          }
+        },
+        "band": {
+          "band_choice": "configurable_reporting_region_not_a_certified_rainbow_boundary",
+          "conditional_kl": null,
+          "exactness": "exact_saved_cell_integral_up_to_floating_point_roundoff",
+          "hg_method": "analytic_HG_CDF_difference_rationalized_without_tail_subtraction",
+          "nf_band_mass": null,
+          "solid_angle_sr": 2.2998054391128626,
+          "source_phi_degrees": [
+            -180.0,
+            180.0
+          ],
+          "target_mass_method": "saved_phi_marginal_times_exact_piecewise_linear_u_CDF_difference",
+          "theta_degrees": [
+            120.0,
+            150.0
+          ],
+          "u_boundaries": [
+            0.7499999999999999,
+            0.9330127018922194
+          ],
+          "zero_fraction_denominator": "solid_angle_of_the_reporting_band"
+        },
+        "checkpoint": {
+          "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/sweep/stage_b/n_4096/best.pt",
+          "sha256": "ef3a4317495438fe54012206c93092908dc72601a63c33b4414da10f6e7911d4"
+        },
+        "condition": {
+          "hg_g": 0.1987210964506126,
+          "incident_cosine": 0.3420201433256687,
+          "incident_inclination_degrees": 20.0,
+          "wavelength_nm": 550.0
+        },
+        "configuration": {
+          "dpi": 140,
+          "eval_batch_size": 4096,
+          "source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_band_degrees": [
+            120.0,
+            150.0
+          ]
+        },
+        "configuration_sha256": "8e942ac4f836261f64b2c049fc9169d4dc5c2f630aafd452190a4d5f3fdb6b2e",
+        "coordinates": {
+          "density_measure": "solid_angle_sr",
+          "frame": "recorded_solver_source",
+          "solid_angle": "4*pi*du*dv_source",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "theta_pi": "backward",
+          "theta_zero": "forward",
+          "u": "(1-cos(theta))/2"
+        },
+        "data_provenance": {
+          "density_measure": "solid_angle_sr",
+          "files": {
+            "metadata.json": {
+              "bytes": 2042,
+              "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+            },
+            "phi_cdf.npy": {
+              "bytes": 328,
+              "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+            },
+            "theta_given_phi_cdf.npy": {
+              "bytes": 3392,
+              "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+            },
+            "u_edges.npy": {
+              "bytes": 264,
+              "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+            }
+          },
+          "metadata": {
+            "azimuth_periodic": true,
+            "cdf_axis_order": [
+              "phi_cell",
+              "theta_edge"
+            ],
+            "cell_model": "constant_density_per_spherical_cell",
+            "complete": true,
+            "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+            "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+            "density_measure": "solid_angle_sr",
+            "diffraction_policy": {
+              "computed": false
+            },
+            "direction_convention": "physical_propagation",
+            "dtype": "<f8",
+            "hg": {
+              "axis_particle_frame": [
+                0.9396926207859084,
+                -0.3420201433256687,
+                0.0
+              ],
+              "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+              "g": 0.1987210964506126,
+              "g_source": 0.73,
+              "method": "first_moment_of_saved_cell_pdf",
+              "target": "saved_cdf"
+            },
+            "incident_inclination_degrees": 20.0,
+            "input_polarization": "unpolarized",
+            "material": {
+              "wavelength_convention": "vacuum_nm"
+            },
+            "normalization": "integral_p_domega_equals_one",
+            "order": "C",
+            "particle_frame_handedness": "right",
+            "particle_up_axis": [
+              0,
+              1,
+              0
+            ],
+            "phi_count": 24,
+            "phi_range_rad": [
+              -3.141592653589793,
+              3.141592653589793
+            ],
+            "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+            "quality": {
+              "allow_underresolved": true,
+              "angular_convergence_certified": false
+            },
+            "sampling_frame_columns": [
+              [
+                0.0,
+                -0.3420201433256687,
+                0.9396926207859084
+              ],
+              [
+                0.0,
+                -0.9396926207859084,
+                -0.3420201433256687
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+            "sampling_frame_map": "local_column_to_particle_column",
+            "schema": "rainbow.phase_cdf.numpy.v2",
+            "shape_polar_axis": [
+              0,
+              -1,
+              0
+            ],
+            "source_commit": "synthetic_fixture_no_solver_commit",
+            "source_dirty_at_configure": false,
+            "storage_processing": {
+              "additional_filter": "none",
+              "coarsening_tv": 0.04
+            },
+            "theta_count": 16,
+            "theta_pi": "backward",
+            "theta_zero": "forward",
+            "wavelength_nm": 550.0
+          },
+          "nf_frame_columns": [
+            [
+              -0.3420201433256687,
+              0.0,
+              0.9396926207859084
+            ],
+            [
+              -0.9396926207859084,
+              0.0,
+              -0.3420201433256687
+            ],
+            [
+              0.0,
+              -1.0,
+              0.0
+            ]
+          ],
+          "pole_pdf_representative": "source_phi_zero",
+          "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/synthetic_record",
+          "saved_g_check": 0.19872109645061267,
+          "saved_mass_check": 1.0,
+          "schema": "phaseflow.rainbow_reference.v1",
+          "source_repository": "https://github.com/Somatic-Cell/rainbow",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "uniform_domain": "[0,1)",
+          "uniform_order": [
+            "phi_marginal",
+            "u_given_phi"
+          ]
+        },
+        "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+        "expected_counts": {
+          "batch_size": 128,
+          "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+          "observed_train_band_samples": null,
+          "train_samples": 4096
+        },
+        "expected_minibatch_band_samples": 13.912412027008184,
+        "expected_train_band_samples": 445.1971848642619,
+        "hg_band_probability_width": 0.1173388038661644,
+        "implementation_sha256": "7d9c0d959e96e4ba4f6bb67a0cf6eaeb14de9a8faaa0e8a637f95769a61d24d9",
+        "model": {
+          "configuration": {
+            "activation": "silu",
+            "geometry_dtype": "model",
+            "hidden_features": [
+              16,
+              16
+            ],
+            "min_bin_height": 1e-05,
+            "min_bin_width": 1e-05,
+            "min_derivative": 0.0001,
+            "mirror_symmetry": true,
+            "num_bins": 8,
+            "num_coupling_layers": 2,
+            "spline_dtype": "model"
+          },
+          "density_evaluation_dtype": "torch.float32",
+          "device": "cpu",
+          "family": "single_condition_circular_hg",
+          "parameter_dtype": "torch.float32"
+        },
+        "profiles": {
+          "actual_source_phi_degrees": [
+            -97.5,
+            -7.5,
+            82.5
+          ],
+          "array_order": [
+            "requested_phi_profile",
+            "native_theta_cell"
+          ],
+          "density_floor": null,
+          "nf_and_hg_pdf": "point_evaluation_at_native_u_midpoints_not_cell_averages",
+          "no_within_cell_resolution_claim": true,
+          "phi_cell_indices": [
+            5,
+            11,
+            17
+          ],
+          "phi_choice": "nearest_periodic_native_cell_center_ties_choose_lowest_cell_index",
+          "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
+          "requested_source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_count": 16,
+          "zero_log_pdf": "negative_infinity_in_NPZ_omitted_curve_with_gray_cell_span_in_figure",
+          "zero_reference_cells_per_profile": [
+            0,
+            0,
+            0
+          ]
+        },
+        "reference_band_mass_exact": 0.10869071896100144,
+        "reference_band_zero_solid_angle_fraction": 0.0,
+        "reference_zero_solid_angle_fraction": 0.0,
+        "schema": "phaseflow.angular_diagnostics.v1",
+        "scope": "report_only_same_condition_no_model_selection",
+        "source_kind": "synthetic_fixture"
+      },
+      "effective_passes": 0.625,
+      "elapsed_seconds": 2.0085654520007665,
+      "global_step": 20,
+      "learning_rate": 0.003,
+      "parameter_bytes": 5016,
+      "parameter_count": 1254,
+      "processed_examples": 2560,
+      "reuse_of": null,
+      "run_directory": "stage_b/n_4096",
+      "sample_split": {
+        "data_seed": 2026,
+        "minibatch_rng": {
+          "device": "cpu",
+          "engine": "torch.Generator",
+          "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches"
+        },
+        "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
+        "scope": "one_fixed_condition; independent point streams; no condition holdout",
+        "seed": 415,
+        "streams": {
+          "minibatches": 2,
+          "proposal": 4,
+          "test": 3,
+          "train": 0,
+          "validation": 1
+        },
+        "test_samples": 1024,
+        "train_samples": 4096,
+        "training_points_sha256": "bcb15188ab1911107871468f0b66f827940d4eda0dbdd7a6a3131a20a7c641a1",
+        "uniforms": "52-bit open midpoint grid",
+        "validation_points_sha256": "60a726d83d9be429981be7868076c49ea1c2ba6e0dafc003b0f6294b607fa453",
+        "validation_samples": 512
+      },
+      "selected_step": 20,
+      "stage": "B",
+      "status": "complete",
+      "test_hg_kl": 0.11831993648344538,
+      "test_kl": 0.03342652254765739,
+      "test_kl_standard_error": 0.008368135231938115,
+      "test_nll": 2.3919833074323833,
+      "test_relative_ess": 0.9353978722218899,
+      "train_monitor_nll_at_selected_step": 2.4131592691410333,
+      "train_samples": 4096,
+      "training_config": {
+        "batch_size": 128,
+        "checkpoint_every": 5,
+        "cpu_threads": 1,
+        "data_seed": 2026,
+        "deterministic": true,
+        "device": "cpu",
+        "dtype": "float32",
+        "eval_batch_size": 512,
+        "eval_every": 5,
+        "grad_clip_norm": 10.0,
+        "learning_rate": 0.003,
+        "log_every": 5,
+        "proposal_samples": 512,
+        "seed": 415,
+        "steps": 20,
+        "tensorboard": true,
+        "test_samples": 1024,
+        "train_monitor_samples": 512,
+        "train_samples": 4096,
+        "validation_samples": 512
+      },
+      "trial_id": "B_n_4096",
+      "validation_hg_kl": 0.13167036902887225,
+      "validation_kl": 0.04665630982053875,
+      "validation_kl_standard_error": 0.011201943238349756,
+      "validation_nll": 2.3792359156068414
+    },
+    {
+      "checkpoint_bytes": 14719,
+      "diagnostics": {
+        "artifacts": {
+          "arrays": {
+            "path": "angular_profiles.npz",
+            "sha256": "584e63eb9086f7141235e91191a6f9d271e8ffa069696dd6c5d839e6e19d13cc"
+          },
+          "figure": {
+            "path": "angular_profiles.png",
+            "sha256": "c7ce56775e22e16d40fc06057af8f3a6ce69345b36c0dd16c33ceb20ae7aff04"
+          },
+          "report": {
+            "path": "angular_diagnostics.json"
+          }
+        },
+        "band": {
+          "band_choice": "configurable_reporting_region_not_a_certified_rainbow_boundary",
+          "conditional_kl": null,
+          "exactness": "exact_saved_cell_integral_up_to_floating_point_roundoff",
+          "hg_method": "analytic_HG_CDF_difference_rationalized_without_tail_subtraction",
+          "nf_band_mass": null,
+          "solid_angle_sr": 2.2998054391128626,
+          "source_phi_degrees": [
+            -180.0,
+            180.0
+          ],
+          "target_mass_method": "saved_phi_marginal_times_exact_piecewise_linear_u_CDF_difference",
+          "theta_degrees": [
+            120.0,
+            150.0
+          ],
+          "u_boundaries": [
+            0.7499999999999999,
+            0.9330127018922194
+          ],
+          "zero_fraction_denominator": "solid_angle_of_the_reporting_band"
+        },
+        "checkpoint": {
+          "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/sweep/stage_b/n_16384/best.pt",
+          "sha256": "58a1349b58ad2a5c71622c47f7ca89b1261a90e2d4e2b8f6df17394b17127f2a"
+        },
+        "condition": {
+          "hg_g": 0.1987210964506126,
+          "incident_cosine": 0.3420201433256687,
+          "incident_inclination_degrees": 20.0,
+          "wavelength_nm": 550.0
+        },
+        "configuration": {
+          "dpi": 140,
+          "eval_batch_size": 4096,
+          "source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_band_degrees": [
+            120.0,
+            150.0
+          ]
+        },
+        "configuration_sha256": "8e942ac4f836261f64b2c049fc9169d4dc5c2f630aafd452190a4d5f3fdb6b2e",
+        "coordinates": {
+          "density_measure": "solid_angle_sr",
+          "frame": "recorded_solver_source",
+          "solid_angle": "4*pi*du*dv_source",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "theta_pi": "backward",
+          "theta_zero": "forward",
+          "u": "(1-cos(theta))/2"
+        },
+        "data_provenance": {
+          "density_measure": "solid_angle_sr",
+          "files": {
+            "metadata.json": {
+              "bytes": 2042,
+              "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+            },
+            "phi_cdf.npy": {
+              "bytes": 328,
+              "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+            },
+            "theta_given_phi_cdf.npy": {
+              "bytes": 3392,
+              "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+            },
+            "u_edges.npy": {
+              "bytes": 264,
+              "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+            }
+          },
+          "metadata": {
+            "azimuth_periodic": true,
+            "cdf_axis_order": [
+              "phi_cell",
+              "theta_edge"
+            ],
+            "cell_model": "constant_density_per_spherical_cell",
+            "complete": true,
+            "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+            "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+            "density_measure": "solid_angle_sr",
+            "diffraction_policy": {
+              "computed": false
+            },
+            "direction_convention": "physical_propagation",
+            "dtype": "<f8",
+            "hg": {
+              "axis_particle_frame": [
+                0.9396926207859084,
+                -0.3420201433256687,
+                0.0
+              ],
+              "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+              "g": 0.1987210964506126,
+              "g_source": 0.73,
+              "method": "first_moment_of_saved_cell_pdf",
+              "target": "saved_cdf"
+            },
+            "incident_inclination_degrees": 20.0,
+            "input_polarization": "unpolarized",
+            "material": {
+              "wavelength_convention": "vacuum_nm"
+            },
+            "normalization": "integral_p_domega_equals_one",
+            "order": "C",
+            "particle_frame_handedness": "right",
+            "particle_up_axis": [
+              0,
+              1,
+              0
+            ],
+            "phi_count": 24,
+            "phi_range_rad": [
+              -3.141592653589793,
+              3.141592653589793
+            ],
+            "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+            "quality": {
+              "allow_underresolved": true,
+              "angular_convergence_certified": false
+            },
+            "sampling_frame_columns": [
+              [
+                0.0,
+                -0.3420201433256687,
+                0.9396926207859084
+              ],
+              [
+                0.0,
+                -0.9396926207859084,
+                -0.3420201433256687
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+            "sampling_frame_map": "local_column_to_particle_column",
+            "schema": "rainbow.phase_cdf.numpy.v2",
+            "shape_polar_axis": [
+              0,
+              -1,
+              0
+            ],
+            "source_commit": "synthetic_fixture_no_solver_commit",
+            "source_dirty_at_configure": false,
+            "storage_processing": {
+              "additional_filter": "none",
+              "coarsening_tv": 0.04
+            },
+            "theta_count": 16,
+            "theta_pi": "backward",
+            "theta_zero": "forward",
+            "wavelength_nm": 550.0
+          },
+          "nf_frame_columns": [
+            [
+              -0.3420201433256687,
+              0.0,
+              0.9396926207859084
+            ],
+            [
+              -0.9396926207859084,
+              0.0,
+              -0.3420201433256687
+            ],
+            [
+              0.0,
+              -1.0,
+              0.0
+            ]
+          ],
+          "pole_pdf_representative": "source_phi_zero",
+          "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/synthetic_record",
+          "saved_g_check": 0.19872109645061267,
+          "saved_mass_check": 1.0,
+          "schema": "phaseflow.rainbow_reference.v1",
+          "source_repository": "https://github.com/Somatic-Cell/rainbow",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "uniform_domain": "[0,1)",
+          "uniform_order": [
+            "phi_marginal",
+            "u_given_phi"
+          ]
+        },
+        "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+        "expected_counts": {
+          "batch_size": 128,
+          "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+          "observed_train_band_samples": null,
+          "train_samples": 16384
+        },
+        "expected_minibatch_band_samples": 13.912412027008184,
+        "expected_train_band_samples": 1780.7887394570475,
+        "hg_band_probability_width": 0.1173388038661644,
+        "implementation_sha256": "7d9c0d959e96e4ba4f6bb67a0cf6eaeb14de9a8faaa0e8a637f95769a61d24d9",
+        "model": {
+          "configuration": {
+            "activation": "silu",
+            "geometry_dtype": "model",
+            "hidden_features": [
+              16,
+              16
+            ],
+            "min_bin_height": 1e-05,
+            "min_bin_width": 1e-05,
+            "min_derivative": 0.0001,
+            "mirror_symmetry": true,
+            "num_bins": 8,
+            "num_coupling_layers": 2,
+            "spline_dtype": "model"
+          },
+          "density_evaluation_dtype": "torch.float32",
+          "device": "cpu",
+          "family": "single_condition_circular_hg",
+          "parameter_dtype": "torch.float32"
+        },
+        "profiles": {
+          "actual_source_phi_degrees": [
+            -97.5,
+            -7.5,
+            82.5
+          ],
+          "array_order": [
+            "requested_phi_profile",
+            "native_theta_cell"
+          ],
+          "density_floor": null,
+          "nf_and_hg_pdf": "point_evaluation_at_native_u_midpoints_not_cell_averages",
+          "no_within_cell_resolution_claim": true,
+          "phi_cell_indices": [
+            5,
+            11,
+            17
+          ],
+          "phi_choice": "nearest_periodic_native_cell_center_ties_choose_lowest_cell_index",
+          "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
+          "requested_source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_count": 16,
+          "zero_log_pdf": "negative_infinity_in_NPZ_omitted_curve_with_gray_cell_span_in_figure",
+          "zero_reference_cells_per_profile": [
+            0,
+            0,
+            0
+          ]
+        },
+        "reference_band_mass_exact": 0.10869071896100144,
+        "reference_band_zero_solid_angle_fraction": 0.0,
+        "reference_zero_solid_angle_fraction": 0.0,
+        "schema": "phaseflow.angular_diagnostics.v1",
+        "scope": "report_only_same_condition_no_model_selection",
+        "source_kind": "synthetic_fixture"
+      },
+      "effective_passes": 0.15625,
+      "elapsed_seconds": 1.6993379019986605,
+      "global_step": 20,
+      "learning_rate": 0.003,
+      "parameter_bytes": 5016,
+      "parameter_count": 1254,
+      "processed_examples": 2560,
+      "reuse_of": null,
+      "run_directory": "stage_b/n_16384",
+      "sample_split": {
+        "data_seed": 2026,
+        "minibatch_rng": {
+          "device": "cpu",
+          "engine": "torch.Generator",
+          "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches"
+        },
+        "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
+        "scope": "one_fixed_condition; independent point streams; no condition holdout",
+        "seed": 415,
+        "streams": {
+          "minibatches": 2,
+          "proposal": 4,
+          "test": 3,
+          "train": 0,
+          "validation": 1
+        },
+        "test_samples": 1024,
+        "train_samples": 16384,
+        "training_points_sha256": "41504a4eafa62a8d2c52d7bc382c24260717ea5c19c9fe5dcc3c2854fa70a65b",
+        "uniforms": "52-bit open midpoint grid",
+        "validation_points_sha256": "60a726d83d9be429981be7868076c49ea1c2ba6e0dafc003b0f6294b607fa453",
+        "validation_samples": 512
+      },
+      "selected_step": 20,
+      "stage": "B",
+      "status": "complete",
+      "test_hg_kl": 0.11831993648344538,
+      "test_kl": 0.03607120927451064,
+      "test_kl_standard_error": 0.008263267309368223,
+      "test_nll": 2.3946279941592366,
+      "test_relative_ess": 0.9343627288312167,
+      "train_monitor_nll_at_selected_step": 2.4122415932361037,
+      "train_samples": 16384,
+      "training_config": {
+        "batch_size": 128,
+        "checkpoint_every": 5,
+        "cpu_threads": 1,
+        "data_seed": 2026,
+        "deterministic": true,
+        "device": "cpu",
+        "dtype": "float32",
+        "eval_batch_size": 512,
+        "eval_every": 5,
+        "grad_clip_norm": 10.0,
+        "learning_rate": 0.003,
+        "log_every": 5,
+        "proposal_samples": 512,
+        "seed": 415,
+        "steps": 20,
+        "tensorboard": true,
+        "test_samples": 1024,
+        "train_monitor_samples": 512,
+        "train_samples": 16384,
+        "validation_samples": 512
+      },
+      "trial_id": "B_n_16384",
+      "validation_hg_kl": 0.13167036902887225,
+      "validation_kl": 0.048641814345321055,
+      "validation_kl_standard_error": 0.011195186327037707,
+      "validation_nll": 2.3812214201316237
+    },
+    {
+      "checkpoint_bytes": 14719,
+      "diagnostics": {
+        "artifacts": {
+          "arrays": {
+            "path": "angular_profiles.npz",
+            "sha256": "2ab001676e7fb718f721c31d0f06d35c84a4c454d81fd15dbb5840ec3c9bf999"
+          },
+          "figure": {
+            "path": "angular_profiles.png",
+            "sha256": "f2cf5ec9bc434739fd390bcf015e088f5717cbc02c394c4d2804d939843f3cfc"
+          },
+          "report": {
+            "path": "angular_diagnostics.json"
+          }
+        },
+        "band": {
+          "band_choice": "configurable_reporting_region_not_a_certified_rainbow_boundary",
+          "conditional_kl": null,
+          "exactness": "exact_saved_cell_integral_up_to_floating_point_roundoff",
+          "hg_method": "analytic_HG_CDF_difference_rationalized_without_tail_subtraction",
+          "nf_band_mass": null,
+          "solid_angle_sr": 2.2998054391128626,
+          "source_phi_degrees": [
+            -180.0,
+            180.0
+          ],
+          "target_mass_method": "saved_phi_marginal_times_exact_piecewise_linear_u_CDF_difference",
+          "theta_degrees": [
+            120.0,
+            150.0
+          ],
+          "u_boundaries": [
+            0.7499999999999999,
+            0.9330127018922194
+          ],
+          "zero_fraction_denominator": "solid_angle_of_the_reporting_band"
+        },
+        "checkpoint": {
+          "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/sweep/stage_a/lr_0.003/best.pt",
+          "sha256": "7aca795a91e2f9496efb0033b65070fee6b9461a1362a11b5137a26f004acb3f"
+        },
+        "condition": {
+          "hg_g": 0.1987210964506126,
+          "incident_cosine": 0.3420201433256687,
+          "incident_inclination_degrees": 20.0,
+          "wavelength_nm": 550.0
+        },
+        "configuration": {
+          "dpi": 140,
+          "eval_batch_size": 4096,
+          "source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_band_degrees": [
+            120.0,
+            150.0
+          ]
+        },
+        "configuration_sha256": "8e942ac4f836261f64b2c049fc9169d4dc5c2f630aafd452190a4d5f3fdb6b2e",
+        "coordinates": {
+          "density_measure": "solid_angle_sr",
+          "frame": "recorded_solver_source",
+          "solid_angle": "4*pi*du*dv_source",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "theta_pi": "backward",
+          "theta_zero": "forward",
+          "u": "(1-cos(theta))/2"
+        },
+        "data_provenance": {
+          "density_measure": "solid_angle_sr",
+          "files": {
+            "metadata.json": {
+              "bytes": 2042,
+              "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+            },
+            "phi_cdf.npy": {
+              "bytes": 328,
+              "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+            },
+            "theta_given_phi_cdf.npy": {
+              "bytes": 3392,
+              "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+            },
+            "u_edges.npy": {
+              "bytes": 264,
+              "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+            }
+          },
+          "metadata": {
+            "azimuth_periodic": true,
+            "cdf_axis_order": [
+              "phi_cell",
+              "theta_edge"
+            ],
+            "cell_model": "constant_density_per_spherical_cell",
+            "complete": true,
+            "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+            "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+            "density_measure": "solid_angle_sr",
+            "diffraction_policy": {
+              "computed": false
+            },
+            "direction_convention": "physical_propagation",
+            "dtype": "<f8",
+            "hg": {
+              "axis_particle_frame": [
+                0.9396926207859084,
+                -0.3420201433256687,
+                0.0
+              ],
+              "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+              "g": 0.1987210964506126,
+              "g_source": 0.73,
+              "method": "first_moment_of_saved_cell_pdf",
+              "target": "saved_cdf"
+            },
+            "incident_inclination_degrees": 20.0,
+            "input_polarization": "unpolarized",
+            "material": {
+              "wavelength_convention": "vacuum_nm"
+            },
+            "normalization": "integral_p_domega_equals_one",
+            "order": "C",
+            "particle_frame_handedness": "right",
+            "particle_up_axis": [
+              0,
+              1,
+              0
+            ],
+            "phi_count": 24,
+            "phi_range_rad": [
+              -3.141592653589793,
+              3.141592653589793
+            ],
+            "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+            "quality": {
+              "allow_underresolved": true,
+              "angular_convergence_certified": false
+            },
+            "sampling_frame_columns": [
+              [
+                0.0,
+                -0.3420201433256687,
+                0.9396926207859084
+              ],
+              [
+                0.0,
+                -0.9396926207859084,
+                -0.3420201433256687
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+            "sampling_frame_map": "local_column_to_particle_column",
+            "schema": "rainbow.phase_cdf.numpy.v2",
+            "shape_polar_axis": [
+              0,
+              -1,
+              0
+            ],
+            "source_commit": "synthetic_fixture_no_solver_commit",
+            "source_dirty_at_configure": false,
+            "storage_processing": {
+              "additional_filter": "none",
+              "coarsening_tv": 0.04
+            },
+            "theta_count": 16,
+            "theta_pi": "backward",
+            "theta_zero": "forward",
+            "wavelength_nm": 550.0
+          },
+          "nf_frame_columns": [
+            [
+              -0.3420201433256687,
+              0.0,
+              0.9396926207859084
+            ],
+            [
+              -0.9396926207859084,
+              0.0,
+              -0.3420201433256687
+            ],
+            [
+              0.0,
+              -1.0,
+              0.0
+            ]
+          ],
+          "pole_pdf_representative": "source_phi_zero",
+          "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/synthetic_record",
+          "saved_g_check": 0.19872109645061267,
+          "saved_mass_check": 1.0,
+          "schema": "phaseflow.rainbow_reference.v1",
+          "source_repository": "https://github.com/Somatic-Cell/rainbow",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "uniform_domain": "[0,1)",
+          "uniform_order": [
+            "phi_marginal",
+            "u_given_phi"
+          ]
+        },
+        "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+        "expected_counts": {
+          "batch_size": 128,
+          "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+          "observed_train_band_samples": null,
+          "train_samples": 65536
+        },
+        "expected_minibatch_band_samples": 13.912412027008184,
+        "expected_train_band_samples": 7123.15495782819,
+        "hg_band_probability_width": 0.1173388038661644,
+        "implementation_sha256": "7d9c0d959e96e4ba4f6bb67a0cf6eaeb14de9a8faaa0e8a637f95769a61d24d9",
+        "model": {
+          "configuration": {
+            "activation": "silu",
+            "geometry_dtype": "model",
+            "hidden_features": [
+              16,
+              16
+            ],
+            "min_bin_height": 1e-05,
+            "min_bin_width": 1e-05,
+            "min_derivative": 0.0001,
+            "mirror_symmetry": true,
+            "num_bins": 8,
+            "num_coupling_layers": 2,
+            "spline_dtype": "model"
+          },
+          "density_evaluation_dtype": "torch.float32",
+          "device": "cpu",
+          "family": "single_condition_circular_hg",
+          "parameter_dtype": "torch.float32"
+        },
+        "profiles": {
+          "actual_source_phi_degrees": [
+            -97.5,
+            -7.5,
+            82.5
+          ],
+          "array_order": [
+            "requested_phi_profile",
+            "native_theta_cell"
+          ],
+          "density_floor": null,
+          "nf_and_hg_pdf": "point_evaluation_at_native_u_midpoints_not_cell_averages",
+          "no_within_cell_resolution_claim": true,
+          "phi_cell_indices": [
+            5,
+            11,
+            17
+          ],
+          "phi_choice": "nearest_periodic_native_cell_center_ties_choose_lowest_cell_index",
+          "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
+          "requested_source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_count": 16,
+          "zero_log_pdf": "negative_infinity_in_NPZ_omitted_curve_with_gray_cell_span_in_figure",
+          "zero_reference_cells_per_profile": [
+            0,
+            0,
+            0
+          ]
+        },
+        "reference_band_mass_exact": 0.10869071896100144,
+        "reference_band_zero_solid_angle_fraction": 0.0,
+        "reference_zero_solid_angle_fraction": 0.0,
+        "schema": "phaseflow.angular_diagnostics.v1",
+        "scope": "report_only_same_condition_no_model_selection",
+        "source_kind": "synthetic_fixture"
+      },
+      "effective_passes": 0.0390625,
+      "elapsed_seconds": 1.8247402810011408,
+      "global_step": 20,
+      "learning_rate": 0.003,
+      "parameter_bytes": 5016,
+      "parameter_count": 1254,
+      "processed_examples": 2560,
+      "reuse_of": "A_lr_0.003",
+      "run_directory": "stage_a/lr_0.003",
+      "sample_split": {
+        "data_seed": 2026,
+        "minibatch_rng": {
+          "device": "cpu",
+          "engine": "torch.Generator",
+          "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches"
+        },
+        "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
+        "scope": "one_fixed_condition; independent point streams; no condition holdout",
+        "seed": 415,
+        "streams": {
+          "minibatches": 2,
+          "proposal": 4,
+          "test": 3,
+          "train": 0,
+          "validation": 1
+        },
+        "test_samples": 1024,
+        "train_samples": 65536,
+        "training_points_sha256": "e917667e1e0a9a79ea08fcbd2dbda33a0c7729640e913c41a8aec6c7c2e72463",
+        "uniforms": "52-bit open midpoint grid",
+        "validation_points_sha256": "60a726d83d9be429981be7868076c49ea1c2ba6e0dafc003b0f6294b607fa453",
+        "validation_samples": 512
+      },
+      "selected_step": 15,
+      "stage": "B",
+      "status": "complete",
+      "test_hg_kl": 0.11831993648344538,
+      "test_kl": 0.03748723239665737,
+      "test_kl_standard_error": 0.00787972036732515,
+      "test_nll": 2.3960440172813833,
+      "test_relative_ess": 0.9366580699560623,
+      "train_monitor_nll_at_selected_step": 2.4105631050188094,
+      "train_samples": 65536,
+      "training_config": {
+        "batch_size": 128,
+        "checkpoint_every": 5,
+        "cpu_threads": 1,
+        "data_seed": 2026,
+        "deterministic": true,
+        "device": "cpu",
+        "dtype": "float32",
+        "eval_batch_size": 512,
+        "eval_every": 5,
+        "grad_clip_norm": 10.0,
+        "learning_rate": 0.003,
+        "log_every": 5,
+        "proposal_samples": 512,
+        "seed": 415,
+        "steps": 20,
+        "tensorboard": true,
+        "test_samples": 1024,
+        "train_monitor_samples": 512,
+        "train_samples": 65536,
+        "validation_samples": 512
+      },
+      "trial_id": "B_n_65536",
+      "validation_hg_kl": 0.13167036902887225,
+      "validation_kl": 0.04592683185619711,
+      "validation_kl_standard_error": 0.010506343981993148,
+      "validation_nll": 2.3785064376425
+    },
+    {
+      "checkpoint_bytes": 14719,
+      "diagnostics": {
+        "artifacts": {
+          "arrays": {
+            "path": "angular_profiles.npz",
+            "sha256": "10395068109f374f5c8512e0a969bb8a76f57e075f4722c3eabecae704681160"
+          },
+          "figure": {
+            "path": "angular_profiles.png",
+            "sha256": "061f7bb5313cd27bf354de6efbf67a797a091a8cbe7b9f606ac542f1d3244664"
+          },
+          "report": {
+            "path": "angular_diagnostics.json"
+          }
+        },
+        "band": {
+          "band_choice": "configurable_reporting_region_not_a_certified_rainbow_boundary",
+          "conditional_kl": null,
+          "exactness": "exact_saved_cell_integral_up_to_floating_point_roundoff",
+          "hg_method": "analytic_HG_CDF_difference_rationalized_without_tail_subtraction",
+          "nf_band_mass": null,
+          "solid_angle_sr": 2.2998054391128626,
+          "source_phi_degrees": [
+            -180.0,
+            180.0
+          ],
+          "target_mass_method": "saved_phi_marginal_times_exact_piecewise_linear_u_CDF_difference",
+          "theta_degrees": [
+            120.0,
+            150.0
+          ],
+          "u_boundaries": [
+            0.7499999999999999,
+            0.9330127018922194
+          ],
+          "zero_fraction_denominator": "solid_angle_of_the_reporting_band"
+        },
+        "checkpoint": {
+          "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/sweep/stage_b/n_262144/best.pt",
+          "sha256": "4798fc9a39aa20e7d837bd44fb2973f5c3bd1cbb1ddab2373e28d21c1d718e7e"
+        },
+        "condition": {
+          "hg_g": 0.1987210964506126,
+          "incident_cosine": 0.3420201433256687,
+          "incident_inclination_degrees": 20.0,
+          "wavelength_nm": 550.0
+        },
+        "configuration": {
+          "dpi": 140,
+          "eval_batch_size": 4096,
+          "source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_band_degrees": [
+            120.0,
+            150.0
+          ]
+        },
+        "configuration_sha256": "8e942ac4f836261f64b2c049fc9169d4dc5c2f630aafd452190a4d5f3fdb6b2e",
+        "coordinates": {
+          "density_measure": "solid_angle_sr",
+          "frame": "recorded_solver_source",
+          "solid_angle": "4*pi*du*dv_source",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "theta_pi": "backward",
+          "theta_zero": "forward",
+          "u": "(1-cos(theta))/2"
+        },
+        "data_provenance": {
+          "density_measure": "solid_angle_sr",
+          "files": {
+            "metadata.json": {
+              "bytes": 2042,
+              "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+            },
+            "phi_cdf.npy": {
+              "bytes": 328,
+              "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+            },
+            "theta_given_phi_cdf.npy": {
+              "bytes": 3392,
+              "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+            },
+            "u_edges.npy": {
+              "bytes": 264,
+              "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+            }
+          },
+          "metadata": {
+            "azimuth_periodic": true,
+            "cdf_axis_order": [
+              "phi_cell",
+              "theta_edge"
+            ],
+            "cell_model": "constant_density_per_spherical_cell",
+            "complete": true,
+            "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+            "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+            "density_measure": "solid_angle_sr",
+            "diffraction_policy": {
+              "computed": false
+            },
+            "direction_convention": "physical_propagation",
+            "dtype": "<f8",
+            "hg": {
+              "axis_particle_frame": [
+                0.9396926207859084,
+                -0.3420201433256687,
+                0.0
+              ],
+              "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+              "g": 0.1987210964506126,
+              "g_source": 0.73,
+              "method": "first_moment_of_saved_cell_pdf",
+              "target": "saved_cdf"
+            },
+            "incident_inclination_degrees": 20.0,
+            "input_polarization": "unpolarized",
+            "material": {
+              "wavelength_convention": "vacuum_nm"
+            },
+            "normalization": "integral_p_domega_equals_one",
+            "order": "C",
+            "particle_frame_handedness": "right",
+            "particle_up_axis": [
+              0,
+              1,
+              0
+            ],
+            "phi_count": 24,
+            "phi_range_rad": [
+              -3.141592653589793,
+              3.141592653589793
+            ],
+            "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+            "quality": {
+              "allow_underresolved": true,
+              "angular_convergence_certified": false
+            },
+            "sampling_frame_columns": [
+              [
+                0.0,
+                -0.3420201433256687,
+                0.9396926207859084
+              ],
+              [
+                0.0,
+                -0.9396926207859084,
+                -0.3420201433256687
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+            "sampling_frame_map": "local_column_to_particle_column",
+            "schema": "rainbow.phase_cdf.numpy.v2",
+            "shape_polar_axis": [
+              0,
+              -1,
+              0
+            ],
+            "source_commit": "synthetic_fixture_no_solver_commit",
+            "source_dirty_at_configure": false,
+            "storage_processing": {
+              "additional_filter": "none",
+              "coarsening_tv": 0.04
+            },
+            "theta_count": 16,
+            "theta_pi": "backward",
+            "theta_zero": "forward",
+            "wavelength_nm": 550.0
+          },
+          "nf_frame_columns": [
+            [
+              -0.3420201433256687,
+              0.0,
+              0.9396926207859084
+            ],
+            [
+              -0.9396926207859084,
+              0.0,
+              -0.3420201433256687
+            ],
+            [
+              0.0,
+              -1.0,
+              0.0
+            ]
+          ],
+          "pole_pdf_representative": "source_phi_zero",
+          "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/synthetic_record",
+          "saved_g_check": 0.19872109645061267,
+          "saved_mass_check": 1.0,
+          "schema": "phaseflow.rainbow_reference.v1",
+          "source_repository": "https://github.com/Somatic-Cell/rainbow",
+          "source_to_nf": [
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -1.0,
+              -0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "uniform_domain": "[0,1)",
+          "uniform_order": [
+            "phi_marginal",
+            "u_given_phi"
+          ]
+        },
+        "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+        "expected_counts": {
+          "batch_size": 128,
+          "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+          "observed_train_band_samples": null,
+          "train_samples": 262144
+        },
+        "expected_minibatch_band_samples": 13.912412027008184,
+        "expected_train_band_samples": 28492.61983131276,
+        "hg_band_probability_width": 0.1173388038661644,
+        "implementation_sha256": "7d9c0d959e96e4ba4f6bb67a0cf6eaeb14de9a8faaa0e8a637f95769a61d24d9",
+        "model": {
+          "configuration": {
+            "activation": "silu",
+            "geometry_dtype": "model",
+            "hidden_features": [
+              16,
+              16
+            ],
+            "min_bin_height": 1e-05,
+            "min_bin_width": 1e-05,
+            "min_derivative": 0.0001,
+            "mirror_symmetry": true,
+            "num_bins": 8,
+            "num_coupling_layers": 2,
+            "spline_dtype": "model"
+          },
+          "density_evaluation_dtype": "torch.float32",
+          "device": "cpu",
+          "family": "single_condition_circular_hg",
+          "parameter_dtype": "torch.float32"
+        },
+        "profiles": {
+          "actual_source_phi_degrees": [
+            -97.5,
+            -7.5,
+            82.5
+          ],
+          "array_order": [
+            "requested_phi_profile",
+            "native_theta_cell"
+          ],
+          "density_floor": null,
+          "nf_and_hg_pdf": "point_evaluation_at_native_u_midpoints_not_cell_averages",
+          "no_within_cell_resolution_claim": true,
+          "phi_cell_indices": [
+            5,
+            11,
+            17
+          ],
+          "phi_choice": "nearest_periodic_native_cell_center_ties_choose_lowest_cell_index",
+          "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
+          "requested_source_phi_degrees": [
+            -90.0,
+            0.0,
+            90.0
+          ],
+          "theta_count": 16,
+          "zero_log_pdf": "negative_infinity_in_NPZ_omitted_curve_with_gray_cell_span_in_figure",
+          "zero_reference_cells_per_profile": [
+            0,
+            0,
+            0
+          ]
+        },
+        "reference_band_mass_exact": 0.10869071896100144,
+        "reference_band_zero_solid_angle_fraction": 0.0,
+        "reference_zero_solid_angle_fraction": 0.0,
+        "schema": "phaseflow.angular_diagnostics.v1",
+        "scope": "report_only_same_condition_no_model_selection",
+        "source_kind": "synthetic_fixture"
+      },
+      "effective_passes": 0.009765625,
+      "elapsed_seconds": 2.151215832998787,
+      "global_step": 20,
+      "learning_rate": 0.003,
+      "parameter_bytes": 5016,
+      "parameter_count": 1254,
+      "processed_examples": 2560,
+      "reuse_of": null,
+      "run_directory": "stage_b/n_262144",
+      "sample_split": {
+        "data_seed": 2026,
+        "minibatch_rng": {
+          "device": "cpu",
+          "engine": "torch.Generator",
+          "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches"
+        },
+        "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
+        "scope": "one_fixed_condition; independent point streams; no condition holdout",
+        "seed": 415,
+        "streams": {
+          "minibatches": 2,
+          "proposal": 4,
+          "test": 3,
+          "train": 0,
+          "validation": 1
+        },
+        "test_samples": 1024,
+        "train_samples": 262144,
+        "training_points_sha256": "2d45126d0f7d41776bf820c1f12da11882cce7cf3921279054fc6473a02334bf",
+        "uniforms": "52-bit open midpoint grid",
+        "validation_points_sha256": "60a726d83d9be429981be7868076c49ea1c2ba6e0dafc003b0f6294b607fa453",
+        "validation_samples": 512
+      },
+      "selected_step": 20,
+      "stage": "B",
+      "status": "complete",
+      "test_hg_kl": 0.11831993648344538,
+      "test_kl": 0.0330264899323683,
+      "test_kl_standard_error": 0.008077815532002196,
+      "test_nll": 2.391583274817094,
+      "test_relative_ess": 0.9385015561971667,
+      "train_monitor_nll_at_selected_step": 2.4113044512923807,
+      "train_samples": 262144,
+      "training_config": {
+        "batch_size": 128,
+        "checkpoint_every": 5,
+        "cpu_threads": 1,
+        "data_seed": 2026,
+        "deterministic": true,
+        "device": "cpu",
+        "dtype": "float32",
+        "eval_batch_size": 512,
+        "eval_every": 5,
+        "grad_clip_norm": 10.0,
+        "learning_rate": 0.003,
+        "log_every": 5,
+        "proposal_samples": 512,
+        "seed": 415,
+        "steps": 20,
+        "tensorboard": true,
+        "test_samples": 1024,
+        "train_monitor_samples": 512,
+        "train_samples": 262144,
+        "validation_samples": 512
+      },
+      "trial_id": "B_n_262144",
+      "validation_hg_kl": 0.13167036902887225,
+      "validation_kl": 0.045387271752408136,
+      "validation_kl_standard_error": 0.011008838580161476,
+      "validation_nll": 2.377966877538711
+    }
+  ]
+}

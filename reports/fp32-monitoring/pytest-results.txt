@@ -1,0 +1,13 @@
+....................................................s............ssss... [ 24%]
+........................................s............................... [ 48%]
+........................................s............................... [ 73%]
+......................................s................................. [ 97%]
+.......                                                                  [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_fp32_geometry.py:195: requires a CUDA GPU
+SKIPPED [2] tests/test_gpu_workflow.py:179: requires a CUDA device; CPU is not a substitute
+SKIPPED [2] tests/test_gpu_workflow.py:258: requires a CUDA device; CPU is not a substitute
+SKIPPED [1] tests/test_precision.py:225: CUDA device is unavailable
+SKIPPED [1] tests/test_rainbow_plotting.py:204: CUDA device is not available
+SKIPPED [1] tests/test_sphere_model.py:425: CUDA device is unavailable
+287 passed, 8 skipped in 17.75s

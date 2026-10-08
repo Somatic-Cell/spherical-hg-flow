@@ -20,6 +20,7 @@ import torch
 import zuko
 
 from . import __version__
+from .monitoring import TrainingMonitor, check_tensorboard, plot_training_history
 from .rainbow import RainbowReference
 from .sphere_model import SingleConditionSphereFlow, SphereFlowConfig
 from .training import (
@@ -36,14 +37,15 @@ if TYPE_CHECKING:
     from .plotting import RainbowPlotConfig
 
 FAMILY = "rainbow_single_condition"
-CHECKPOINT_VERSION = 3
-READABLE_CHECKPOINT_VERSIONS = (2, 3)
+CHECKPOINT_VERSION = 4
+READABLE_CHECKPOINT_VERSIONS = (2, 3, 4)
 _STREAMS = {"train": 0, "validation": 1, "minibatches": 2, "test": 3, "proposal": 4}
 
 
 @dataclass
 class SingleTrainingConfig:
     seed: int = 415
+    data_seed: int | None = None
     device: str = "cuda"
     dtype: str = "float32"
     train_samples: int = 65536
@@ -59,6 +61,9 @@ class SingleTrainingConfig:
     grad_clip_norm: float | None = 10.0
     deterministic: bool = True
     cpu_threads: int = 1
+    log_every: int = 20
+    tensorboard: bool = False
+    train_monitor_samples: int = 8192
 
     def __post_init__(self) -> None:
         positive = (
@@ -68,6 +73,8 @@ class SingleTrainingConfig:
             "checkpoint_every",
             "eval_batch_size",
             "cpu_threads",
+            "log_every",
+            "train_monitor_samples",
         )
         for name in (
             *positive,
@@ -85,6 +92,10 @@ class SingleTrainingConfig:
                 raise ValueError(f"{name} must be positive")
         if not 0 <= self.seed < 2**63 or self.steps < 0:
             raise ValueError("seed must be in [0, 2**63); steps must be nonnegative")
+        if self.data_seed is not None and (
+            type(self.data_seed) is not int or not 0 <= self.data_seed < 2**63
+        ):
+            raise ValueError("data_seed must be null or an integer in [0, 2**63)")
         if min(self.validation_samples, self.test_samples) < 2:
             raise ValueError("validation_samples and test_samples must be at least two")
         if self.proposal_samples != 0 and self.proposal_samples < 2:
@@ -107,6 +118,8 @@ class SingleTrainingConfig:
             raise ValueError("grad_clip_norm must be positive or null")
         if type(self.deterministic) is not bool:
             raise ValueError("deterministic must be boolean")
+        if type(self.tensorboard) is not bool:
+            raise ValueError("tensorboard must be boolean")
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> SingleTrainingConfig:
@@ -152,10 +165,15 @@ def _resolve_device(device: str | torch.device) -> torch.device:
 def _device_points(
     points: tuple[np.ndarray, np.ndarray] | tuple[torch.Tensor, torch.Tensor],
     device: torch.device,
+    geometry_dtype: torch.dtype = torch.float64,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Transfer once, then take views/index selections on the selected device.
-    # Directions and teacher log PDFs never pass through the MLP's FP32 dtype.
-    return tuple(torch.as_tensor(value, dtype=torch.float64, device=device) for value in points)
+    # Teacher values and statistical reductions retain reference precision;
+    # repeated NF evaluation uses the model's explicit geometry precision.
+    return (
+        torch.as_tensor(points[0], dtype=geometry_dtype, device=device),
+        torch.as_tensor(points[1], dtype=torch.float64, device=device),
+    )
 
 
 def _uniforms(generator: np.random.Generator, count: int, bits: int = 52) -> np.ndarray:
@@ -191,6 +209,7 @@ def _code_hash() -> str:
         "hg.py",
         "geometry.py",
         "training.py",
+        "monitoring.py",
     ):
         digest.update(name.encode("ascii"))
         digest.update((root / name).read_bytes())
@@ -233,7 +252,7 @@ def _likelihood_metrics(
     batch_size: int,
 ) -> dict[str, Any]:
     _check_model_reference(model, reference)
-    directions, log_p = _device_points(points, model.device)
+    directions, log_p = _device_points(points, model.device, model.geometry_dtype)
     log_q, log_hg = torch.empty_like(log_p), torch.empty_like(log_p)
     for start in range(0, len(directions), batch_size):
         x = directions[start : start + batch_size]
@@ -241,8 +260,7 @@ def _likelihood_metrics(
         if q.shape != (len(x),):
             raise FloatingPointError("model log_prob has the wrong shape")
         log_q[start : start + len(x)] = q
-        mu = x[:, 2] / torch.linalg.vector_norm(x, dim=-1)
-        log_hg[start : start + len(x)] = model.hg_base_log_prob(mu)
+        log_hg[start : start + len(x)] = model.hg_base_direction_log_prob(x)
     statistics = torch.stack(
         (-log_q, log_p - log_q, -log_hg, log_p - log_hg, log_q - log_hg, -log_p)
     )
@@ -286,9 +304,9 @@ def _proposal_metrics(
     if count == 0:
         return None
     generator = _generator(seed, "proposal")
-    bits = 23 if model.spline_dtype == torch.float32 else 52
+    bits = 23 if torch.float32 in (model.spline_dtype, model.geometry_dtype) else 52
     uniforms = torch.as_tensor(
-        _uniforms(generator, count, bits=bits), dtype=torch.float64, device=model.device
+        _uniforms(generator, count, bits=bits), dtype=model.geometry_dtype, device=model.device
     )
     generated = torch.empty((count, 5), dtype=torch.float64, device=model.device)
     for start in range(0, count, batch_size):
@@ -381,7 +399,8 @@ def evaluate_single_condition(
             precision={
                 "conditioner": str(model.dtype).removeprefix("torch."),
                 "spline": str(model.spline_dtype).removeprefix("torch."),
-                "hg_geometry_log_pdf": "float64",
+                "hg_geometry_log_pdf": str(model.geometry_dtype).removeprefix("torch."),
+                "teacher_and_statistical_reduction": "float64",
             },
             proposal=_proposal_metrics(model, reference, proposal_samples, seed, batch_size),
         )
@@ -398,7 +417,7 @@ def read_single_checkpoint(path: str | Path) -> dict[str, Any]:
         or payload.get("checkpoint_version") not in READABLE_CHECKPOINT_VERSIONS
         or (payload.get("family") != FAMILY)
     ):
-        raise ValueError("not a supported version-2/3 Rainbow single-condition checkpoint")
+        raise ValueError("not a supported version-2/3/4 Rainbow single-condition checkpoint")
     required = {
         "kind",
         "model_config",
@@ -476,6 +495,8 @@ def train_single_condition(
     if not isinstance(plotting, RainbowPlotConfig):
         raise ValueError("plot_config must be a RainbowPlotConfig")
     cfg = training_config
+    if cfg.tensorboard:
+        check_tensorboard()  # Fail before expensive data preparation or optimization.
     output = Path(output_directory)
     previous = read_single_checkpoint(resume) if resume is not None else None
     if output.exists() and any(output.iterdir()) and previous is None:
@@ -498,8 +519,8 @@ def train_single_condition(
             raise ValueError("best.pt is inference-only; resume from checkpoint.pt")
         if previous["checkpoint_version"] != CHECKPOINT_VERSION:
             raise ValueError(
-                "exact resume requires a version-3 checkpoint from this implementation; "
-                "version-2 checkpoints remain readable for evaluation/plotting"
+                "exact resume requires a version-4 checkpoint from this implementation; "
+                "version-2/3 checkpoints remain readable for evaluation/plotting"
             )
         required = {
             "training_config",
@@ -551,11 +572,13 @@ def train_single_condition(
         device=device,
         validate_args=False,
     )
-    training_points = _points(reference, cfg.train_samples, cfg.seed, "train")
-    validation_points = _points(reference, cfg.validation_samples, cfg.seed, "validation")
+    data_seed = cfg.seed if cfg.data_seed is None else cfg.data_seed
+    training_points = _points(reference, cfg.train_samples, data_seed, "train")
+    validation_points = _points(reference, cfg.validation_samples, data_seed, "validation")
     split = {
         "scope": "one_fixed_condition; independent point streams; no condition holdout",
         "seed": cfg.seed,
+        "data_seed": data_seed,
         "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
         "minibatch_rng": {
             "engine": "torch.Generator",
@@ -575,9 +598,14 @@ def train_single_condition(
     # Retain one fixed pool on the device; the optimization loop has no NumPy
     # indexing, CDF inversion, or host-to-device point transfers.
     training_directions = torch.as_tensor(
-        training_points[0], dtype=torch.float64, device=device
+        training_points[0], dtype=model.geometry_dtype, device=device
     )
-    validation_device = _device_points(validation_points, device)
+    monitor_count = min(cfg.train_samples, cfg.train_monitor_samples)
+    training_monitor = (
+        training_directions[:monitor_count],
+        torch.as_tensor(training_points[1][:monitor_count], dtype=torch.float64, device=device),
+    )
+    validation_device = _device_points(validation_points, device, model.geometry_dtype)
     del training_points, validation_points
     parameters = list(model.parameters())
     optimizer = torch.optim.Adam(
@@ -591,7 +619,13 @@ def train_single_condition(
         latest = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
         best_validation = copy.deepcopy(latest)
         best_state = copy.deepcopy(model.state_dict())
-        history.append({"event": "initial", "global_step": 0, "validation": latest})
+        history.append({
+            "event": "initial", "global_step": 0, "examples_seen": 0,
+            "effective_passes": 0.0, "validation": latest,
+            "train_monitor": _likelihood_metrics(
+                model, reference, training_monitor, cfg.eval_batch_size
+            ),
+        })
     else:
         model.load_state_dict(previous["model_state"], strict=True)
         _check_model_reference(model, reference)
@@ -688,7 +722,14 @@ def train_single_condition(
                 "the last valid checkpoint was retained"
             )
         history.extend(
-            {"global_step": update, "loss": float(values[0])}
+            {
+                "global_step": update,
+                "loss": float(values[0]),
+                "gradient_norm_before_clip": float(values[1]),
+                "learning_rate": cfg.learning_rate,
+                "examples_seen": update * cfg.batch_size,
+                "effective_passes": update * cfg.batch_size / cfg.train_samples,
+            }
             for (update, _, _), values in zip(pending, summaries, strict=True)
         )
         pending.clear()
@@ -699,44 +740,66 @@ def train_single_condition(
         callback(history[0])
     stop = cfg.steps if max_steps_this_run is None else min(cfg.steps, step + max_steps_this_run)
     model.train()
-    while step < stop:
-        indices = torch.randint(
-            cfg.train_samples, (cfg.batch_size,), generator=minibatches, device=device
-        )
-        outgoing = training_directions[indices]
-        optimizer.zero_grad(set_to_none=True)
-        log_q = model.log_prob(outgoing)
-        if log_q.shape != (cfg.batch_size,):
-            raise FloatingPointError("malformed training log_prob")
-        loss = -log_q.mean()  # Target-distributed samples have unit loss weight.
-        loss.backward()
-        gradient_norm = torch.nn.utils.clip_grad_norm_(
-            parameters,
-            cfg.grad_clip_norm if cfg.grad_clip_norm is not None else math.inf,
-            error_if_nonfinite=False,
-            foreach=device.type == "cuda",
-        )
-        optimizer.step()
-        step += 1
-        pending.append((step, loss.detach(), gradient_norm.detach()))
-        evaluation_due = step % cfg.eval_every == 0 or step == cfg.steps
-        checkpoint_due = step % cfg.checkpoint_every == 0 or step == cfg.steps
-        if evaluation_due or checkpoint_due or step == stop:
-            flush_updates()
-        if evaluation_due:
-            entry = history[-1]
-            latest = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
-            entry["validation"] = latest
-            if latest["nll"] < best_validation["nll"]:
-                best_step, best_validation = step, copy.deepcopy(latest)
-                best_state = copy.deepcopy(model.state_dict())
-            if callback is not None:
-                callback(entry)
-        if checkpoint_due:
-            save()
-    # Save only completed update boundaries. KeyboardInterrupt within an update
-    # propagates, leaving the preceding atomic checkpoint intact.
-    save()
+    with TrainingMonitor(
+        output, history, tensorboard=cfg.tensorboard, start_step=step,
+        batch_size=cfg.batch_size,
+        metadata={
+            "model": model_config.to_dict(), "training": cfg.to_dict(),
+            "physics": physics, "dataset_fingerprint": fingerprint,
+            "train_monitor_subset": "first min(train_monitor_samples, train_samples) fixed points",
+        },
+    ) as monitor:
+        published = len(history)
+        while step < stop:
+            indices = torch.randint(
+                cfg.train_samples, (cfg.batch_size,), generator=minibatches, device=device
+            )
+            outgoing = training_directions[indices]
+            optimizer.zero_grad(set_to_none=True)
+            log_q = model.log_prob(outgoing)
+            if log_q.shape != (cfg.batch_size,):
+                raise FloatingPointError("malformed training log_prob")
+            loss = -log_q.mean()  # Target-distributed samples have unit loss weight.
+            loss.backward()
+            gradient_norm = torch.nn.utils.clip_grad_norm_(
+                parameters,
+                cfg.grad_clip_norm if cfg.grad_clip_norm is not None else math.inf,
+                error_if_nonfinite=False,
+                foreach=device.type == "cuda",
+            )
+            optimizer.step()
+            step += 1
+            pending.append((step, loss.detach(), gradient_norm.detach()))
+            evaluation_due = step % cfg.eval_every == 0 or step == cfg.steps
+            checkpoint_due = step % cfg.checkpoint_every == 0 or step == cfg.steps
+            logging_due = step % cfg.log_every == 0
+            boundary = evaluation_due or checkpoint_due or logging_due or step == stop
+            if boundary:
+                flush_updates()
+            if evaluation_due:
+                entry = history[-1]
+                latest = _likelihood_metrics(
+                    model, reference, validation_device, cfg.eval_batch_size
+                )
+                entry["validation"] = latest
+                entry["train_monitor"] = _likelihood_metrics(
+                    model, reference, training_monitor, cfg.eval_batch_size
+                )
+                if latest["nll"] < best_validation["nll"]:
+                    best_step, best_validation = step, copy.deepcopy(latest)
+                    best_state = copy.deepcopy(model.state_dict())
+            if boundary:
+                monitor.publish(history[published:])
+                published = len(history)
+                monitor.telemetry(step)
+                if callback is not None:
+                    callback(history[-1])
+            if checkpoint_due:
+                save()
+        # An interrupt inside an update leaves the preceding atomic checkpoint.
+        save()
+    if make_plots or cfg.tensorboard:
+        plot_training_history(output / "history.json", output / "learning_curves.png")
     selected = SingleConditionSphereFlow(
         reference.g,
         physics["incident_cosine"],
@@ -752,7 +815,7 @@ def train_single_condition(
             selected,
             reference,
             samples=cfg.test_samples,
-            seed=cfg.seed,
+            seed=data_seed,
             batch_size=cfg.eval_batch_size,
             proposal_samples=cfg.proposal_samples,
         )

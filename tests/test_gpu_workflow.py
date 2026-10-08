@@ -33,9 +33,11 @@ CUDA_REQUIRED = pytest.mark.skipif(
 )
 
 
-def gpu_model_config() -> SphereFlowConfig:
+def gpu_model_config(fp32_geometry: bool = False) -> SphereFlowConfig:
     return SphereFlowConfig(
-        hidden_features=(16, 16), num_coupling_layers=2, num_bins=8, spline_dtype="float64"
+        hidden_features=(16, 16), num_coupling_layers=2, num_bins=8,
+        spline_dtype="model" if fp32_geometry else "float64",
+        geometry_dtype="model" if fp32_geometry else "float64",
     )
 
 
@@ -82,7 +84,8 @@ def test_shipped_training_defaults_require_cuda_and_float32_conditioners():
     shipped = json.loads(path.read_text(encoding="utf-8"))
     assert shipped["training"]["device"] == "cuda"
     assert shipped["training"]["dtype"] == "float32"
-    assert shipped["model"]["spline_dtype"] == "float64"
+    assert shipped["model"]["spline_dtype"] == "model"
+    assert shipped["model"]["geometry_dtype"] == "model"
 
 
 def test_default_training_fails_without_cuda_before_sampling_or_writing(tmp_path, monkeypatch):
@@ -175,9 +178,11 @@ def test_version2_checkpoint_loads_on_explicit_cpu_without_reinterpreting_precis
 
 @pytest.mark.cuda
 @CUDA_REQUIRED
-def test_cuda_resident_point_pools_mixed_precision_learning_and_evaluation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fp32_geometry", [False, True])
+def test_cuda_resident_point_pools_learning_and_evaluation(tmp_path, monkeypatch, fp32_geometry):
     monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     device = torch.device("cuda", 0)
+    coordinate_dtype = torch.float32 if fp32_geometry else torch.float64
     streams = Counter()
     transfers = Counter()
     training_calls = []
@@ -189,11 +194,14 @@ def test_cuda_resident_point_pools_mixed_precision_learning_and_evaluation(tmp_p
         streams[stream] += 1
         return original_points(reference, count, seed, stream)
 
-    def check_pool_transfer(points, destination):
+    def check_pool_transfer(points, destination, geometry_dtype=torch.float64):
         assert destination == device
-        result = original_device_points(points, destination)
-        for source, resident in zip(points, result, strict=True):
-            assert resident.device == device and resident.dtype == torch.float64
+        assert geometry_dtype == coordinate_dtype
+        result = original_device_points(points, destination, geometry_dtype)
+        for source, resident, dtype in zip(
+            points, result, (coordinate_dtype, torch.float64), strict=True
+        ):
+            assert resident.device == device and resident.dtype == dtype
             if isinstance(source, torch.Tensor):
                 # Validation visits must reuse the original device pool.
                 assert source.device == device and source.data_ptr() == resident.data_ptr()
@@ -204,8 +212,9 @@ def test_cuda_resident_point_pools_mixed_precision_learning_and_evaluation(tmp_p
         return result
 
     def check_model_inputs(model, outgoing):
-        assert outgoing.device == device and outgoing.dtype == torch.float64
-        assert model.dtype == torch.float32 and model.spline_dtype == torch.float64
+        assert outgoing.device == device and outgoing.dtype == coordinate_dtype
+        assert model.dtype == torch.float32 and model.spline_dtype == coordinate_dtype
+        assert model.geometry_dtype == coordinate_dtype
         if torch.is_grad_enabled():
             training_calls.append(len(outgoing))
             assert not model.validate_args
@@ -217,7 +226,7 @@ def test_cuda_resident_point_pools_mixed_precision_learning_and_evaluation(tmp_p
     cfg = gpu_training_config(steps=32, eval_every=8)
     with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
         result = train_single_condition(
-            record, gpu_model_config(), cfg, tmp_path / "run", make_plots=False
+            record, gpu_model_config(fp32_geometry), cfg, tmp_path / "run", make_plots=False
         )
         assert result.complete and result.model.device == device
         assert result.model.hg_g == record.g
@@ -235,18 +244,22 @@ def test_cuda_resident_point_pools_mixed_precision_learning_and_evaluation(tmp_p
         )
         assert report["runtime"]["device"] == "cuda:0"
         assert report["precision"] == {
-            "conditioner": "float32", "spline": "float64", "hg_geometry_log_pdf": "float64"
+            "conditioner": "float32",
+            "spline": str(coordinate_dtype).removeprefix("torch."),
+            "hg_geometry_log_pdf": str(coordinate_dtype).removeprefix("torch."),
+            "teacher_and_statistical_reduction": "float64",
         }
         assert report["base_g"] == record.g
-        assert report["proposal"]["uniform_midpoint_bits"] == 52
+        assert report["proposal"]["uniform_midpoint_bits"] == (23 if fp32_geometry else 52)
         assert 0 < report["proposal"]["relative_ess"] <= 1.00000000001
-        assert report["proposal"]["sample_eval_log_pdf_max_abs_error"] < 1e-5
+        assert report["proposal"]["sample_eval_log_pdf_max_abs_error"] < (1e-4 if fp32_geometry else 1e-5)
 
 
 @pytest.mark.cuda
 @CUDA_REQUIRED
+@pytest.mark.parametrize("fp32_geometry", [False, True])
 def test_cuda_resume_restores_optimizer_and_generator_exactly_at_unscheduled_boundary(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fp32_geometry
 ):
     monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     checked_optimizer_loads = []
@@ -270,11 +283,11 @@ def test_cuda_resume_restores_optimizer_and_generator_exactly_at_unscheduled_bou
     cfg = gpu_training_config(steps=12)
     with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
         full = train_single_condition(
-            record, gpu_model_config(), cfg, tmp_path / "full", make_plots=False
+            record, gpu_model_config(fp32_geometry), cfg, tmp_path / "full", make_plots=False
         )
         partial = train_single_condition(
             record,
-            gpu_model_config(),
+            gpu_model_config(fp32_geometry),
             cfg,
             tmp_path / "resumed",
             max_steps_this_run=5,
@@ -282,7 +295,7 @@ def test_cuda_resume_restores_optimizer_and_generator_exactly_at_unscheduled_bou
         )
         assert not partial.complete and partial.metrics["test"] is None
         interrupted = read_single_checkpoint(partial.checkpoint_path)
-        assert interrupted["checkpoint_version"] == 3
+        assert interrupted["checkpoint_version"] == workflow.CHECKPOINT_VERSION
         assert interrupted["minibatch_rng_state"].dtype == torch.uint8
         assert interrupted["sample_split"]["minibatch_rng"]["device"] == "cuda:0"
         assert [entry["global_step"] for entry in interrupted["history"] if "validation" in entry] == [
@@ -290,7 +303,7 @@ def test_cuda_resume_restores_optimizer_and_generator_exactly_at_unscheduled_bou
         ]
         continued = train_single_condition(
             record,
-            gpu_model_config(),
+            gpu_model_config(fp32_geometry),
             cfg,
             tmp_path / "resumed",
             resume=partial.checkpoint_path,
@@ -308,5 +321,6 @@ def test_cuda_resume_restores_optimizer_and_generator_exactly_at_unscheduled_bou
         assert_tensor_state_equal(full.model.state_dict(), continued.model.state_dict())
         restored, _ = load_single_checkpoint(continued.best_path, device="cuda:0")
         assert restored.hg_g == record.g
-        assert restored.dtype == torch.float32 and restored.spline_dtype == torch.float64
+        assert restored.dtype == torch.float32
+        assert restored.spline_dtype == (torch.float32 if fp32_geometry else torch.float64)
         assert_tensor_state_equal(restored.state_dict(), continued.model.state_dict())

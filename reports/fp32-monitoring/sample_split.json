@@ -1,0 +1,24 @@
+{
+  "data_seed": 2026,
+  "minibatch_rng": {
+    "device": "cpu",
+    "engine": "torch.Generator",
+    "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches"
+  },
+  "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
+  "scope": "one_fixed_condition; independent point streams; no condition holdout",
+  "seed": 415,
+  "streams": {
+    "minibatches": 2,
+    "proposal": 4,
+    "test": 3,
+    "train": 0,
+    "validation": 1
+  },
+  "test_samples": 2048,
+  "train_samples": 2048,
+  "training_points_sha256": "54b35f52cdfffe8e6548dcff8033689909b2358a912c575badcb8fcf947da455",
+  "uniforms": "52-bit open midpoint grid",
+  "validation_points_sha256": "55ea005f1dda8af6a3ea768c51528f6540093da4aa4bb6a67a4421bf44e4cccd",
+  "validation_samples": 2048
+}

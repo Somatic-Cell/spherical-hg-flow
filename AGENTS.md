@@ -47,9 +47,14 @@ The current primary workflow is the **single-condition Rainbow model** documente
   the selected device and avoid CPU minibatch copies or per-parameter host
   synchronization in the optimization loop.
 - Distinguish the MLP parameter dtype from the spline/probability-coordinate
-  dtype. The production starting configuration uses FP32 conditioners and FP64
-  HG, geometry and RQS arithmetic. Do not silently enable AMP/FP16, TF32, or
-  downgrade externally supplied g. Record both precision choices.
+  dtype. The v0.4 starting configuration uses FP32 weights, HG, geometry and
+  RQS arithmetic (`geometry_dtype="model"`, `spline_dtype="model"`). Preserve
+  externally supplied g exactly in metadata; derive runtime endpoint constants
+  from it without clipping. Retain transverse direction information near poles.
+  Use explicit FP64 reference diagnostics and FP64 teacher/statistical reduction
+  values. Old configs without geometry_dtype retain their FP64 geometry behavior.
+  Do not silently enable AMP/FP16 or TF32. FP16-rounded weights evaluated with
+  FP32 arithmetic are a quantization diagnostic, not a CoopVec parity test.
 - Keep the fixed training pool, validation stream and test stream independent.
   Model selection uses validation data; final test data must not select weights.
   Record seeds, sample counts, update count, optimizer/RNG state, complete
@@ -63,6 +68,9 @@ The current primary workflow is the **single-condition Rainbow model** documente
 - Preserve the selected checkpoint separately from the resumable training
   checkpoint. Load primitive/tensor checkpoints with `weights_only=True`.
   Reject mismatched source data, configuration, model family and format versions.
+- Keep live JSONL/TensorBoard histories consistent with the resumed checkpoint:
+  remove uncheckpointed future scalar events by replaying checkpoint history.
+  Wall-clock telemetry is separate from the deterministic numerical history.
 - Validate CDF inversion/evaluation, frame conversions, RQS round trips and
   Jacobians, periodic seams, symmetries, normalization, sample/eval consistency,
   learning and resume after relevant changes. Prefer checks that resolve an

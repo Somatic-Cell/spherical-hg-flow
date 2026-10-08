@@ -1,0 +1,16 @@
+{
+  "scope": "synthetic CPU pipeline verification, not optical/CUDA accuracy",
+  "python": "3.14.8",
+  "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+  "torch": "2.14.1+cpu",
+  "cuda_runtime": null,
+  "cuda_available": false,
+  "zuko": "1.6.0",
+  "numpy": "2.5.3",
+  "logical_rows": 7,
+  "physical_trials": 6,
+  "completed_trial_files_checked_on_rerun": 133,
+  "completed_trial_files_changed_on_rerun": [],
+  "selection_test_used": false,
+  "selected_learning_rate_for_this_synthetic_fixture_only": 0.003
+}

@@ -1,0 +1,310 @@
+{
+  "artifacts": {
+    "arrays": {
+      "path": "angular_profiles.npz",
+      "sha256": "2ab001676e7fb718f721c31d0f06d35c84a4c454d81fd15dbb5840ec3c9bf999"
+    },
+    "figure": {
+      "path": "angular_profiles.png",
+      "sha256": "f2cf5ec9bc434739fd390bcf015e088f5717cbc02c394c4d2804d939843f3cfc"
+    },
+    "report": {
+      "path": "angular_diagnostics.json"
+    }
+  },
+  "band": {
+    "band_choice": "configurable_reporting_region_not_a_certified_rainbow_boundary",
+    "conditional_kl": null,
+    "exactness": "exact_saved_cell_integral_up_to_floating_point_roundoff",
+    "hg_method": "analytic_HG_CDF_difference_rationalized_without_tail_subtraction",
+    "nf_band_mass": null,
+    "solid_angle_sr": 2.2998054391128626,
+    "source_phi_degrees": [
+      -180.0,
+      180.0
+    ],
+    "target_mass_method": "saved_phi_marginal_times_exact_piecewise_linear_u_CDF_difference",
+    "theta_degrees": [
+      120.0,
+      150.0
+    ],
+    "u_boundaries": [
+      0.7499999999999999,
+      0.9330127018922194
+    ],
+    "zero_fraction_denominator": "solid_angle_of_the_reporting_band"
+  },
+  "checkpoint": {
+    "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/sweep/stage_a/lr_0.003/best.pt",
+    "sha256": "7aca795a91e2f9496efb0033b65070fee6b9461a1362a11b5137a26f004acb3f"
+  },
+  "condition": {
+    "hg_g": 0.1987210964506126,
+    "incident_cosine": 0.3420201433256687,
+    "incident_inclination_degrees": 20.0,
+    "wavelength_nm": 550.0
+  },
+  "configuration": {
+    "dpi": 140,
+    "eval_batch_size": 4096,
+    "source_phi_degrees": [
+      -90.0,
+      0.0,
+      90.0
+    ],
+    "theta_band_degrees": [
+      120.0,
+      150.0
+    ]
+  },
+  "configuration_sha256": "8e942ac4f836261f64b2c049fc9169d4dc5c2f630aafd452190a4d5f3fdb6b2e",
+  "coordinates": {
+    "density_measure": "solid_angle_sr",
+    "frame": "recorded_solver_source",
+    "solid_angle": "4*pi*du*dv_source",
+    "source_to_nf": [
+      [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      [
+        -1.0,
+        -0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "theta_pi": "backward",
+    "theta_zero": "forward",
+    "u": "(1-cos(theta))/2"
+  },
+  "data_provenance": {
+    "density_measure": "solid_angle_sr",
+    "files": {
+      "metadata.json": {
+        "bytes": 2042,
+        "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+      },
+      "phi_cdf.npy": {
+        "bytes": 328,
+        "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+      },
+      "theta_given_phi_cdf.npy": {
+        "bytes": 3392,
+        "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+      },
+      "u_edges.npy": {
+        "bytes": 264,
+        "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+      }
+    },
+    "metadata": {
+      "azimuth_periodic": true,
+      "cdf_axis_order": [
+        "phi_cell",
+        "theta_edge"
+      ],
+      "cell_model": "constant_density_per_spherical_cell",
+      "complete": true,
+      "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+      "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+      "density_measure": "solid_angle_sr",
+      "diffraction_policy": {
+        "computed": false
+      },
+      "direction_convention": "physical_propagation",
+      "dtype": "<f8",
+      "hg": {
+        "axis_particle_frame": [
+          0.9396926207859084,
+          -0.3420201433256687,
+          0.0
+        ],
+        "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+        "g": 0.1987210964506126,
+        "g_source": 0.73,
+        "method": "first_moment_of_saved_cell_pdf",
+        "target": "saved_cdf"
+      },
+      "incident_inclination_degrees": 20.0,
+      "input_polarization": "unpolarized",
+      "material": {
+        "wavelength_convention": "vacuum_nm"
+      },
+      "normalization": "integral_p_domega_equals_one",
+      "order": "C",
+      "particle_frame_handedness": "right",
+      "particle_up_axis": [
+        0,
+        1,
+        0
+      ],
+      "phi_count": 24,
+      "phi_range_rad": [
+        -3.141592653589793,
+        3.141592653589793
+      ],
+      "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+      "quality": {
+        "allow_underresolved": true,
+        "angular_convergence_certified": false
+      },
+      "sampling_frame_columns": [
+        [
+          0.0,
+          -0.3420201433256687,
+          0.9396926207859084
+        ],
+        [
+          0.0,
+          -0.9396926207859084,
+          -0.3420201433256687
+        ],
+        [
+          1.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+      "sampling_frame_map": "local_column_to_particle_column",
+      "schema": "rainbow.phase_cdf.numpy.v2",
+      "shape_polar_axis": [
+        0,
+        -1,
+        0
+      ],
+      "source_commit": "synthetic_fixture_no_solver_commit",
+      "source_dirty_at_configure": false,
+      "storage_processing": {
+        "additional_filter": "none",
+        "coarsening_tv": 0.04
+      },
+      "theta_count": 16,
+      "theta_pi": "backward",
+      "theta_zero": "forward",
+      "wavelength_nm": 550.0
+    },
+    "nf_frame_columns": [
+      [
+        -0.3420201433256687,
+        0.0,
+        0.9396926207859084
+      ],
+      [
+        -0.9396926207859084,
+        0.0,
+        -0.3420201433256687
+      ],
+      [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    ],
+    "pole_pdf_representative": "source_phi_zero",
+    "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/ab_sweep_validation/synthetic_record",
+    "saved_g_check": 0.19872109645061267,
+    "saved_mass_check": 1.0,
+    "schema": "phaseflow.rainbow_reference.v1",
+    "source_repository": "https://github.com/Somatic-Cell/rainbow",
+    "source_to_nf": [
+      [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      [
+        -1.0,
+        -0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "uniform_domain": "[0,1)",
+    "uniform_order": [
+      "phi_marginal",
+      "u_given_phi"
+    ]
+  },
+  "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+  "expected_counts": {
+    "batch_size": 128,
+    "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+    "observed_train_band_samples": null,
+    "train_samples": 65536
+  },
+  "expected_minibatch_band_samples": 13.912412027008184,
+  "expected_train_band_samples": 7123.15495782819,
+  "hg_band_probability_width": 0.1173388038661644,
+  "implementation_sha256": "7d9c0d959e96e4ba4f6bb67a0cf6eaeb14de9a8faaa0e8a637f95769a61d24d9",
+  "model": {
+    "configuration": {
+      "activation": "silu",
+      "geometry_dtype": "model",
+      "hidden_features": [
+        16,
+        16
+      ],
+      "min_bin_height": 1e-05,
+      "min_bin_width": 1e-05,
+      "min_derivative": 0.0001,
+      "mirror_symmetry": true,
+      "num_bins": 8,
+      "num_coupling_layers": 2,
+      "spline_dtype": "model"
+    },
+    "density_evaluation_dtype": "torch.float32",
+    "device": "cpu",
+    "family": "single_condition_circular_hg",
+    "parameter_dtype": "torch.float32"
+  },
+  "profiles": {
+    "actual_source_phi_degrees": [
+      -97.5,
+      -7.5,
+      82.5
+    ],
+    "array_order": [
+      "requested_phi_profile",
+      "native_theta_cell"
+    ],
+    "density_floor": null,
+    "nf_and_hg_pdf": "point_evaluation_at_native_u_midpoints_not_cell_averages",
+    "no_within_cell_resolution_claim": true,
+    "phi_cell_indices": [
+      5,
+      11,
+      17
+    ],
+    "phi_choice": "nearest_periodic_native_cell_center_ties_choose_lowest_cell_index",
+    "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
+    "requested_source_phi_degrees": [
+      -90.0,
+      0.0,
+      90.0
+    ],
+    "theta_count": 16,
+    "zero_log_pdf": "negative_infinity_in_NPZ_omitted_curve_with_gray_cell_span_in_figure",
+    "zero_reference_cells_per_profile": [
+      0,
+      0,
+      0
+    ]
+  },
+  "reference_band_mass_exact": 0.10869071896100144,
+  "reference_band_zero_solid_angle_fraction": 0.0,
+  "reference_zero_solid_angle_fraction": 0.0,
+  "schema": "phaseflow.angular_diagnostics.v1",
+  "scope": "report_only_same_condition_no_model_selection",
+  "source_kind": "synthetic_fixture"
+}

@@ -1,0 +1,572 @@
+{
+  "autocast_enabled": false,
+  "batch_size": 4096,
+  "checkpoint": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/fp32_validation_v04/best.pt",
+  "checkpoint_code_fingerprint": "1280c84d98be314e9cd54aad4203d8ed01ed522f2fc8a2856e749a7e7767f474",
+  "checkpoint_kind": "inference",
+  "checkpoint_sha256": "64f72677cf8c42b25347ffa721d8c001e44bc567112c211872e943d3d489eaeb",
+  "checkpoint_step": 100,
+  "common_model_uniform_midpoint_bits": 23,
+  "comparisons": {
+    "float32_vs_float64": {
+      "forward_kl_increase": {
+        "mean": 8.46583234520885e-08,
+        "standard_error": 7.916378539712737e-09
+      },
+      "heldout_log_pdf_difference": {
+        "max_abs": 2.387711143025939e-06,
+        "mean": -8.46583234520885e-08,
+        "mean_abs": 3.9316557165676187e-07,
+        "median_abs": 3.123014531425383e-07,
+        "p95_abs": 1.0524957128055235e-06,
+        "p99_abs": 1.5026452648836408e-06,
+        "rms": 5.136115148030641e-07,
+        "standard_error": 7.916378539712737e-09
+      },
+      "nll_increase": {
+        "mean": 8.46583234520885e-08,
+        "standard_error": 7.916378539712737e-09
+      },
+      "same_uniform_direction_angle_rad": {
+        "max_abs": 1.3912098118012894e-06,
+        "mean": 1.8282020537560386e-07,
+        "mean_abs": 1.8282020537560386e-07,
+        "median_abs": 1.5201289782620853e-07,
+        "p95_abs": 4.2925147499415294e-07,
+        "p99_abs": 7.535286398688596e-07,
+        "rms": 2.3118190893129123e-07,
+        "standard_error": 2.2111852148990145e-09
+      },
+      "same_uniform_sample_log_pdf_difference": {
+        "max_abs": 2.968393386204582e-06,
+        "mean": -6.076209256409984e-08,
+        "mean_abs": 3.785547599617525e-07,
+        "median_abs": 2.8890057235386735e-07,
+        "p95_abs": 1.0540139572245977e-06,
+        "p99_abs": 1.5469142444990434e-06,
+        "rms": 5.077326442934685e-07,
+        "standard_error": 7.877269910483297e-09
+      },
+      "sample_log_pdf_comparison": "at corresponding uniforms and their respective output directions, not two densities evaluated at the same direction",
+      "sign_convention": "candidate minus baseline; positive nll_increase is worse"
+    },
+    "fp16_weights_vs_float32": {
+      "forward_kl_increase": {
+        "mean": 2.532615326344967e-07,
+        "standard_error": 9.827094467868626e-07
+      },
+      "heldout_log_pdf_difference": {
+        "max_abs": 0.0002269744873046875,
+        "mean": -2.532615326344967e-07,
+        "mean_abs": 5.046330625191331e-05,
+        "median_abs": 4.172325134277344e-05,
+        "p95_abs": 0.00012350082397460938,
+        "p99_abs": 0.00015091896057128906,
+        "rms": 6.288623668989004e-05,
+        "standard_error": 9.827094467868626e-07
+      },
+      "nll_increase": {
+        "mean": 2.532615326344967e-07,
+        "standard_error": 9.827094467868626e-07
+      },
+      "same_uniform_direction_angle_rad": {
+        "max_abs": 7.105855638784222e-05,
+        "mean": 1.5862888995292357e-05,
+        "mean_abs": 1.5862888995292357e-05,
+        "median_abs": 1.2193473751935204e-05,
+        "p95_abs": 4.9466803696923436e-05,
+        "p99_abs": 6.578936309692457e-05,
+        "rms": 2.1400480698463146e-05,
+        "standard_error": 2.2447840877669565e-07
+      },
+      "same_uniform_sample_log_pdf_difference": {
+        "max_abs": 0.00027680397033691406,
+        "mean": 4.123925464227796e-06,
+        "mean_abs": 5.5250682635232806e-05,
+        "median_abs": 4.315376281738281e-05,
+        "p95_abs": 0.00014019012451171875,
+        "p99_abs": 0.0001888871192932131,
+        "rms": 7.076656854987925e-05,
+        "standard_error": 1.1039832932910496e-06
+      },
+      "sample_log_pdf_comparison": "at corresponding uniforms and their respective output directions, not two densities evaluated at the same direction",
+      "sign_convention": "candidate minus baseline; positive nll_increase is worse"
+    },
+    "native_vs_float64": {
+      "forward_kl_increase": {
+        "mean": 8.46583234520885e-08,
+        "standard_error": 7.916378539712737e-09
+      },
+      "heldout_log_pdf_difference": {
+        "max_abs": 2.387711143025939e-06,
+        "mean": -8.46583234520885e-08,
+        "mean_abs": 3.9316557165676187e-07,
+        "median_abs": 3.123014531425383e-07,
+        "p95_abs": 1.0524957128055235e-06,
+        "p99_abs": 1.5026452648836408e-06,
+        "rms": 5.136115148030641e-07,
+        "standard_error": 7.916378539712737e-09
+      },
+      "nll_increase": {
+        "mean": 8.46583234520885e-08,
+        "standard_error": 7.916378539712737e-09
+      },
+      "same_uniform_direction_angle_rad": {
+        "max_abs": 1.3912098118012894e-06,
+        "mean": 1.8282020537560386e-07,
+        "mean_abs": 1.8282020537560386e-07,
+        "median_abs": 1.5201289782620853e-07,
+        "p95_abs": 4.2925147499415294e-07,
+        "p99_abs": 7.535286398688596e-07,
+        "rms": 2.3118190893129123e-07,
+        "standard_error": 2.2111852148990145e-09
+      },
+      "same_uniform_sample_log_pdf_difference": {
+        "max_abs": 2.968393386204582e-06,
+        "mean": -6.076209256409984e-08,
+        "mean_abs": 3.785547599617525e-07,
+        "median_abs": 2.8890057235386735e-07,
+        "p95_abs": 1.0540139572245977e-06,
+        "p99_abs": 1.5469142444990434e-06,
+        "rms": 5.077326442934685e-07,
+        "standard_error": 7.877269910483297e-09
+      },
+      "sample_log_pdf_comparison": "at corresponding uniforms and their respective output directions, not two densities evaluated at the same direction",
+      "sign_convention": "candidate minus baseline; positive nll_increase is worse"
+    }
+  },
+  "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+  "density_measure": "solid_angle_sr",
+  "limitations": [
+    "No retraining or checkpoint selection is performed.",
+    "FP16 parameters are promoted to FP32 before MLP evaluation; this does not emulate CoopVec accumulation, activations or rounding.",
+    "HG and physical metadata remain external fixed constants; only neural parameters, including biases, are quantized.",
+    "The stable HG endpoint formulation is used for FP64/FP32 candidates; the native variant alone preserves legacy cosine geometry if saved.",
+    "Random-point diagnostics do not certify worst-case seam/pole behavior, integral normalization, CUDA speed, or renderer image accuracy.",
+    "Standard errors measure paired Monte Carlo uncertainty, not variation from independent training runs."
+  ],
+  "logarithm": "natural",
+  "model_code_fingerprint": "1280c84d98be314e9cd54aad4203d8ed01ed522f2fc8a2856e749a7e7767f474",
+  "model_uniforms_sha256": "ccb4c4430e55e0a24016e4a558921341c4fce23a961dab256b807a40fc66fe78",
+  "physics": {
+    "hg_g": 0.1987210964506126,
+    "incident_cosine": 0.3420201433256687,
+    "wavelength_nm": 550.0
+  },
+  "precision_code_sha256": "b988d72f92e436a218829ef1614f3c3a0b010a0c091ee9ae00bbebe1f3d551a8",
+  "runtime": {
+    "cpu_threads": 1,
+    "deterministic_algorithms": true,
+    "device": "cpu",
+    "dtype": "float32",
+    "matmul_allow_tf32": false,
+    "numpy_version": "2.5.3",
+    "package_version": "0.4.0",
+    "python_version": "3.14.8",
+    "torch_version": "2.14.1+cpu",
+    "zuko_version": "1.6.0"
+  },
+  "sample_count": 4096,
+  "schema": "phaseflow.precision_diagnostic.v1",
+  "scope": "same_checkpoint_independent_points_same_condition",
+  "seed": 2028,
+  "source_provenance": {
+    "density_measure": "solid_angle_sr",
+    "files": {
+      "metadata.json": {
+        "bytes": 2042,
+        "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+      },
+      "phi_cdf.npy": {
+        "bytes": 328,
+        "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+      },
+      "theta_given_phi_cdf.npy": {
+        "bytes": 3392,
+        "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+      },
+      "u_edges.npy": {
+        "bytes": 264,
+        "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+      }
+    },
+    "metadata": {
+      "azimuth_periodic": true,
+      "cdf_axis_order": [
+        "phi_cell",
+        "theta_edge"
+      ],
+      "cell_model": "constant_density_per_spherical_cell",
+      "complete": true,
+      "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+      "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+      "density_measure": "solid_angle_sr",
+      "diffraction_policy": {
+        "computed": false
+      },
+      "direction_convention": "physical_propagation",
+      "dtype": "<f8",
+      "hg": {
+        "axis_particle_frame": [
+          0.9396926207859084,
+          -0.3420201433256687,
+          0.0
+        ],
+        "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+        "g": 0.1987210964506126,
+        "g_source": 0.73,
+        "method": "first_moment_of_saved_cell_pdf",
+        "target": "saved_cdf"
+      },
+      "incident_inclination_degrees": 20.0,
+      "input_polarization": "unpolarized",
+      "material": {
+        "wavelength_convention": "vacuum_nm"
+      },
+      "normalization": "integral_p_domega_equals_one",
+      "order": "C",
+      "particle_frame_handedness": "right",
+      "particle_up_axis": [
+        0,
+        1,
+        0
+      ],
+      "phi_count": 24,
+      "phi_range_rad": [
+        -3.141592653589793,
+        3.141592653589793
+      ],
+      "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+      "quality": {
+        "allow_underresolved": true,
+        "angular_convergence_certified": false
+      },
+      "sampling_frame_columns": [
+        [
+          0.0,
+          -0.3420201433256687,
+          0.9396926207859084
+        ],
+        [
+          0.0,
+          -0.9396926207859084,
+          -0.3420201433256687
+        ],
+        [
+          1.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+      "sampling_frame_map": "local_column_to_particle_column",
+      "schema": "rainbow.phase_cdf.numpy.v2",
+      "shape_polar_axis": [
+        0,
+        -1,
+        0
+      ],
+      "source_commit": "synthetic_fixture_no_solver_commit",
+      "source_dirty_at_configure": false,
+      "storage_processing": {
+        "additional_filter": "none",
+        "coarsening_tv": 0.04
+      },
+      "theta_count": 16,
+      "theta_pi": "backward",
+      "theta_zero": "forward",
+      "wavelength_nm": 550.0
+    },
+    "nf_frame_columns": [
+      [
+        -0.3420201433256687,
+        0.0,
+        0.9396926207859084
+      ],
+      [
+        -0.9396926207859084,
+        0.0,
+        -0.3420201433256687
+      ],
+      [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    ],
+    "pole_pdf_representative": "source_phi_zero",
+    "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-fp32-monitor/runs/fp32_validation_teacher",
+    "saved_g_check": 0.19872109645061267,
+    "saved_mass_check": 1.0,
+    "schema": "phaseflow.rainbow_reference.v1",
+    "source_repository": "https://github.com/Somatic-Cell/rainbow",
+    "source_to_nf": [
+      [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      [
+        -1.0,
+        -0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "uniform_domain": "[0,1)",
+    "uniform_order": [
+      "phi_marginal",
+      "u_given_phi"
+    ]
+  },
+  "streams": {
+    "model_uniforms": 102,
+    "teacher": 101
+  },
+  "target_entropy_estimate": {
+    "mean": 2.3477474245537753,
+    "standard_error": 0.008632160603597607
+  },
+  "teacher_points_sha256": "a3bbc137c46525562ff8852a6d84f64110f431a12ec284f112638c529000e025",
+  "teacher_uniform_midpoint_bits": 52,
+  "variants": {
+    "float32_math": {
+      "base_g": 0.1987210964506126,
+      "forward_kl_estimate": 0.013093331659517099,
+      "forward_kl_standard_error": 0.002291260141147322,
+      "hg_nll": 2.4630226582230534,
+      "model_config": {
+        "activation": "silu",
+        "geometry_dtype": "model",
+        "hidden_features": [
+          16,
+          16
+        ],
+        "min_bin_height": 1e-05,
+        "min_bin_width": 1e-05,
+        "min_derivative": 0.0001,
+        "mirror_symmetry": true,
+        "num_bins": 8,
+        "num_coupling_layers": 2,
+        "spline_dtype": "model"
+      },
+      "nll": 2.3608407562132925,
+      "nll_improvement_over_hg": {
+        "mean": 0.10218190200976096,
+        "standard_error": 0.006363077611476776
+      },
+      "nll_standard_error": 0.008350923968712268,
+      "precision": {
+        "conditioner": "float32",
+        "hg_formulation": "endpoint_distances",
+        "hg_geometry_log_pdf": "float32",
+        "spline": "float32"
+      },
+      "sample_eval_log_pdf_error": {
+        "max_abs": 2.1457672119140625e-06,
+        "mean": -1.2514647096395493e-09,
+        "mean_abs": 2.2540916688740253e-07,
+        "median_abs": 2.384185791015625e-07,
+        "p95_abs": 7.152557373046875e-07,
+        "p99_abs": 1.1920928955078125e-06,
+        "rms": 3.4118961528584014e-07,
+        "standard_error": 5.331702759324873e-09
+      },
+      "sample_unit_length_error": {
+        "max_abs": 2.612014963210285e-07,
+        "mean": -8.156315150619625e-09,
+        "mean_abs": 4.464434256036109e-08,
+        "median_abs": 3.173981855120189e-08,
+        "p95_abs": 1.2751408109967777e-07,
+        "p99_abs": 1.812140020762688e-07,
+        "rms": 6.031633090997223e-08,
+        "standard_error": 9.339001807713174e-10
+      }
+    },
+    "float64_reference": {
+      "base_g": 0.1987210964506126,
+      "forward_kl_estimate": 0.013093247001193646,
+      "forward_kl_standard_error": 0.002291260043339409,
+      "hg_nll": 2.4630226062948313,
+      "model_config": {
+        "activation": "silu",
+        "geometry_dtype": "model",
+        "hidden_features": [
+          16,
+          16
+        ],
+        "min_bin_height": 1e-05,
+        "min_bin_width": 1e-05,
+        "min_derivative": 0.0001,
+        "mirror_symmetry": true,
+        "num_bins": 8,
+        "num_coupling_layers": 2,
+        "spline_dtype": "float64"
+      },
+      "nll": 2.360840671554969,
+      "nll_improvement_over_hg": {
+        "mean": 0.10218193473986233,
+        "standard_error": 0.006363077492844862
+      },
+      "nll_standard_error": 0.00835092422135327,
+      "precision": {
+        "conditioner": "float64",
+        "hg_formulation": "endpoint_distances",
+        "hg_geometry_log_pdf": "float64",
+        "spline": "float64"
+      },
+      "sample_eval_log_pdf_error": {
+        "max_abs": 5.329070518200751e-15,
+        "mean": -1.2847795743953228e-17,
+        "mean_abs": 4.012090139282609e-16,
+        "median_abs": 4.440892098500626e-16,
+        "p95_abs": 1.3322676295501878e-15,
+        "p99_abs": 2.220446049250313e-15,
+        "rms": 6.162054248366335e-16,
+        "standard_error": 9.627292042620255e-18
+      },
+      "sample_unit_length_error": {
+        "max_abs": 4.440892098500626e-16,
+        "mean": -3.347474207548995e-17,
+        "mean_abs": 6.383240290508407e-17,
+        "median_abs": 0.0,
+        "p95_abs": 2.220446049250313e-16,
+        "p99_abs": 3.3306690738754696e-16,
+        "rms": 1.093426357048859e-16,
+        "standard_error": 1.6266442700877267e-18
+      }
+    },
+    "fp16_weights_float32_math": {
+      "base_g": 0.1987210964506126,
+      "forward_kl_estimate": 0.013093584921049733,
+      "forward_kl_standard_error": 0.002291253428058097,
+      "hg_nll": 2.4630226582230534,
+      "model_config": {
+        "activation": "silu",
+        "geometry_dtype": "model",
+        "hidden_features": [
+          16,
+          16
+        ],
+        "min_bin_height": 1e-05,
+        "min_bin_width": 1e-05,
+        "min_derivative": 0.0001,
+        "mirror_symmetry": true,
+        "num_bins": 8,
+        "num_coupling_layers": 2,
+        "spline_dtype": "model"
+      },
+      "nll": 2.360841009474825,
+      "nll_improvement_over_hg": {
+        "mean": 0.10218164874822833,
+        "standard_error": 0.006363207694711485
+      },
+      "nll_standard_error": 0.008351044033195308,
+      "precision": {
+        "conditioner": "float32",
+        "hg_formulation": "endpoint_distances",
+        "hg_geometry_log_pdf": "float32",
+        "spline": "float32"
+      },
+      "sample_eval_log_pdf_error": {
+        "max_abs": 2.86102294921875e-06,
+        "mean": -5.471520125865936e-09,
+        "mean_abs": 2.2281892597675323e-07,
+        "median_abs": 2.384185791015625e-07,
+        "p95_abs": 7.152557373046875e-07,
+        "p99_abs": 1.1920928955078125e-06,
+        "rms": 3.36309337714087e-07,
+        "standard_error": 5.254779395561678e-09
+      },
+      "sample_unit_length_error": {
+        "max_abs": 2.7447841333128054e-07,
+        "mean": -8.22391557460324e-09,
+        "mean_abs": 4.44041377351738e-08,
+        "median_abs": 3.175233270757971e-08,
+        "p95_abs": 1.27349292111667e-07,
+        "p99_abs": 1.7717225253566256e-07,
+        "rms": 5.994224123057952e-08,
+        "standard_error": 9.278540757715919e-10
+      }
+    },
+    "native_checkpoint": {
+      "base_g": 0.1987210964506126,
+      "forward_kl_estimate": 0.013093331659517099,
+      "forward_kl_standard_error": 0.002291260141147322,
+      "hg_nll": 2.4630226582230534,
+      "model_config": {
+        "activation": "silu",
+        "geometry_dtype": "model",
+        "hidden_features": [
+          16,
+          16
+        ],
+        "min_bin_height": 1e-05,
+        "min_bin_width": 1e-05,
+        "min_derivative": 0.0001,
+        "mirror_symmetry": true,
+        "num_bins": 8,
+        "num_coupling_layers": 2,
+        "spline_dtype": "model"
+      },
+      "nll": 2.3608407562132925,
+      "nll_improvement_over_hg": {
+        "mean": 0.10218190200976096,
+        "standard_error": 0.006363077611476776
+      },
+      "nll_standard_error": 0.008350923968712268,
+      "precision": {
+        "conditioner": "float32",
+        "hg_formulation": "endpoint_distances",
+        "hg_geometry_log_pdf": "float32",
+        "spline": "float32"
+      },
+      "sample_eval_log_pdf_error": {
+        "max_abs": 2.1457672119140625e-06,
+        "mean": -1.2514647096395493e-09,
+        "mean_abs": 2.2540916688740253e-07,
+        "median_abs": 2.384185791015625e-07,
+        "p95_abs": 7.152557373046875e-07,
+        "p99_abs": 1.1920928955078125e-06,
+        "rms": 3.4118961528584014e-07,
+        "standard_error": 5.331702759324873e-09
+      },
+      "sample_unit_length_error": {
+        "max_abs": 2.612014963210285e-07,
+        "mean": -8.156315150619625e-09,
+        "mean_abs": 4.464434256036109e-08,
+        "median_abs": 3.173981855120189e-08,
+        "p95_abs": 1.2751408109967777e-07,
+        "p99_abs": 1.812140020762688e-07,
+        "rms": 6.031633090997223e-08,
+        "standard_error": 9.339001807713174e-10
+      }
+    }
+  },
+  "weight_quantization": {
+    "byte_count_excludes": "HG/condition metadata, alignment and native matrix layouts",
+    "emulates_coopvec": false,
+    "fp16_finite_max": 65504.0,
+    "fp16_parameter_bytes": 2508,
+    "fp16_subnormal_count": 0,
+    "fp32_parameter_bytes": 5016,
+    "parameter_count": 1254,
+    "rounded_to_zero_count": 0,
+    "rounding_error": {
+      "max_abs": 0.0002391338348388672,
+      "mean": -1.8631317216436568e-07,
+      "mean_abs": 2.049918588820141e-05,
+      "median_abs": 8.840113878250122e-06,
+      "p95_abs": 6.95228576660156e-05,
+      "p99_abs": 0.0001493930816650391,
+      "rms": 3.686207117293446e-05,
+      "standard_error": 1.0413546255495882e-06
+    },
+    "scope": "all_neural_parameters_including_biases",
+    "source_max_abs": 0.9925269484519958
+  }
+}

@@ -15,5 +15,6 @@ exports/
 *.pflow
 !examples/synthetic_checkpoint.pt
 !examples/synthetic_points.npz
+!reports/ab-sweep-synthetic/angular_profiles.npz
 !examples/synthetic_export/model.pflow
 !examples/synthetic_export/weights.safetensors

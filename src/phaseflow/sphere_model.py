@@ -42,7 +42,13 @@ import torch
 from torch import Tensor, nn
 from zuko.nn import MLP
 
-from .hg import hg_cdf_and_log_prob, hg_icdf, hg_log_prob
+from .hg import (
+    _hg_cdf_and_log_prob_from_distances,
+    _hg_icdf_distances,
+    hg_cdf_and_log_prob,
+    hg_icdf,
+    hg_log_prob,
+)
 from .sphere_splines import CircularRQSTransform
 from .splines import BoundedRQSTransform, identity_derivative_logit
 
@@ -59,6 +65,9 @@ class SphereFlowConfig:
     ``spline_dtype='float64'`` keeps probability coordinates, constrained RQS
     parameters and Jacobians in float64 even when MLP weights use float32.
     ``'model'`` preserves the arithmetic of checkpoints predating this option.
+    ``geometry_dtype='model'`` uses the weight dtype for HG and directions,
+    retaining endpoint distances to resolve narrow lobes in FP32. Its default
+    ``'float64'`` preserves the original geometry of older checkpoints.
     """
 
     hidden_features: tuple[int, ...] = (64, 64)
@@ -70,6 +79,7 @@ class SphereFlowConfig:
     min_derivative: float = 1e-4
     activation: str = "silu"
     spline_dtype: str = "model"
+    geometry_dtype: str = "float64"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "hidden_features", tuple(self.hidden_features))
@@ -100,6 +110,8 @@ class SphereFlowConfig:
             raise ValueError("this model uses the smooth silu conditioner")
         if self.spline_dtype not in ("model", "float64"):
             raise ValueError("spline_dtype must be 'model' or 'float64'")
+        if self.geometry_dtype not in ("model", "float64"):
+            raise ValueError("geometry_dtype must be 'model' or 'float64'")
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -184,10 +196,10 @@ class SingleConditionSphereFlow(nn.Module):
     are included in state_dict's versioned extra state.  Moving neural weights
     to float32 therefore never rounds or clips the physical g.
 
-    HG calculations and returned directions/log PDFs always use float64.
+    HG calculations and returned directions/log PDFs use geometry_dtype.
     Conditioners use the model dtype; probability coordinates and RQS algebra
-    use ``config.spline_dtype``. Explicit float32 weights with float64 splines
-    avoid FP64 matrix multiplications without lowering HG/cylinder precision.
+    use ``config.spline_dtype``. Explicit ``'model'`` geometry and splines
+    provide an FP32 path; the default geometry preserves old FP64 checkpoints.
     No float16/bfloat16 autocast or gradient scaling is applied internally.
     """
 
@@ -218,17 +230,36 @@ class SingleConditionSphereFlow(nn.Module):
         # HG evaluation. It is a cache; only the exact Python value is persisted.
         self.register_buffer(
             "_hg_coefficient",
-            torch.tensor(self.hg_g, dtype=torch.float64, device=self.device),
+            torch.tensor(self.hg_g, dtype=self.geometry_dtype, device=self.device),
             persistent=False,
+        )
+        self.register_buffer(
+            "_hg_endpoint_distances",
+            torch.tensor(
+                [1 - self.hg_g, 1 + self.hg_g],
+                dtype=self.geometry_dtype,
+                device=self.device,
+            ),
+            persistent=False,
+        )
+
+    def _refresh_hg_cache(self) -> None:
+        # Form small 1+/-g in binary64 *before* casting: FP32 g itself may
+        # round to +/-1. This preserves the supplied physical coefficient to
+        # the selected runtime precision without clipping it or retaining
+        # FP64 tensor arithmetic in the FP32 path.
+        self._hg_coefficient = torch.tensor(
+            self.hg_g, dtype=self.geometry_dtype, device=self.device
+        )
+        self._hg_endpoint_distances = torch.tensor(
+            [1 - self.hg_g, 1 + self.hg_g], dtype=self.geometry_dtype, device=self.device
         )
 
     def _apply(self, fn, recurse: bool = True):
         result = super()._apply(fn, recurse=recurse)
         # Module.float()/to(dtype=...) also cast buffers. Rebuild from the
         # authoritative binary64 scalar after movement, never from that cast.
-        self._hg_coefficient = torch.tensor(
-            self.hg_g, dtype=torch.float64, device=self.device
-        )
+        self._refresh_hg_cache()
         return result
 
     def _set_physics(self, hg_g: float, incident_cosine: float) -> None:
@@ -243,9 +274,7 @@ class SingleConditionSphereFlow(nn.Module):
         self._incident_cosine = eta
         self._azimuth_strength = math.sqrt((1 - eta) * (1 + eta))
         if "_hg_coefficient" in self._buffers:
-            self._hg_coefficient = torch.tensor(
-                g, dtype=torch.float64, device=self.device
-            )
+            self._refresh_hg_cache()
 
     @property
     def hg_g(self) -> float:
@@ -263,6 +292,11 @@ class SingleConditionSphereFlow(nn.Module):
     def spline_dtype(self) -> torch.dtype:
         """Arithmetic dtype of cylinder coordinates, RQS knots and Jacobians."""
         return torch.float64 if self.config.spline_dtype == "float64" else self.dtype
+
+    @property
+    def geometry_dtype(self) -> torch.dtype:
+        """Arithmetic dtype of HG, directions and returned solid-angle log PDF."""
+        return torch.float64 if self.config.geometry_dtype == "float64" else self.dtype
 
     @property
     def device(self) -> torch.device:
@@ -283,8 +317,8 @@ class SingleConditionSphereFlow(nn.Module):
             or state.get("schema_version") != self.schema_version
         ):
             raise ValueError("checkpoint sphere model family, schema, or configuration differs")
-        # Old schema-1 checkpoints have no spline_dtype: its default 'model'
-        # retains their original arithmetic instead of silently upgrading it.
+        # Missing precision fields retain old spline ('model') and geometry
+        # ('float64') arithmetic rather than silently changing old checkpoints.
         try:
             saved_config = SphereFlowConfig.from_dict(state["config"])
         except (KeyError, TypeError, ValueError) as error:
@@ -315,8 +349,8 @@ class SingleConditionSphereFlow(nn.Module):
             log_det = log_det + ladj
         return value, log_det
 
-    def _local_coordinates(self, outgoing: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        directions = torch.as_tensor(outgoing, device=self.device, dtype=torch.float64)
+    def _local_coordinates(self, outgoing: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        directions = torch.as_tensor(outgoing, device=self.device, dtype=self.geometry_dtype)
         if directions.ndim < 1 or directions.shape[-1] != 3:
             raise ValueError("directions must have shape (...,3)")
         length = torch.linalg.vector_norm(directions, dim=-1)
@@ -334,14 +368,35 @@ class SingleConditionSphereFlow(nn.Module):
         polar = (direction[..., :2] == 0).all(dim=-1)
         phi = torch.where(polar, torch.zeros_like(phi), phi)
         v = ((phi + math.pi) / (2 * math.pi)).remainder(1)
-        return mu, v, valid
+        return mu, v, valid, direction
+
+    @staticmethod
+    def _endpoint_distances(direction: Tensor) -> tuple[Tensor, Tensor]:
+        # For a nonzero direction, 1-|mu| = r^2 / (length*(length+|z|)).
+        # Ratios avoid cancellation and keep the product in [0,1], including
+        # the equator. Reconstruct the far endpoint only from the near one.
+        transverse = torch.linalg.vector_norm(direction[..., :2], dim=-1)
+        z = direction[..., 2]
+        positive = z >= 0
+        absolute_z = torch.where(positive, z, -z)
+        length = torch.hypot(transverse, z)
+        near = (transverse / length) * (transverse / (length + absolute_z))
+        return torch.where(positive, near, 2 - near), torch.where(positive, 2 - near, near)
+
+    def _hg_from_distances(self, dm: Tensor, dp: Tensor) -> tuple[Tensor, Tensor]:
+        return _hg_cdf_and_log_prob_from_distances(
+            dm, dp, self._hg_endpoint_distances[0], self._hg_endpoint_distances[1]
+        )
 
     def log_prob(self, outgoing: Tensor) -> Tensor:
         """Evaluate log q relative to solid angle, for arbitrary local directions."""
-        mu, v, valid = self._local_coordinates(outgoing)
-        t, log_hg = hg_cdf_and_log_prob(mu, self._hg_coefficient)
+        mu, v, valid, direction = self._local_coordinates(outgoing)
+        if self.config.geometry_dtype == "model":
+            t, log_hg = self._hg_from_distances(*self._endpoint_distances(direction))
+        else:
+            t, log_hg = hg_cdf_and_log_prob(mu, self._hg_coefficient)
         _, log_r = self._run_couplings(torch.stack((t, v), -1), inverse=False)
-        result = log_hg + log_r.to(torch.float64)
+        result = log_hg + log_r.to(self.geometry_dtype)
         return torch.where(valid, result, torch.full_like(result, torch.nan))
 
     def pdf(self, outgoing: Tensor) -> Tensor:
@@ -351,19 +406,41 @@ class SingleConditionSphereFlow(nn.Module):
         """Evaluate the HG baseline per steradian from scattering cosine ``mu``.
 
         Input is the cosine relative to the incident propagation axis, not an
-        outgoing xyz vector. Arithmetic uses float64 on the model's device;
-        an already-resident float64 tensor is reused without a transfer.
+        outgoing xyz vector. A cosine alone cannot recover tiny transverse
+        angles lost to rounding; prefer ``hg_base_direction_log_prob`` when
+        full directions are available. Arithmetic uses geometry_dtype.
         """
-        cosine = torch.as_tensor(mu, device=self.device, dtype=torch.float64)
+        cosine = torch.as_tensor(mu, device=self.device, dtype=self.geometry_dtype)
+        if self.config.geometry_dtype == "model":
+            result = self._hg_from_distances(1 - cosine, 1 + cosine)[1]
+            result = torch.where(cosine.abs() <= 1, result, torch.full_like(result, -torch.inf))
+            return torch.where(torch.isnan(cosine), torch.full_like(result, torch.nan), result)
         return hg_log_prob(cosine, self._hg_coefficient)
+
+    def hg_base_direction_log_prob(self, outgoing: Tensor) -> Tensor:
+        """HG baseline from xyz, retaining transverse angles in FP32."""
+        mu, _, valid, direction = self._local_coordinates(outgoing)
+        if self.config.geometry_dtype == "model":
+            result = self._hg_from_distances(*self._endpoint_distances(direction))[1]
+        else:
+            result = hg_log_prob(mu, self._hg_coefficient)
+        return torch.where(valid, result, torch.full_like(result, torch.nan))
 
     def sample_from_uniform(self, uniforms: Tensor) -> tuple[Tensor, Tensor]:
         """Use two uniforms (u0 in (0,1), u1 in [0,1)) without branch splitting.
 
-        Both output directions and output log PDFs have dtype float64.
+        Both output directions and output log PDFs use geometry_dtype.
         The batch shapes are (...,3) and (...) for uniforms of shape (...,2).
         """
-        provided = torch.as_tensor(uniforms, device=self.device, dtype=torch.float64)
+        # Keep an existing floating tensor's precision during input validation
+        # so excluded input and loss during conversion remain distinguishable.
+        provided = torch.as_tensor(
+            uniforms,
+            device=self.device,
+            dtype=torch.float64 if self.config.geometry_dtype == "float64" else None,
+        )
+        if not provided.is_floating_point():
+            provided = provided.to(self.spline_dtype)
         if provided.ndim < 1 or provided.shape[-1] != 2:
             raise ValueError("uniforms must have shape (...,2)")
         valid_input = (
@@ -383,19 +460,30 @@ class SingleConditionSphereFlow(nn.Module):
                 "use float64 splines or their representable uniform midpoint grid"
             )
         cylinder, log_inverse_det = self._run_couplings(u, inverse=True)
-        cylinder = cylinder.to(torch.float64)
-        mu = hg_icdf(cylinder[..., 0], self._hg_coefficient)
+        cylinder = cylinder.to(self.geometry_dtype)
+        if self.config.geometry_dtype == "model":
+            dm, dp = _hg_icdf_distances(
+                cylinder[..., 0], self._hg_endpoint_distances[0], self._hg_endpoint_distances[1]
+            )
+            mu = torch.where(dp <= 1, dp - 1, 1 - dm)
+            radius = dm.sqrt() * dp.sqrt()
+            hg_logp = self._hg_from_distances(dm, dp)[1]
+            nonpolar = radius > 0
+        else:
+            mu = hg_icdf(cylinder[..., 0], self._hg_coefficient)
+            radius = ((1 - mu) * (1 + mu)).sqrt()
+            hg_logp = self.hg_base_log_prob(mu)
+            nonpolar = mu.abs() < 1
         phi = 2 * math.pi * (cylinder[..., 1] - 0.5)
-        radius = ((1 - mu) * (1 + mu)).sqrt()
         directions = torch.stack((radius * phi.cos(), radius * phi.sin(), mu), -1)
-        log_prob = self.hg_base_log_prob(mu) - log_inverse_det.to(torch.float64)
+        log_prob = hg_logp - log_inverse_det.to(self.geometry_dtype)
         valid = (
             valid_u
             & torch.isfinite(directions).all(dim=-1)
             & torch.isfinite(log_prob)
             & (cylinder[..., 0] > 0)
             & (cylinder[..., 0] < 1)
-            & (mu.abs() < 1)
+            & nonpolar
         )
         if self.validate_args and not bool(valid.all()):
             raise FloatingPointError(
@@ -413,7 +501,7 @@ class SingleConditionSphereFlow(nn.Module):
         """Draw reproducible uniform midpoint floats, then transform them."""
         if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples < 1:
             raise ValueError("num_samples must be a positive integer")
-        bits = 23 if self.spline_dtype == torch.float32 else 52
+        bits = 23 if torch.float32 in (self.spline_dtype, self.geometry_dtype) else 52
         integers = torch.randint(
             1 << bits, (num_samples, 2), device=self.device, generator=generator
         )

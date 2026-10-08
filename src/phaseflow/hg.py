@@ -147,3 +147,46 @@ def hg_icdf(u: Tensor | float, g: Tensor | float, *, validate_args: bool = False
     one_minus_mu = 2 * complement * (a / denominator).square() * (complement + b * p)
     result = torch.where(one_plus_mu <= 1, one_plus_mu - 1, 1 - one_minus_mu)
     return torch.where(valid_g & valid_u, result, torch.full_like(result, torch.nan))
+
+
+def _hg_cdf_and_log_prob_from_distances(
+    one_minus_mu: Tensor, one_plus_mu: Tensor, one_minus_g: Tensor, one_plus_g: Tensor
+) -> tuple[Tensor, Tensor]:
+    """HG using separately retained endpoint distances, without forming mu/g.
+
+    Internal sphere-flow kernel. Inputs are already checked, have one dtype
+    and device, and represent 1-mu, 1+mu, 1-g and 1+g, respectively. Keeping
+    the small distances prevents a narrow lobe disappearing when mu or g
+    rounds to +/-1 in FP32. This is the same analytic HG as the cosine API;
+    it adds no threshold, density floor, clipping, or asymptotic approximation.
+    """
+    a, b = one_minus_g, one_plus_g
+    dm, dp = one_minus_mu, one_plus_mu
+    s = torch.where(
+        a <= b, a.square() + (b - a) * dm, b.square() + (a - b) * dp
+    ).sqrt()
+    lower = a * dp / (s * (b + s))
+    upper = b * dm / (s * (a + s))
+    cdf = torch.where(lower <= 0.5, lower, 1 - upper)
+    cdf = torch.where(dp == 0, torch.zeros_like(cdf), cdf)
+    cdf = torch.where(dm == 0, torch.ones_like(cdf), cdf)
+    log_prob = a.log() + b.log() - math.log(4 * math.pi) - 3 * s.log()
+    return cdf, log_prob
+
+
+def _hg_icdf_distances(
+    u: Tensor, one_minus_g: Tensor, one_plus_g: Tensor
+) -> tuple[Tensor, Tensor]:
+    """Return (1-mu, 1+mu) without subtracting a tiny distance from one.
+
+    Inputs follow the validated internal-kernel contract of
+    ``_hg_cdf_and_log_prob_from_distances``; u is in [0,1]. The products below
+    are the same rationalized quantile used in ``hg_icdf``. The sphere flow
+    retains both distances to construct its transverse direction and PDF.
+    """
+    a, b = one_minus_g, one_plus_g
+    complement = 1 - u
+    denominator = a * complement + b * u
+    one_plus_mu = 2 * u * (b / denominator).square() * (a * complement + u)
+    one_minus_mu = 2 * complement * (a / denominator).square() * (complement + b * u)
+    return one_minus_mu, one_plus_mu

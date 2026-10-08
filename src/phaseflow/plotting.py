@@ -164,7 +164,7 @@ def evaluate_rainbow_grid(
                 )
                 outgoing = torch.as_tensor(
                     source @ reference.source_to_nf.T,
-                    dtype=torch.float64,
+                    dtype=getattr(model, "geometry_dtype", torch.float64),
                     device=model.device,
                 )
                 values = model.log_prob(outgoing)
@@ -445,7 +445,7 @@ def plot_rainbow_comparison(
             "configuration": config_value.to_dict() if config_value is not None else None,
             "device": str(model.device),
             "parameter_dtype": str(model.dtype),
-            "density_evaluation_dtype": "torch.float64",
+            "density_evaluation_dtype": str(getattr(model, "geometry_dtype", torch.float64)),
         },
         "coordinates": {
             "frame": "recorded_solver_source",

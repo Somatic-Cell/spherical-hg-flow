@@ -1,0 +1,11 @@
+# Direct dependencies used for v0.4 CPU verification on Python 3.14.8.
+# Install the CPU torch wheel first as in CI. Windows CUDA users use execute.bat setup.
+torch==2.14.1
+zuko==1.6.0
+numpy==2.5.3
+safetensors==0.8.0
+matplotlib==3.11.2
+tensorboard==2.21.0
+pytest==9.1.1
+ruff==0.16.10
+build==1.6.1
