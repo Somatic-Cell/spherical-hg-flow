@@ -10,16 +10,16 @@ from __future__ import annotations
 import copy
 import hashlib
 import math
+import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import torch
 import zuko
 
 from . import __version__
-from .hg import hg_log_prob
 from .rainbow import RainbowReference
 from .sphere_model import SingleConditionSphereFlow, SphereFlowConfig
 from .training import (
@@ -32,16 +32,20 @@ from .training import (
     atomic_json,
 )
 
+if TYPE_CHECKING:
+    from .plotting import RainbowPlotConfig
+
 FAMILY = "rainbow_single_condition"
-CHECKPOINT_VERSION = 2
+CHECKPOINT_VERSION = 3
+READABLE_CHECKPOINT_VERSIONS = (2, 3)
 _STREAMS = {"train": 0, "validation": 1, "minibatches": 2, "test": 3, "proposal": 4}
 
 
 @dataclass
 class SingleTrainingConfig:
     seed: int = 415
-    device: str = "cpu"
-    dtype: str = "float64"
+    device: str = "cuda"
+    dtype: str = "float32"
     train_samples: int = 65536
     validation_samples: int = 32768
     test_samples: int = 65536
@@ -121,6 +125,39 @@ def _generator(seed: int, stream: str) -> np.random.Generator:
     return np.random.Generator(np.random.PCG64(np.random.SeedSequence([seed, _STREAMS[stream]])))
 
 
+def _minibatch_generator(seed: int, device: torch.device) -> torch.Generator:
+    # A dedicated stream, independent of model initialization and all CDF pools.
+    batch_seed = int(_generator(seed, "minibatches").integers(0, 2**63, dtype=np.int64))
+    return torch.Generator(device=device).manual_seed(batch_seed)
+
+
+def _resolve_device(device: str | torch.device) -> torch.device:
+    selected = torch.device(device)
+    if selected.type not in ("cpu", "cuda"):
+        raise ValueError("the Rainbow workflow supports cpu and cuda devices")
+    if selected.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA is required by default but is not available. Install a CUDA-enabled "
+                "PyTorch build for your GPU/driver; use --device cpu only for an explicit "
+                "small correctness check. CPU fallback is not automatic."
+            )
+        index = torch.cuda.current_device() if selected.index is None else selected.index
+        if not 0 <= index < torch.cuda.device_count():
+            raise ValueError(f"CUDA device index {index} is unavailable")
+        return torch.device("cuda", index)
+    return torch.device("cpu")
+
+
+def _device_points(
+    points: tuple[np.ndarray, np.ndarray] | tuple[torch.Tensor, torch.Tensor],
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Transfer once, then take views/index selections on the selected device.
+    # Directions and teacher log PDFs never pass through the MLP's FP32 dtype.
+    return tuple(torch.as_tensor(value, dtype=torch.float64, device=device) for value in points)
+
+
 def _uniforms(generator: np.random.Generator, count: int, bits: int = 52) -> np.ndarray:
     # A specified open 52-bit midpoint grid, not endpoint clipping or retries.
     return (generator.integers(0, 2**bits, size=(count, 2), dtype=np.int64) + 0.5) / 2**bits
@@ -167,6 +204,10 @@ def _runtime(device: torch.device, dtype: str) -> dict[str, Any]:
     if device.type == "cuda":
         result["cuda_version"] = torch.version.cuda
         result["gpu_name"] = torch.cuda.get_device_name(device)
+        result["gpu_capability"] = list(torch.cuda.get_device_capability(device))
+        result["cublas_workspace_config"] = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    result["deterministic_algorithms"] = torch.are_deterministic_algorithms_enabled()
+    result["matmul_allow_tf32"] = torch.backends.cuda.matmul.allow_tf32
     return result
 
 
@@ -188,29 +229,34 @@ def _check_model_reference(model: SingleConditionSphereFlow, reference: RainbowR
 def _likelihood_metrics(
     model: SingleConditionSphereFlow,
     reference: RainbowReference,
-    points: tuple[np.ndarray, np.ndarray],
+    points: tuple[np.ndarray, np.ndarray] | tuple[torch.Tensor, torch.Tensor],
     batch_size: int,
 ) -> dict[str, Any]:
     _check_model_reference(model, reference)
-    directions, log_p = points
-    device = next(model.parameters()).device
-    log_q, log_hg = [], []
+    directions, log_p = _device_points(points, model.device)
+    log_q, log_hg = torch.empty_like(log_p), torch.empty_like(log_p)
     for start in range(0, len(directions), batch_size):
-        x = torch.as_tensor(
-            directions[start : start + batch_size], dtype=torch.float64, device=device
-        )
+        x = directions[start : start + batch_size]
         q = model.log_prob(x)
-        if q.shape != (len(x),) or not torch.isfinite(q).all():
-            raise FloatingPointError("model log_prob is nonfinite or has the wrong shape")
-        log_q.append(q.cpu().double().numpy())
+        if q.shape != (len(x),):
+            raise FloatingPointError("model log_prob has the wrong shape")
+        log_q[start : start + len(x)] = q
         mu = x[:, 2] / torch.linalg.vector_norm(x, dim=-1)
-        log_hg.append(hg_log_prob(mu, model.hg_g, validate_args=True).cpu().numpy())
-    q, h = np.concatenate(log_q), np.concatenate(log_hg)
-    nll, nll_se = _estimate(-q)
-    kl, kl_se = _estimate(log_p - q)
-    hg_nll, _ = _estimate(-h)
-    hg_kl, hg_kl_se = _estimate(log_p - h)
-    improvement, improvement_se = _estimate(q - h)
+        log_hg[start : start + len(x)] = model.hg_base_log_prob(mu)
+    statistics = torch.stack(
+        (-log_q, log_p - log_q, -log_hg, log_p - log_hg, log_q - log_hg, -log_p)
+    )
+    # Reduce on the GPU and transfer only twelve statistics once per evaluation.
+    summary = torch.stack(
+        (statistics.mean(-1), statistics.std(-1, correction=1) / math.sqrt(len(directions))),
+        dim=-1,
+    ).cpu().numpy()
+    if not np.isfinite(summary).all():
+        raise FloatingPointError("nonfinite likelihood statistic")
+    (nll, nll_se), (kl, kl_se), (hg_nll, _), (hg_kl, hg_kl_se), (
+        improvement,
+        improvement_se,
+    ), (entropy, _) = summary.tolist()
     return {
         "sample_count": len(directions),
         "density_measure": "solid_angle_sr",
@@ -223,7 +269,7 @@ def _likelihood_metrics(
         "hg_forward_kl_standard_error": hg_kl_se,
         "nll_improvement_over_hg": improvement,
         "nll_improvement_standard_error": improvement_se,
-        "target_entropy_estimate": float(-log_p.mean()),
+        "target_entropy_estimate": entropy,
         "base_g": model.hg_g,
         "target_g": reference.g,
     }
@@ -239,36 +285,28 @@ def _proposal_metrics(
 ) -> dict[str, Any] | None:
     if count == 0:
         return None
-    device = next(model.parameters()).device
     generator = _generator(seed, "proposal")
-    log_weights, cosines = [], []
-    max_discrepancy = 0.0
+    bits = 23 if model.spline_dtype == torch.float32 else 52
+    uniforms = torch.as_tensor(
+        _uniforms(generator, count, bits=bits), dtype=torch.float64, device=model.device
+    )
+    generated = torch.empty((count, 5), dtype=torch.float64, device=model.device)
     for start in range(0, count, batch_size):
-        uniforms = torch.as_tensor(
-            _uniforms(
-                generator,
-                min(batch_size, count - start),
-                bits=23 if model.dtype == torch.float32 else 52,
-            ),
-            dtype=torch.float64,
-            device=device,
-        )
-        x, log_q = model.sample_from_uniform(uniforms)
+        x, log_q = model.sample_from_uniform(uniforms[start : start + batch_size])
         evaluated = model.log_prob(x)
-        if (
-            not torch.isfinite(x).all()
-            or not torch.isfinite(log_q).all()
-            or (not torch.isfinite(evaluated).all())
-        ):
-            raise FloatingPointError("nonfinite NF sample or PDF; samples are never discarded")
-        max_discrepancy = max(max_discrepancy, float((log_q - evaluated).abs().max().item()))
-        x_np = x.cpu().numpy()
-        p = reference.log_prob(x_np)
-        if np.isnan(p).any() or np.isposinf(p).any():
-            raise FloatingPointError("invalid reference PDF at an NF sample")
-        log_weights.append(p - log_q.cpu().double().numpy())
-        cosines.append(x_np[:, 2] / np.linalg.norm(x_np, axis=-1))
-    lw, mu = np.concatenate(log_weights), np.concatenate(cosines)
+        generated[start : start + len(x)] = torch.cat(
+            (x, log_q[:, None], evaluated[:, None]), dim=-1
+        )
+    values = generated.cpu().numpy()
+    if not np.isfinite(values).all():
+        raise FloatingPointError("nonfinite NF sample or PDF; samples are never discarded")
+    x_np, log_q_np, evaluated_np = values[:, :3], values[:, 3], values[:, 4]
+    p = reference.log_prob(x_np)
+    if np.isnan(p).any() or np.isposinf(p).any():
+        raise FloatingPointError("invalid reference PDF at an NF sample")
+    lw = p - log_q_np
+    mu = x_np[:, 2] / np.linalg.norm(x_np, axis=-1)
+    max_discrepancy = float(np.max(np.abs(log_q_np - evaluated_np)))
     moment, moment_se = _estimate(mu)
     positive = np.isfinite(lw)
     relative_ess = log_mean_weight = mean_weight = None
@@ -281,7 +319,7 @@ def _proposal_metrics(
     return {
         "sample_count": count,
         "relative_ess": relative_ess,
-        "uniform_midpoint_bits": 23 if model.dtype == torch.float32 else 52,
+        "uniform_midpoint_bits": bits,
         "importance_weight_mean": mean_weight,
         "log_importance_weight_mean": log_mean_weight,
         "reference_support_hits": int(positive.sum()),
@@ -321,7 +359,11 @@ def evaluate_single_condition(
         raise ValueError("proposal_samples must be zero or at least two")
     _check_model_reference(model, reference)
     previous_mode = model.training
+    previous_validation = model.validate_args
     model.eval()
+    # The CDF pool and generated lanes are checked in aggregate; avoid scalar
+    # device reads inside every coupling/sample call during batched evaluation.
+    model.validate_args = False
     try:
         result = _likelihood_metrics(
             model, reference, _points(reference, samples, seed, "test"), batch_size
@@ -336,21 +378,27 @@ def evaluate_single_condition(
             dataset_fingerprint=reference.fingerprint(),
             code_fingerprint=_code_hash(),
             runtime=_runtime(model.device, str(model.dtype).removeprefix("torch.")),
+            precision={
+                "conditioner": str(model.dtype).removeprefix("torch."),
+                "spline": str(model.spline_dtype).removeprefix("torch."),
+                "hg_geometry_log_pdf": "float64",
+            },
             proposal=_proposal_metrics(model, reference, proposal_samples, seed, batch_size),
         )
         return result
     finally:
         model.train(previous_mode)
+        model.validate_args = previous_validation
 
 
 def read_single_checkpoint(path: str | Path) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if (
         not isinstance(payload, dict)
-        or payload.get("checkpoint_version") != CHECKPOINT_VERSION
+        or payload.get("checkpoint_version") not in READABLE_CHECKPOINT_VERSIONS
         or (payload.get("family") != FAMILY)
     ):
-        raise ValueError("not a version-2 Rainbow single-condition checkpoint")
+        raise ValueError("not a supported version-2/3 Rainbow single-condition checkpoint")
     required = {
         "kind",
         "model_config",
@@ -369,9 +417,10 @@ def read_single_checkpoint(path: str | Path) -> dict[str, Any]:
 def load_single_checkpoint(
     path: str | Path,
     *,
-    device: str | torch.device = "cpu",
+    device: str | torch.device = "cuda",
 ) -> tuple[SingleConditionSphereFlow, dict[str, Any]]:
     payload = read_single_checkpoint(path)
+    device = _resolve_device(device)
     physics = payload["physics"]
     model = SingleConditionSphereFlow(
         physics["hg_g"],
@@ -406,6 +455,8 @@ def train_single_condition(
     resume: str | Path | None = None,
     max_steps_this_run: int | None = None,
     callback: Callable[[dict[str, Any]], None] | None = None,
+    make_plots: bool = True,
+    plot_config: RainbowPlotConfig | None = None,
 ) -> SingleTrainResult:
     """Train a fixed point pool; choose the best checkpoint only by validation NLL.
 
@@ -417,6 +468,13 @@ def train_single_condition(
         type(max_steps_this_run) is not int or max_steps_this_run < 0
     ):
         raise ValueError("max_steps_this_run must be a nonnegative integer")
+    if type(make_plots) is not bool:
+        raise ValueError("make_plots must be boolean")
+    from .plotting import RainbowPlotConfig
+
+    plotting = plot_config if plot_config is not None else RainbowPlotConfig()
+    if not isinstance(plotting, RainbowPlotConfig):
+        raise ValueError("plot_config must be a RainbowPlotConfig")
     cfg = training_config
     output = Path(output_directory)
     previous = read_single_checkpoint(resume) if resume is not None else None
@@ -438,6 +496,11 @@ def train_single_condition(
     if previous is not None:
         if previous["kind"] != "training":
             raise ValueError("best.pt is inference-only; resume from checkpoint.pt")
+        if previous["checkpoint_version"] != CHECKPOINT_VERSION:
+            raise ValueError(
+                "exact resume requires a version-3 checkpoint from this implementation; "
+                "version-2 checkpoints remain readable for evaluation/plotting"
+            )
         required = {
             "training_config",
             "optimizer_state",
@@ -468,7 +531,15 @@ def train_single_condition(
             raise ValueError("invalid checkpoint step")
     # Reuse the legacy workflow's deterministic runtime primitives, not its model
     # or HG warmup. Both configuration types provide these runtime-only fields.
-    device = _setup_runtime(cfg)
+    if torch.device(cfg.device).type == "cuda" and cfg.deterministic:
+        workspace = os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        if workspace not in (":4096:8", ":16:8"):
+            raise ValueError(
+                "deterministic CUDA requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8 "
+                "before starting Python"
+            )
+    device = _resolve_device(cfg.device)
+    _setup_runtime(cfg)
     runtime = _runtime(device, cfg.dtype)
     if previous is not None and previous["runtime"] != runtime:
         raise ValueError("exact resume requires the recorded runtime/device/dtype")
@@ -478,6 +549,7 @@ def train_single_condition(
         model_config,
         dtype=_dtype(cfg.dtype),
         device=device,
+        validate_args=False,
     )
     training_points = _points(reference, cfg.train_samples, cfg.seed, "train")
     validation_points = _points(reference, cfg.validation_samples, cfg.seed, "validation")
@@ -485,6 +557,11 @@ def train_single_condition(
         "scope": "one_fixed_condition; independent point streams; no condition holdout",
         "seed": cfg.seed,
         "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
+        "minibatch_rng": {
+            "engine": "torch.Generator",
+            "device": str(device),
+            "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches",
+        },
         "uniforms": "52-bit open midpoint grid",
         "streams": _STREAMS,
         "train_samples": cfg.train_samples,
@@ -495,13 +572,23 @@ def train_single_condition(
     }
     if previous is not None and previous["sample_split"] != split:
         raise ValueError("regenerated training/validation points differ from checkpoint")
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
-    minibatches = _generator(cfg.seed, "minibatches")
+    # Retain one fixed pool on the device; the optimization loop has no NumPy
+    # indexing, CDF inversion, or host-to-device point transfers.
+    training_directions = torch.as_tensor(
+        training_points[0], dtype=torch.float64, device=device
+    )
+    validation_device = _device_points(validation_points, device)
+    del training_points, validation_points
+    parameters = list(model.parameters())
+    optimizer = torch.optim.Adam(
+        parameters, lr=cfg.learning_rate, foreach=device.type == "cuda"
+    )
+    minibatches = _minibatch_generator(cfg.seed, device)
     history: list[dict[str, Any]] = []
     step = best_step = 0
     best_state: dict[str, Any]
     if previous is None:
-        latest = _likelihood_metrics(model, reference, validation_points, cfg.eval_batch_size)
+        latest = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
         best_validation = copy.deepcopy(latest)
         best_state = copy.deepcopy(model.state_dict())
         history.append({"event": "initial", "global_step": 0, "validation": latest})
@@ -509,7 +596,7 @@ def train_single_condition(
         model.load_state_dict(previous["model_state"], strict=True)
         _check_model_reference(model, reference)
         optimizer.load_state_dict(previous["optimizer_state"])
-        minibatches.bit_generator.state = previous["minibatch_rng_state"]
+        minibatches.set_state(previous["minibatch_rng_state"].cpu())
         _restore_rng(previous["rng_state"])
         step, best_step = previous["global_step"], previous["best_step"]
         history = copy.deepcopy(previous["history"])
@@ -525,6 +612,7 @@ def train_single_condition(
             "family": FAMILY,
             "model": model_config.to_dict(),
             "training": cfg.to_dict(),
+            "visualization": {"enabled": make_plots, **plotting.to_dict()},
         },
     )
     atomic_json(output / "data_summary.json", reference.summary())
@@ -551,7 +639,7 @@ def train_single_condition(
             "training_config": cfg.to_dict(),
             "optimizer_state": optimizer.state_dict(),
             "global_step": step,
-            "minibatch_rng_state": minibatches.bit_generator.state,
+            "minibatch_rng_state": minibatches.get_state(),
             "rng_state": _rng_state(),
             "sample_split": split,
             "history": history,
@@ -573,42 +661,78 @@ def train_single_condition(
         )
         atomic_json(output / "history.json", history)
 
-    save()
+    pending: list[tuple[int, torch.Tensor, torch.Tensor]] = []
+
+    def flush_updates() -> None:
+        """Check before publication; synchronize a block, not every parameter.
+
+        Each update retains only its detached loss and gradient norm. A failed
+        block is never written over the last valid atomic checkpoint.
+        """
+        if not pending:
+            return
+        summaries = torch.stack(
+            [torch.stack((loss, norm.to(loss.dtype))) for _, loss, norm in pending]
+        ).cpu().numpy()
+        invalid = ~np.isfinite(summaries).all(axis=-1)
+        if invalid.any():
+            failed_step = pending[int(np.flatnonzero(invalid)[0])][0]
+            raise FloatingPointError(
+                f"nonfinite training loss/gradient at update {failed_step}; "
+                "the last valid checkpoint was retained"
+            )
+        finite_parameters = torch.stack([torch.isfinite(p).all() for p in parameters]).all()
+        if not bool(finite_parameters):
+            raise FloatingPointError(
+                f"optimizer produced nonfinite parameters by update {step}; "
+                "the last valid checkpoint was retained"
+            )
+        history.extend(
+            {"global_step": update, "loss": float(values[0])}
+            for (update, _, _), values in zip(pending, summaries, strict=True)
+        )
+        pending.clear()
+
+    if previous is None or checkpoint_path.resolve() != Path(resume).resolve():
+        save()
     if previous is None and callback is not None:
         callback(history[0])
     stop = cfg.steps if max_steps_this_run is None else min(cfg.steps, step + max_steps_this_run)
     model.train()
     while step < stop:
-        indices = minibatches.integers(0, cfg.train_samples, size=cfg.batch_size)
-        outgoing = torch.as_tensor(training_points[0][indices], dtype=torch.float64, device=device)
+        indices = torch.randint(
+            cfg.train_samples, (cfg.batch_size,), generator=minibatches, device=device
+        )
+        outgoing = training_directions[indices]
         optimizer.zero_grad(set_to_none=True)
         log_q = model.log_prob(outgoing)
-        if log_q.shape != (cfg.batch_size,) or not torch.isfinite(log_q).all():
-            raise FloatingPointError("nonfinite/malformed training log_prob")
+        if log_q.shape != (cfg.batch_size,):
+            raise FloatingPointError("malformed training log_prob")
         loss = -log_q.mean()  # Target-distributed samples have unit loss weight.
         loss.backward()
-        for parameter in model.parameters():
-            if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
-                raise FloatingPointError("nonfinite training gradient")
-        if cfg.grad_clip_norm is not None:
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), cfg.grad_clip_norm, error_if_nonfinite=True
-            )
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            parameters,
+            cfg.grad_clip_norm if cfg.grad_clip_norm is not None else math.inf,
+            error_if_nonfinite=False,
+            foreach=device.type == "cuda",
+        )
         optimizer.step()
-        if any(not torch.isfinite(p).all() for p in model.parameters()):
-            raise FloatingPointError("optimizer produced nonfinite parameters")
         step += 1
-        entry = {"global_step": step, "loss": float(loss.detach().item())}
-        if step % cfg.eval_every == 0 or step == cfg.steps:
-            latest = _likelihood_metrics(model, reference, validation_points, cfg.eval_batch_size)
+        pending.append((step, loss.detach(), gradient_norm.detach()))
+        evaluation_due = step % cfg.eval_every == 0 or step == cfg.steps
+        checkpoint_due = step % cfg.checkpoint_every == 0 or step == cfg.steps
+        if evaluation_due or checkpoint_due or step == stop:
+            flush_updates()
+        if evaluation_due:
+            entry = history[-1]
+            latest = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
             entry["validation"] = latest
             if latest["nll"] < best_validation["nll"]:
                 best_step, best_validation = step, copy.deepcopy(latest)
                 best_state = copy.deepcopy(model.state_dict())
             if callback is not None:
                 callback(entry)
-        history.append(entry)
-        if step % cfg.checkpoint_every == 0 or step == cfg.steps:
+        if checkpoint_due:
             save()
     # Save only completed update boundaries. KeyboardInterrupt within an update
     # propagates, leaving the preceding atomic checkpoint intact.
@@ -647,4 +771,18 @@ def train_single_condition(
         "generalization_scope": "same condition only; no claim about unseen wavelength/incidence",
     }
     atomic_json(output / "metrics.json", metrics)
+    if make_plots and step == cfg.steps:
+        from .plotting import plot_rainbow_comparison
+
+        # The selected model, not the last optimization iterate, supplies the
+        # inference map. Plotting has its own RNG and never selects checkpoints.
+        plot_rainbow_comparison(
+            selected,
+            reference,
+            output / "plots",
+            config=plotting,
+            checkpoint_path=best_path,
+            title=f"Validation-selected model (step {best_step})",
+            selected_step=best_step,
+        )
     return SingleTrainResult(selected, checkpoint_path, best_path, metrics, step, step == cfg.steps)

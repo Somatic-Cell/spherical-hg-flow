@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spherical-hg-flow"
-version = "0.2.0"
+version = "0.3.0"
 description = "Conditional Henyey-Greenstein residual spline flows for axisymmetric particle phase functions"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,6 +13,7 @@ dependencies = [
   "zuko==1.6.0",
   "numpy>=2.0,<3",
   "safetensors>=0.5,<1",
+  "matplotlib>=3.9,<4",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +28,10 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-markers = ["integration: training or native cross-language integration"]
+markers = [
+  "integration: training or native cross-language integration",
+  "cuda: requires a CUDA-equipped host and CUDA-enabled PyTorch",
+]
 
 [tool.ruff]
 line-length = 100

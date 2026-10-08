@@ -1,0 +1,3663 @@
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index 62c7e9c4f1301204c2eaa507d014bafe027ccdfa..36d0a2b193b10bf9d1304f52fe180d2d1d71826b 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -1,4 +1,4 @@
+-name: Python and native reference
++name: CPU correctness and legacy native reference
+ 
+ on:
+   push:
+diff --git a/AGENTS.md b/AGENTS.md
+index 17bb33942eebd94e3b421ec5fc223462cacaff8c..ca9f43d4e502cc7743dcb4cf13c12ee0662f8349 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -41,6 +41,15 @@ The current primary workflow is the **single-condition Rainbow model** documente
+ 
+ ## Evaluation, reproducibility and scope
+ 
++- The primary training, evaluation and inference path targets CUDA by default.
++  Fail explicitly when requested CUDA is unavailable; CPU is an explicit
++  correctness-test/debug choice. Keep fixed training and validation tensors on
++  the selected device and avoid CPU minibatch copies or per-parameter host
++  synchronization in the optimization loop.
++- Distinguish the MLP parameter dtype from the spline/probability-coordinate
++  dtype. The production starting configuration uses FP32 conditioners and FP64
++  HG, geometry and RQS arithmetic. Do not silently enable AMP/FP16, TF32, or
++  downgrade externally supplied g. Record both precision choices.
+ - Keep the fixed training pool, validation stream and test stream independent.
+   Model selection uses validation data; final test data must not select weights.
+   Record seeds, sample counts, update count, optimizer/RNG state, complete
+@@ -60,6 +69,11 @@ The current primary workflow is the **single-condition Rainbow model** documente
+   actual mathematical or integration risk over implementation-mirroring tests.
+ - Label synthetic fixtures as such. They validate the adapter and learning
+   pipeline, not the Rainbow solver's physics, convergence, or real-data accuracy.
++- After completed training, visualize the selected weights together with the
++  exact stored-CDF PDF and CDF-generated point cloud. Keep all maps in the same
++  recorded source frame, axes, extent and aspect. Share the two PDF maps' log
++  color scale; mark true zero target density rather than flooring it. A scatter
++  map in theta/azimuth coordinates is not an equal-area density estimate.
+ - Report only actually executed platforms and measurements. CPU Python or host
+   C++ tests do not establish CUDA training, NVCC compilation, OptiX integration,
+   renderer correctness, or GPU sampling/evaluation speed.
+@@ -81,3 +95,7 @@ they do not override the current workflow above.
+ Run `pytest -q` and `ruff check .` from the repository root for local checks.
+ Record the measured scope when reporting results; retained historical reports
+ do not validate new changes.
++On a CUDA machine, first require `python -c "import torch; assert torch.cuda.is_available()"`,
++then run `python -m pytest -m cuda -q`. A CUDA-marked suite consisting only of
++skips is not a GPU validation result. Do not assume a self-hosted GPU CI runner
++exists or report unexecuted CUDA checks as passed.
+diff --git a/README.md b/README.md
+index 508941e724d2073443d32e4a95056f390a69a60a..db8fd31e2f3f50822bdfa0fe57f2fe69243c8f5e 100644
+--- a/README.md
++++ b/README.md
+@@ -5,6 +5,8 @@
+ 保存 CDF の一次モーメント `hg.g` を読み込み，その値を固定したまま残差 NF を学習する構成です．
+ 
+ 主経路は `inspect-rainbow` → `train-rainbow` → `evaluate-rainbow` です．
++学習と NF の評価は **NVIDIA GPU / CUDA を標準**にします．学習完了後には，教師 PDF，
++CDF サンプル点群，NF の PDF を同じ座標とアスペクト比で比較する図も保存します．
+ 既存の `demo` / `train` / `evaluate` / `export` は **旧 v1 モデル用**として残しています．
+ 旧モデルの HG 用 MLP，方位角の絶対値への折り畳み，OptiX 向け export は，
+ 新しい学習経路の仕様ではありません．
+@@ -20,7 +22,9 @@
+ | 円周 | 全周を保持し，周期境界で slope を共有，conditioner も周期化 |
+ | 対称性 | 鏡映をパラメータ共有で表現；上下の入射を同一視しない |
+ | 学習 | CDF から固定点群を生成し，立体角に関する NLL で最尤学習 |
++| 実行 | CUDA が既定；固定点群を GPU に置き，MLP は FP32，HG と RQS は FP64 |
+ | 評価 | 独立な validation / test 点群，HG と NF の forward KL，NF サンプルによる重要度 ESS |
++| 可視化 | 保存 CDF の PDF，CDF 点群，NF PDF；ソルバ座標で共通の軸・対数色尺度 |
+ | 保存 | 推論・評価用の最良重みと，optimizer / RNG を含む再開用 checkpoint を分離 |
+ 
+ 円周・区間 RQS は Rezende et al. (2020),
+@@ -32,23 +36,30 @@
+ 
+ ## セットアップ
+ 
+-Python 3.12 と，実行環境に対応する PyTorch を使用します．CPU で開始する場合の
+-Windows PowerShell の例です．仮想環境の有効化を行わず，その実行ファイルを直接呼びます．
++Python 3.12 と，実行環境に対応する CUDA 版 PyTorch を使用します．以下は
++PyTorch 2.8.0 / CUDA 12.8 wheel を使う Windows PowerShell の例です．
++仮想環境の有効化を行わず，その実行ファイルを直接呼びます．
+ 
+ ```powershell
+ python -m venv .venv
+-.\.venv\Scripts\python.exe -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
++.\.venv\Scripts\python.exe -m pip install --force-reinstall torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+ .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
++.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.version.cuda); assert torch.cuda.is_available(), 'CUDA is unavailable'; print(torch.cuda.get_device_name(0))"
+ ```
+ 
+-CUDA で学習する場合は，最初の PyTorch インストールを
+-[PyTorch 公式案内](https://pytorch.org/get-started/locally/) の対応ビルドに変更し，
+-学習コマンドに `--device cuda` を指定します．CPU での検証結果を CUDA の検証結果とは扱いません．
++`--force-reinstall` は，以前のセットアップで同じバージョン番号の CPU wheel が
++入っている場合にも，指定した CUDA wheel へ入れ替えるために付けています．
++GPU とドライバに合うビルドは [PyTorch 公式案内](https://pytorch.org/get-started/locally/) と
++[2.8.0 のインストール一覧](https://pytorch.org/get-started/previous-versions/#v280) で確認してください．
++既定設定は `cuda` です．CUDA が利用できなければ理由を表示して停止し，自動的に CPU へ
++切り替えません．複数の GPU がある場合は `--device cuda:1` のように選べます．
+ Zuko は既存プロジェクトと同じ **1.6.0** を使い，ライブラリ全体の fork は不要です．
+ 
+ Linux では `python -m venv .venv` の後に `source .venv/bin/activate` を実行し，
+ 同じ `pip install` と，以下の `phaseflow` コマンドを使用できます．
+-`requirements-validation.txt` は旧 v0.1 の検証環境の記録です．
++`requirements-validation.txt` は CPU の回帰検証に用いる固定バージョンの一覧です．
++CPU の数学・小規模テストを実行する場合だけ，対応する CPU 版 PyTorch と明示的な
++`--device cpu` を使います．CPU での検証結果を CUDA の検証結果とは扱いません．
+ 
+ ## 一条件から学習する
+ 
+@@ -77,6 +88,51 @@ $record = 'D:\rainbow\output\records\i0000\w0000'
+ validation は同じ物理条件からの独立な点群で，条件間の汎化評価ではありません．
+ `g` は点群から再推定せず，保存された CDF に対応する値を使用します．
+ 
++### GPU のデータ移動と精度
++
++CDF の読み込み・検証と教師点群の初回生成は CPU 上で行い，固定学習点群と validation 点群を
++GPU に一度転送します．minibatch の抽出と最適化は GPU 上で行い，更新ごとの点群の
++CPU → GPU コピーを避けます．固定 pool が VRAM に収まる点数を指定してください．
++
++提供設定の `training.dtype="float32"` は MLP の重みと計算精度です．
++`model.spline_dtype="float64"` により，HG の確率座標，RQS の制約・逆写像・Jacobian，
++方向と log PDF は FP64 に保ちます．外部 `g` も丸めません．MLP まで FP64 に揃えた比較は
++`training.dtype="float64"` で実行できます．TF32，AMP / FP16 の暗黙の有効化はありません．
++
++学習率，点数，batch size と更新回数は以前の出発点を維持しています．特定 GPU で速度を
++最適化したハイパーパラメータではありません．CPU は小規模な正しさの検証用として残しています．
++
++### 完了後の 3 種類のマップ
++
++予定した更新が完了すると，validation で選んだ最良重みから `runs/rainbow_single/plots/` に
++次の図を自動保存します．
++
++| ファイル | 内容 |
++|---|---|
++| `reference_pdf.png` | CDF のセル質量を立体角で割った教師 PDF，対数色表示 |
++| `cdf_samples.png` | 同じ CDF から独立に生成した点群，既定 32,768 点 |
++| `nf_pdf.png` | NF の PDF 評価，教師図と共通の対数色尺度 |
++| `comparison.png` | 3 枚を並べた比較図 |
++| `plots.json` | 描画設定，座標・密度の規約と入力情報 |
++
++横軸はソルバの方位角 `phi_s` の −180〜180 度，縦軸は散乱角 `theta` の 0〜180 度で，
++前方の 0 度を上に表示します．全て同じ軸・範囲と横 : 縦 = 2 : 1 のアスペクト比です．
++NF フレームの方位角はソルバ座標へ戻して描き，教師の厳密なゼロ密度は区別して表示します．
++
++角度の長方形は等面積ではないので，点群の見かけの密集度には `sin(theta)` が含まれます．
++散布図ではピークや谷の位置と方位角の対応を確認し，PDF の色の明るさと点の密集度が
++そのまま一致すると解釈しないでください．定量的な精度には立体角に関する NLL / KL を使います．
++
++図だけを再生成することもできます．このコマンドも NF の評価には既定で CUDA を使います．
++
++```powershell
++.\.venv\Scripts\phaseflow.exe plot-rainbow --record $record --checkpoint runs/rainbow_single/best.pt --output runs/rainbow_single/plots --samples 32768 --seed 2027
++```
++
++`--write-pdf` で PDF 形式も保存します．学習時の自動出力を省略する場合は `--no-plots` を
++指定します．描画の設定は学習設定の `visualization` にまとめています．
++[図の仕様と設定](docs/RAINBOW_SINGLE_CONDITION.md#学習完了後の可視化) を参照してください．
++
+ ### 中断して再開する
+ 
+ ```powershell
+@@ -87,6 +143,8 @@ validation は同じ物理条件からの独立な点群で，条件間の汎化
+ 再開には `checkpoint.pt` を指定します．`best.pt` は validation で選んだ評価・推論用の重みで，
+ optimizer と乱数状態を引き継ぐ再開用ファイルではありません．
+ 再開時は同じ入力ファイルと設定を用い，別の実験では出力ディレクトリも分けます．
++予定更新の途中で停止した場合には最終 test と自動図はまだ作られません．以前の version 2
++checkpoint は評価・推論用に読み込めますが，更新した乱数方式で厳密な途中再開は行いません．
+ 
+ ## PDF と座標の規約
+ 
+@@ -102,7 +160,8 @@ NF の局所座標に明示的に合わせます．詳細は
+ ## 検証範囲と今後の接続
+ 
+ この変更では，合成した Rainbow 形式のレコードを用いてデータ契約と学習経路を検証します．
+-実行した検査と合成教師での数値結果は [検証報告](reports/RAINBOW_VALIDATION.md) に記録します．
++実行した検査と合成教師での数値結果は [GPU 経路・可視化の検証報告](reports/GPU_PLOTS_VALIDATION.md)
++に記録します．[v0.2 のアダプタ・学習報告](reports/RAINBOW_VALIDATION.md) は以前の実装の記録です．
+ **実際のソルバ出力での近似精度，ソルバの物理的収束，CUDA / OptiX 上の速度は別の検証対象です．**
+ 新しい単一条件モデルの checkpoint は，旧 `phaseflow export` / `model.pflow` 形式とは互換ではありません．
+ 旧 export が新モデルを誤って書き出すことは拒否します．
+@@ -116,6 +175,7 @@ OptiX 推論は今後の実装範囲です．今回のモデルから条件間
+ | `configs/rainbow_single.json` | 単一条件の学習設定 |
+ | `src/phaseflow/rainbow.py` | CDF 読み込み・検証，教師 sample / PDF，フレーム変換 |
+ | `src/phaseflow/single_condition.py` | 単一条件の学習・評価・再開 |
++| `src/phaseflow/plotting.py` | ソルバ座標に揃えた教師 PDF・CDF 点群・NF PDF の描画 |
+ | `src/phaseflow/sphere_model.py` | 外部 HG と円周・区間 coupling のモデル |
+ | `src/phaseflow/sphere_splines.py` | 円周境界と鏡映のパラメータ制約 |
+ | `src/phaseflow/hg.py`, `geometry.py` | HG と局所方向の数値処理 |
+@@ -126,3 +186,11 @@ OptiX 推論は今後の実装範囲です．今回のモデルから条件間
+ 開発時の契約は [AGENTS.md](AGENTS.md) に記載しています．リポジトリ直下で
+ `pytest -q` と `ruff check .` を実行してください．C++ テストが通ることは，新モデルの
+ native 推論が実装されたことを意味しません．
++
++GPU を利用できる環境では，次の検査で CUDA 上の精度・学習・再開・描画の評価経路を確認します．
++最初に CUDA が使えることを必ず確認し，GPU テストが全て skip された結果を合格と扱いません．
++
++```powershell
++.\.venv\Scripts\python.exe -c "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; print(torch.cuda.get_device_name(0))"
++.\.venv\Scripts\python.exe -m pytest -m cuda -q
++```
+diff --git a/configs/rainbow_single.json b/configs/rainbow_single.json
+index b958c06a413708f26c6c9648b47bd25bdf9fbb69..2cfeddcd98495a48108a2a6c0605b4f42598099d 100644
+--- a/configs/rainbow_single.json
++++ b/configs/rainbow_single.json
+@@ -9,12 +9,13 @@
+     "min_bin_width": 0.00001,
+     "min_bin_height": 0.00001,
+     "min_derivative": 0.0001,
+-    "activation": "silu"
++    "activation": "silu",
++    "spline_dtype": "float64"
+   },
+   "training": {
+     "seed": 415,
+-    "device": "cpu",
+-    "dtype": "float64",
++    "device": "cuda",
++    "dtype": "float32",
+     "train_samples": 65536,
+     "validation_samples": 32768,
+     "test_samples": 65536,
+@@ -28,5 +29,13 @@
+     "grad_clip_norm": 10.0,
+     "deterministic": true,
+     "cpu_threads": 1
++  },
++  "visualization": {
++    "enabled": true,
++    "cdf_samples": 32768,
++    "seed": 2027,
++    "eval_batch_size": 16384,
++    "dpi": 160,
++    "write_pdf": false
+   }
+ }
+diff --git a/docs/RAINBOW_SINGLE_CONDITION.md b/docs/RAINBOW_SINGLE_CONDITION.md
+index 1911e9613f53f4f9bd4468afc110d48948b426e5..c969f451515b3332002a875a0c93b88b11492ee2 100644
+--- a/docs/RAINBOW_SINGLE_CONDITION.md
++++ b/docs/RAINBOW_SINGLE_CONDITION.md
+@@ -199,7 +199,8 @@ $$
+ =\log h_g(\mu)-\log\left|\det D N^{-1}(b)\right|
+ $$
+ 
+-を同時に返します．残差写像の初期値は恒等写像なので，学習開始時は HG 分布です．
++を同時に返します．残差写像の初期値は恒等写像で，浮動小数点の丸めの範囲内で
++学習開始時は HG 分布です．
+ 追加の `sin(theta)`，`2*pi`，鏡映の確率因子はありません．
+ 
+ ### 層順序と周期境界
+@@ -283,7 +284,9 @@ NF 座標の `phi=0` を代表値にします．教師のセル PDF はソルバ
+ | 更新回数 | 2,000 |
+ | Optimizer / 学習率 | Adam / `1e-3` |
+ | Validation / checkpoint 間隔 | 100 更新 |
+-| 実行精度・device | float64 / CPU，1 thread |
++| Device | CUDA；利用できなければ停止 |
++| Conditioner の重み・MLP | float32 |
++| HG・方向・RQS・返却 log PDF | float64 |
+ | Seed | 415 |
+ 
+ Bin 下限は数値上の設定であると同時に表現可能な集中度を制限します．値を変更した比較では
+@@ -294,10 +297,31 @@ Bin 下限は数値上の設定であると同時に表現可能な集中度を
+ `train_samples` を変え，更新回数・batch size・validation/test の点数と seed を揃えます．
+ これにより教師点数の効果と最適化に投入する更新量を分けて比較できます．
+ 
+-乱数は NumPy PCG64 と `SeedSequence([seed, stream_id])` から作ります．
+-train，validation，minibatch の抽出，test，proposal に独立な stream を割り当てます．
+-教師点群は 52-bit midpoint grid 上の開区間一様値から生成するので，乱数の端点を
+-丸めて回避する処理はありません．
++### GPU 上の学習経路
++
++設定の `training.device` は `cuda`，`training.dtype` は `float32`，
++`model.spline_dtype` は `float64` が出発点です．CUDA が利用できない場合に，
++自動的に CPU へ切り替える処理はありません．`cuda:1` などで使用する GPU を選べます．
++CPU 上の小規模な数学・統合テストには `--device cpu` を明示します．
++
++保存 CDF の読み込み・検証と教師点群の初回生成は CPU 上で行います．生成した固定学習点群と
++validation 点群を選択した device に一度転送し，学習時の minibatch の抽出も同じ device 上で
++行います．更新のたびに NumPy の点群を切り出して CPU から GPU へ転送しません．
++したがって固定点群は VRAM に収まる必要があります．学習・validation の方向と PDF 用の
++FP64 tensor だけなら，合わせて概ね `32 * (train_samples + validation_samples)` byte です．
++これに MLP，optimizer，batch の中間値などのメモリが加わります．
++
++損失と勾配の有限性を device 上で記録し，validation・checkpoint・中断の境界でまとめて
++CPU 側へ取り出します．不正な更新を検出した場合は更新位置を報告し，失敗した重みを
++成功した checkpoint として保存しません．パラメータごとに CPU と同期する検査は避けます．
++CUDA の Adam は foreach を使い，TF32 と AMP / FP16 は自動的に有効化しません．
++GPU 向けのデータ移動・実行構成ですが，特定 GPU での速度を測定した設定ではありません．
++
++教師点群と proposal の乱数は NumPy PCG64 と `SeedSequence([seed, stream_id])` から作ります．
++train，validation，test，proposal は独立な stream です．minibatch は別の stream から得た seed を
++持つ，選択 device 上の専用 `torch.Generator` で抽出し，その状態を checkpoint に保存します．
++CPU と CUDA の乱数列が一致するとは仮定しません．教師点群は 52-bit midpoint grid 上の
++開区間一様値から生成するので，乱数の端点を丸めて回避する処理はありません．
+ 
+ 重みは **validation NLL の最小値**で選びます．選択する時点は初期状態，`eval_every` ごと，
+ 予定された最終更新です．一時停止を挟んだことだけを理由に候補時点を増やさないため，
+@@ -313,11 +337,81 @@ train，validation，minibatch の抽出，test，proposal に独立な stream 
+ | `checkpoint.pt` | 最新の更新地点，optimizer，RNG，最良重みを含む再開用状態 |
+ | `best.pt` | validation で選択した評価・推論用モデル |
+ | `metrics.json` | 初期・最良 validation，完了フラグ，完了後の最終 test |
++| `plots/` | 完了時に選択重みで作る教師 PDF・CDF 点群・NF PDF と比較図 |
+ 
+ 再開は `checkpoint.pt` を使います．データの hash，設定，実装，記録された実行環境を
+ 照合してから，点群と乱数状態を復元します．別のコード・device・設定へ移ることを，
+ 同じ実験の厳密な再開として扱いません．`best.pt` は optimizer を含まないので再開できません．
+ checkpoint は primitive / tensor の状態を `weights_only=True` で読み込みます．
++新しい再開状態は checkpoint version 3 です．以前の version 2 は，保存されたモデルの
++精度設定を保持した評価・推論用として読み込めます．minibatch の乱数方式と実装が変わっているため，
++version 2 からの再開を同じ実験の厳密な続行とは扱いません．
++
++PyTorch / CUDA の再現性には実行環境による範囲があります．この実装は同じ設定・入力・実装・
++記録環境での再開を検証対象とし，別の GPU や PyTorch バージョンでの同一乱数列・bit 単位の
++同一結果は主張しません．[PyTorch 2.8 の再現性の説明](https://docs.pytorch.org/docs/2.8/notes/randomness.html)
++も参照してください．
++
++## 学習完了後の可視化
++
++既定では，予定した更新が全て終わった後に `best.pt` と同じ validation 選択重みを使い，
++`plots/` に次の画像を保存します．中断中の重みや test の結果で選択した重みではありません．
++
++| ファイル | 表示内容 |
++|---|---|
++| `reference_pdf.png` | 保存 CDF のセル質量を実際の立体角で割った教師 PDF，対数色表示 |
++| `cdf_samples.png` | 同じ保存 CDF から独立に生成した点群の散布図 |
++| `nf_pdf.png` | 学習済み NF の任意方向 PDF 評価，対数色表示 |
++| `comparison.png` | 上記 3 枚を並べた比較図 |
++| `plots.json` | 可視化設定，入力と checkpoint の hash，座標・密度・サンプルの情報 |
++
++全てのマップの横軸はソルバの方位角 `phi_s`，範囲は `[-180,180]` 度です．
++縦軸は入射伝播方向からの散乱角 `theta`，範囲は `[0,180]` 度で，前方散乱の 0 度を上に
++表示します．1 度の横・縦の長さを揃え，表示領域のアスペクト比を横 : 縦 = 2 : 1 にします．
++NF 座標へ回転した点をそのまま描かず，記録されたフレームとの変換を使ってソルバ座標に戻します．
++
++教師図は保存された全セルを使い，実際の `u_edges` から求めた散乱角の境界で表示します．
++NF も同じ全セルの `u` の中点・方位角の中点で PDF を評価し，同じ境界で色を配置します．
++角度方向の間引きはしません．`plots.json` に保存される NF の格子積分はこの中点則による
++診断値であり，解析的な正規化の値や保存 CDF の厳密な積分とは区別します．
++
++2 枚の PDF 図では正の値に対する **同じ LogNorm と同じ色範囲**を使います．
++両図に存在する正の値の最小・最大を色範囲にし，パーセンタイルによる切り捨てはしません．
++教師の厳密なゼロは灰色で区別し，対数表示のために正の floor を足しません．
++全ての正の値が同じ場合だけ，表示用の色範囲を上下に広げます．PDF 自体は変更しません．
++両方とも単位は `sr^-1` であり，画像上の角度面積あたりの密度ではありません．
++
++点群は CDF サンプラの定性的な確認用で，既定では 32,768 点です．これは可視化専用の
++独立な点群であり，学習 pool 自体を全点表示するものではありません．乱数 seed と点数を保存し，
++学習・validation・test の点数を変えずに散布図の点数を変更できます．
++`theta,phi_s` の長方形は等面積投影ではないため，点の見かけの密集度は
++`p_Omega * sin(theta)` に従います．前方の PDF が大きい場所ほど必ず画面上の点が密になる，
++という読み方はせず，ピーク・谷の位置や方位角の対応を確認します．定量比較は立体角に関する
++NLL / KL を使います．
++
++設定ファイルの最上位にある `visualization` で描画だけを調整できます．
++
++```json
++"visualization": {
++  "enabled": true,
++  "cdf_samples": 32768,
++  "seed": 2027,
++  "eval_batch_size": 16384,
++  "dpi": 160,
++  "write_pdf": false
++}
++```
++
++`--no-plots` は完了後の自動描画を明示的に省略します．`--max-steps-this-run` で予定の途中で
++停止したときには，自動図は作りません．学習済み checkpoint から図だけを作り直す場合は，
++次のコマンドを使用できます．NF の評価は既定で CUDA，画像の構成と保存は Matplotlib で行います．
++
++```powershell
++.\.venv\Scripts\phaseflow.exe plot-rainbow --record $record --checkpoint runs/rainbow_single/best.pt --output runs/rainbow_single/plots --samples 32768 --seed 2027
++```
++
++`--batch-size` は描画時の NF 評価の batch size，`--dpi` は出力解像度です．
++`--write-pdf` を付けると，PNG に加えて PDF 形式の図も出力します．
+ 
+ ## 評価指標の読み方
+ 
+@@ -392,10 +486,11 @@ with RainbowReference("path/to/one_record") as reference:
+     model = SingleConditionSphereFlow(
+         hg_g=reference.g,
+         incident_cosine=float(reference.condition[1]),
+-        config=SphereFlowConfig(),
+-        dtype=torch.float64,
++        config=SphereFlowConfig(spline_dtype="float64"),
++        dtype=torch.float32,
++        device="cuda",
+     )
+-    model_log_pdf = model.log_prob(torch.from_numpy(directions))
++    model_log_pdf = model.log_prob(torch.as_tensor(directions, device="cuda"))
+     sampled, sampled_log_pdf = model.sample_and_log_prob(4096)
+     teacher_at_model_samples = reference.log_prob(sampled.detach().cpu().numpy())
+ ```
+@@ -415,9 +510,20 @@ memory map は使用できません．metadata は copy として取得でき，
+ 
+ ## 数値精度と今後の範囲
+ 
+-HG，方向，返却する log PDF は float64 です．ネットワークと spline の計算はモデル dtype に従い，
+-最初の実験では float64 を既定値にしています．外部 `g` は Python の binary64 値として保存し，
+-ネットワークを `.float()` にしても値を丸めたり `g_limit` に置き換えたりしません．
++HG，方向，返却する log PDF は float64 です．ネットワークの重み・MLP の計算精度は
++`training.dtype`，RQS の計算精度は `model.spline_dtype` で分けて指定します．
++提供する GPU 設定ではそれぞれ `float32` と `float64` です．conditioner 用の特徴を作ってから
++MLP の dtype へ変換し，得られた logits を spline の dtype に戻して正のパラメータ制約・
++RQS・逆写像・Jacobian を計算します．方向を FP32 に落として前方の角度差を失う処理はしません．
++
++`SphereFlowConfig` 自体の省略時の `spline_dtype="model"` は，spline の精度をモデルの
++重みと同じにする選択肢です．旧 checkpoint の意味を保つための既定値で，提供設定ファイルでは
++明示的に `float64` を指定します．MLP も FP64 に揃えた精度比較には `training.dtype="float64"`
++を使います．どちらの精度設定も checkpoint に保存します．
++
++外部 `g` は Python の binary64 値として保存し，ネットワークを `.float()` にしても値を
++丸めたり `g_limit` に置き換えたりしません．NF の逆変換に渡す開区間一様値は，実際の spline 精度が
++FP64 なら 52-bit，FP32 なら 23-bit の midpoint grid を使います．
+ 
+ 強い集中により内部の逆写像が極へ丸められた場合は，数値的な失敗として報告します．
+ 別の方向へ置き換える，サンプルを捨てる，自動で引き直す，という処理は行いません．
+@@ -427,6 +533,12 @@ HG，方向，返却する log PDF は float64 です．ネットワークと sp
+ このバージョンは，単一条件で実際に最尤学習を行う実装です．ただし，今回の環境での
+ データ契約・学習・再開の検証には合成レコードを用いており，実際の Rainbow の出力での
+ 近似精度や物理再現性はまだ測定していません．合成レコードを物理的教師データとして報告しません．
++[GPU 経路・可視化の検証報告](../reports/GPU_PLOTS_VALIDATION.md) に，実行済みの範囲と結果を記録します．
++
++CUDA 用の検査は `cuda` marker を持ちます．実機では `python -c "import torch; assert torch.cuda.is_available()"`
++で利用可能性を確認してから，`python -m pytest -m cuda -q` を実行してください．
++これらは GPU 上の精度・学習・再開・描画時のモデル評価を検査し，CPU しかない環境では skip されます．
++skip を CUDA の成功例に数えず，速度の評価は同じ GPU 上で別に測定します．
+ 
+ 次の段階は，実際の一条件でサンプル数とモデル容量を調べた後，片方の条件を変える実験，
+ 二条件モデルとエンコーディング，外部 `g` の条件間での供給を設計することです．
+diff --git a/pyproject.toml b/pyproject.toml
+index cba6e9565beb2b7ad8163f3a0d51a2a9ba6a2c57..85444fdbe964fa6717130ec3d618e0f5464bbf23 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "spherical-hg-flow"
+-version = "0.2.0"
++version = "0.3.0"
+ description = "Conditional Henyey-Greenstein residual spline flows for axisymmetric particle phase functions"
+ readme = "README.md"
+ requires-python = ">=3.12"
+@@ -13,6 +13,7 @@ dependencies = [
+   "zuko==1.6.0",
+   "numpy>=2.0,<3",
+   "safetensors>=0.5,<1",
++  "matplotlib>=3.9,<4",
+ ]
+ 
+ [project.optional-dependencies]
+@@ -27,7 +28,10 @@ where = ["src"]
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]
+ addopts = "-ra"
+-markers = ["integration: training or native cross-language integration"]
++markers = [
++  "integration: training or native cross-language integration",
++  "cuda: requires a CUDA-equipped host and CUDA-enabled PyTorch",
++]
+ 
+ [tool.ruff]
+ line-length = 100
+diff --git a/reports/GPU_PLOTS_VALIDATION.md b/reports/GPU_PLOTS_VALIDATION.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..af28ec080733c6c367257bc3f949be771c298bcc
+--- /dev/null
++++ b/reports/GPU_PLOTS_VALIDATION.md
+@@ -0,0 +1,223 @@
++# GPU-default workflow and aligned plotting validation
++
++Date: 2026-10-07. Package: `spherical-hg-flow` 0.3.0.
++
++Repository base: `0956c7d52b36ce2c704fdab82e447ff80efbbfe2`.
++The producer contract and the external HG / full-circle RQS model are retained
++from the previous single-condition workflow.
++
++**CUDA was unavailable in the validation environment. The executed results
++below use CPU and synthetic CDF records. They establish numerical and workflow
++behavior, not GPU throughput, real Rainbow approximation accuracy, or OptiX
++integration. The shipped training and evaluation defaults require CUDA.**
++
++## Executed checks
++
++| Check | Result |
++|---|---|
++| Complete Python and retained native regression suite | 256 passed, 4 CUDA tests skipped |
++| Ruff | Passed |
++| Whitespace / patch checks | Passed |
++| Source distribution and wheel | Built successfully with `python -m build --no-isolation` |
++| Mixed FP32 conditioner / FP64 spline learning | Completed 100 updates on a synthetic teacher |
++| Automatic post-training plots | All four PNG files and `plots.json` created |
++| Visual inspection | Comparison and individual PDF maps inspected; labels, shared axes and colorbar fit |
++| CLI integration | Inspect, train, independent evaluation and standalone plotting passed |
++| Exact interrupted resume | CPU weights, selected weights, generator state, history and metrics matched |
++| CUDA runtime / training / plotting | Not executed; four explicit hardware gates remain |
++
++Evidence: [JUnit results](gpu_plots_pytest.xml) and
++[synthetic experiment configuration, metrics and plot metadata](gpu_plots_synthetic_smoke.json).
++The full suite took 13.02 seconds in this environment; that is a test duration,
++not a sampling, training or renderer benchmark. The retained C++ tests concern
++the legacy model only.
++
++| Environment | Value |
++|---|---|
++| Python | 3.12.14 |
++| PyTorch | 2.8.0+cpu |
++| NumPy | 2.5.3 |
++| Zuko | 1.6.0 |
++| Matplotlib | 3.11.2 |
++| Test device | CPU, one thread |
++| Synthetic experiment precision | FP32 MLP, FP64 spline / HG / directions / log PDF |
++
++## GPU execution changes and their checks
++
++The default configuration uses `training.device="cuda"`,
++`training.dtype="float32"`, and `model.spline_dtype="float64"`.
++`evaluate-rainbow`, `plot-rainbow`, and checkpoint loading also default to CUDA.
++Unavailable CUDA fails before generating the large training pools or creating
++the training output directory. CPU execution requires an explicit choice.
++
++The CDF adapter validates and samples the fixed teacher pools on the CPU once.
++Training directions and validation arrays are then retained on the selected
++device. Each update uses `torch.randint` with a dedicated device generator and
++indexes the resident training tensor. Likelihood evaluations operate in batches,
++reduce the statistics on the device, and return a small summary. NF proposal
++evaluation batches the model work and then passes the generated directions to
++the CPU reference CDF lookup in one transfer.
++
++Loss and gradient-norm checks are accumulated and transferred at validation,
++checkpoint or controlled-pause boundaries. Parameter finiteness is checked
++before publishing that boundary. A failed block leaves the preceding valid
++checkpoint intact. The trusted internal training path disables per-call scalar
++input validation; invalid numerical outputs still fail the aggregate checks.
++The public model retains input validation by default.
++
++The fixed HG coefficient is cached as a nonpersistent FP64 device tensor.
++Changing the weight dtype or device rebuilds it from the authoritative Python
++binary64 value. Sampling, evaluation and the HG baseline reuse this cache.
++Regression tests check the exact coefficient bits, checkpoint compatibility,
++and absence of per-call Python-scalar tensor construction and scalar reads.
++
++CUDA Adam uses foreach operations. TF32 and AMP / FP16 are not enabled
++implicitly. Deterministic CUDA configuration validates the cuBLAS workspace
++setting. The recorded runtime includes the resolved device index, GPU name and
++capability when CUDA is used. Same-runtime resumption is the reproducibility
++contract; bitwise equivalence across different platforms is not asserted.
++
++The new optimizer/minibatch state uses checkpoint version 3. Version-2
++checkpoints remain readable for inference, including their original spline
++precision. They are not treated as exact resumptions under changed code and
++random-number generation. The model's historical schema-1 extra state remains
++compatible: omission of `spline_dtype` means the original `"model"` precision.
++
++## Synthetic mixed-precision learning experiment
++
++The analytic fixture before cell integration is
++
++$$
++p(\mu,\phi_s)=\frac{(1+0.6\mu)(1-0.65\cos(2\phi_s))}{4\pi}.
++$$
++
++It is integrated into 16 scattering-angle cells and 24 source-azimuth cells.
++The learned teacher is the resulting stored piecewise-constant density per
++steradian. Its stored first moment is `g=0.1987210964506126`. The labels 550 nm
++and 20 degrees define a coordinate fixture, not a physical rainbow prediction.
++
++| Experiment setting | Value |
++|---|---|
++| Model | 2 alternating coupling layers, 8 bins, hidden widths `[16,16]` |
++| Precision | FP32 MLP, FP64 spline and HG |
++| Fixed train / validation / final test | 2,048 / 2,048 / 2,048 points |
++| Updates / batch size | 100 / 256 |
++| Learning rate | 0.003 |
++| Validation interval | 20 updates |
++| Checkpoint interval | 4 updates |
++| Training seed | 415 |
++| Final NF proposal samples | 512 |
++| Diagnostic CDF scatter | 32,768 independent samples; seed 2027, stream 100 |
++| Selected step | 100, selected by validation NLL |
++
++| Independent final-test statistic | Value |
++|---|---:|
++| HG forward KL estimate | 0.1101120408 |
++| HG KL standard error | 0.0096533510 |
++| NF forward KL estimate | 0.0095769370 |
++| NF KL standard error | 0.0032730340 |
++| HG NLL | 2.4676223285 |
++| NF NLL | 2.3670872247 |
++| Paired NLL improvement over HG | 0.1005351038 |
++| Improvement standard error | 0.0094022494 |
++| Relative importance ESS | 0.9756543529 |
++| Mean importance weight | 1.0023216308 |
++| Maximum sample/eval log-PDF discrepancy | 2.6645352591e-15 |
++
++These values validate a small implementation example. The production starting
++configuration has larger pools and a larger model; neither its parameters nor
++the 100-update synthetic example have been optimized for real solver data.
++
++The training implementation fingerprint for this run is
++`372fb5c5e46a6a2a6166026ca1344f3b6d0756fd7fda753408a550b382d9e63d`.
++Complete configurations and source-file hashes are recorded in the JSON report.
++
++## Plotting conventions and validation
++
++The requested maps are `reference_pdf.png`, `cdf_samples.png`, and `nf_pdf.png`.
++`comparison.png` places them together. All individual canvases and plot
++rectangles have identical dimensions; the data rectangle is 2:1. The horizontal
++axis is recorded solver azimuth from -180 to 180 degrees. The vertical axis is
++scattering angle from 0 to 180 degrees, with forward scattering at the top.
++
++The teacher is reconstructed from the two CDF differences and the actual
++nonuniform `u_edges`. Cell mass is divided by cell solid angle. No smoothing,
++probability floor, renormalization or extra `sin(theta)` multiplier is applied
++to the PDF. True zero cells have their own gray color. Invalid or unrepresentable
++NF densities raise instead of becoming zero-colored pixels.
++
++The NF is queried at every stored cell's midpoint in `(u, source_phi)`, after
++the explicit source-to-NF rotation. Teacher and NF share one logarithmic color
++normalization. In this experiment its limits were
++`0.012247347446778996` and `0.205611032072011` per steradian. The 16-by-24
++appearance of the fixture is its native CDF resolution, not display downsampling
++of a high-resolution solver record.
++
++The scatter uses an independent diagnostic CDF stream, rather than selecting
++or weighting points using the NF. On a `(phi, theta)` angular chart, raw point
++density includes `sin(theta)`; it is not directly proportional to the plotted
++density per steradian. Figure captions and metadata make this distinction.
++
++Tests use an independent anisotropic analytic density to detect a missing,
++reversed or 90-degree-offset source rotation. They also check nonuniform cell
++areas, zero cells, CDF scatter frequencies, shared color normalization, PNG/PDF
++output, global RNG preservation and restoration of individual module modes.
++Figures are created only after the full optimization plan completes, using
++the selected `best.pt` weights.
++
++The teacher's reconstructed mass was 1.0. The NF's native-cell midpoint
++quadrature was 0.9958057756. The latter is a coarse-grid quadrature diagnostic,
++not an exact NF normalization measurement or a reason to renormalize the PDF.
++
++## Reproduce the checks
++
++Install the source checkout and development dependencies. From its root:
++
++```sh
++python -m pytest -q --junitxml=reports/gpu_plots_pytest.xml
++ruff check .
++python -m build --no-isolation
++```
++
++The executed development run used `PYTHONPATH=src`, `OMP_NUM_THREADS=1`, and
++`MKL_NUM_THREADS=1` with the recorded CPU environment. The synthetic plotting
++experiment used the existing test harness explicitly:
++
++```python
++from pathlib import Path
++from dataclasses import replace
++from test_single_condition import smooth_teacher, small_model, small_config
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import train_single_condition
++from phaseflow.plotting import RainbowPlotConfig
++
++root = Path("runs/reproduce_gpu_plots")
++with RainbowReference(smooth_teacher(root / "record")) as reference:
++    result = train_single_condition(
++        reference,
++        replace(small_model(), spline_dtype="float64"),
++        small_config(device="cpu", dtype="float32", steps=100, eval_every=20),
++        root / "training",
++        plot_config=RainbowPlotConfig(cdf_samples=32768, dpi=160),
++    )
++```
++
++For this test-harness snippet include both `src` and `tests` on `PYTHONPATH`.
++It is not the real-data training command. That command is documented in the
++[README](../README.md), using the CUDA-default `configs/rainbow_single.json`.
++
++## CUDA gates still to execute
++
++On the target GPU, first check availability, then run the marked tests:
++
++```sh
++python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print(torch.cuda.get_device_name(0))"
++python -m pytest -m cuda -q
++```
++
++The four gates cover mixed-precision sample/eval/gradient parity, resident
++training and independent evaluation, exact CUDA optimizer/RNG resumption, and
++CUDA/CPU plotting-grid agreement. All-skipped output is not GPU validation.
++Actual timing should be measured on the intended GPU with representative
++solver records. CUDA kernel compilation, native model export and OptiX renderer
++integration are separate work from this Python training and plotting update.
+diff --git a/reports/gpu_plots_pytest.xml b/reports/gpu_plots_pytest.xml
+new file mode 100644
+index 0000000000000000000000000000000000000000..98ff56c6b13f0203d7346b22c3747bf908c3e5a7
+--- /dev/null
++++ b/reports/gpu_plots_pytest.xml
+@@ -0,0 +1 @@
++<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="4" tests="260" time="13.006" timestamp="2026-10-07T22:54:10.099739+09:00" hostname="66d0fe35669a"><testcase classname="tests.test_coupling_symmetry" name="test_physical_pdf_is_independent_of_arbitrary_axial_frame[-1.0]" time="0.336" /><testcase classname="tests.test_coupling_symmetry" name="test_physical_pdf_is_independent_of_arbitrary_axial_frame[1.0]" time="0.013" /><testcase classname="tests.test_coupling_symmetry" name="test_axial_sampler_leaves_azimuth_uniform_and_radial_sample_independent[-1.0]" time="0.014" /><testcase classname="tests.test_coupling_symmetry" name="test_axial_sampler_leaves_azimuth_uniform_and_radial_sample_independent[1.0]" time="0.015" /><testcase classname="tests.test_coupling_symmetry" name="test_approach_to_axial_incidence_is_continuous[-1.0]" time="0.020" /><testcase classname="tests.test_coupling_symmetry" name="test_approach_to_axial_incidence_is_continuous[1.0]" time="0.017" /><testcase classname="tests.test_coupling_symmetry" name="test_near_axial_azimuth_modulation_can_be_first_order_in_inclination" time="0.008" /><testcase classname="tests.test_coupling_symmetry" name="test_axial_parameter_gradients_are_finite_with_trainable_g_context" time="0.011" /><testcase classname="tests.test_coupling_symmetry" name="test_gated_couplings_remain_bijective_and_have_correct_batched_jacobians" time="0.040" /><testcase classname="tests.test_coupling_symmetry" name="test_invalid_feature_count_cannot_bypass_axial_coupling_class" time="0.001" /><testcase classname="tests.test_data" name="test_explicit_weight_semantics_and_balanced_sampling" time="0.034" /><testcase classname="tests.test_data" name="test_invalid_or_ambiguous_data_is_rejected" time="0.002" /><testcase classname="tests.test_data" name="test_pickle_free_npz_roundtrip_and_sampler_resume" time="0.007" /><testcase classname="tests.test_data" name="test_float32_network_batches_retain_float64_polar_geometry" time="0.001" /><testcase classname="tests.test_data" name="test_moment_target_matches_inference_under_tolerated_vector_roundoff" time="0.001" /><testcase classname="tests.test_data" name="test_split_holds_out_complete_conditions_and_single_condition_is_explicit" time="0.001" /><testcase classname="tests.test_data" name="test_analytic_demo_normalization_moments_and_genuine_azimuth_dependence" time="0.007" /><testcase classname="tests.test_data" name="test_analytic_demo_is_azimuth_invariant_at_axial_incidence[-1.0]" time="0.001" /><testcase classname="tests.test_data" name="test_analytic_demo_is_azimuth_invariant_at_axial_incidence[1.0]" time="0.001" /><testcase classname="tests.test_export" name="test_native_matches_python_nonidentity[4-True]" time="2.052" /><testcase classname="tests.test_export" name="test_native_matches_python_nonidentity[0-False]" time="0.024" /><testcase classname="tests.test_export" name="test_native_matches_python_nonidentity[5-False]" time="0.025" /><testcase classname="tests.test_export" name="test_native_high_anisotropy_retains_double_directions[-0.9989]" time="0.015" /><testcase classname="tests.test_export" name="test_native_high_anisotropy_retains_double_directions[0.9989]" time="0.015" /><testcase classname="tests.test_export" name="test_native_matches_default_fp32_network_arithmetic" time="0.019" /><testcase classname="tests.test_export" name="test_native_axial_incidence_is_azimuth_invariant" time="0.015" /><testcase classname="tests.test_export" name="test_manifest_and_safetensors_match_native_payload" time="0.007" /><testcase classname="tests.test_export" name="test_native_rejects_corrupted_binary" time="0.027" /><testcase classname="tests.test_export" name="test_export_rejects_nonfinite_before_writing" time="0.004" /><testcase classname="tests.test_export" name="test_export_rejects_unsupported_network" time="0.005" /><testcase classname="tests.test_export" name="test_native_rejects_invalid_queries" time="0.017" /><testcase classname="tests.test_export" name="test_native_rejects_rounded_pole_samples[0.9989-0.9999999999999999]" time="0.008" /><testcase classname="tests.test_export" name="test_native_rejects_rounded_pole_samples[-0.9989-1e-16]" time="0.008" /><testcase classname="tests.test_geometry" name="test_scattering_frame_definition_and_orthonormality" time="0.004" /><testcase classname="tests.test_geometry" name="test_no_finite_axial_cone_is_replaced_by_the_fallback" time="0.002" /><testcase classname="tests.test_geometry" name="test_round_trip_in_oblique_world_frame[dtype0-2e-06]" time="0.002" /><testcase classname="tests.test_geometry" name="test_round_trip_in_oblique_world_frame[dtype1-2e-14]" time="0.002" /><testcase classname="tests.test_geometry" name="test_folded_mirror_pair_and_pole_convention" time="0.004" /><testcase classname="tests.test_geometry" name="test_rotation_covariance_away_from_degenerate_axis" time="0.002" /><testcase classname="tests.test_geometry" name="test_scaled_normalization_and_invalid_inputs" time="0.001" /><testcase classname="tests.test_gpu_workflow" name="test_shipped_training_defaults_require_cuda_and_float32_conditioners" time="0.001" /><testcase classname="tests.test_gpu_workflow" name="test_default_training_fails_without_cuda_before_sampling_or_writing" time="0.004" /><testcase classname="tests.test_gpu_workflow" name="test_invalid_deterministic_cublas_configuration_fails_before_device_setup" time="0.003" /><testcase classname="tests.test_gpu_workflow" name="test_version2_checkpoint_loads_on_explicit_cpu_without_reinterpreting_precision[dtype0]" time="0.012" /><testcase classname="tests.test_gpu_workflow" name="test_version2_checkpoint_loads_on_explicit_cpu_without_reinterpreting_precision[dtype1]" time="0.010" /><testcase classname="tests.test_gpu_workflow" name="test_cuda_resident_point_pools_mixed_precision_learning_and_evaluation" time="0.000"><skipped type="pytest.skip" message="requires a CUDA device; CPU is not a substitute">/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/tests/test_gpu_workflow.py:176: requires a CUDA device; CPU is not a substitute</skipped></testcase><testcase classname="tests.test_gpu_workflow" name="test_cuda_resume_restores_optimizer_and_generator_exactly_at_unscheduled_boundary" time="0.000"><skipped type="pytest.skip" message="requires a CUDA device; CPU is not a substitute">/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/tests/test_gpu_workflow.py:246: requires a CUDA device; CPU is not a substitute</skipped></testcase><testcase classname="tests.test_hg" name="test_isotropic_value_and_no_small_g_dead_zone[dtype0]" time="0.002" /><testcase classname="tests.test_hg" name="test_isotropic_value_and_no_small_g_dead_zone[dtype1]" time="0.002" /><testcase classname="tests.test_hg" name="test_cdf_quantile_round_trip_float64_and_endpoints" time="0.002" /><testcase classname="tests.test_hg" name="test_float32_moderate_g_and_finite_extreme_g" time="0.002" /><testcase classname="tests.test_hg" name="test_solid_angle_normalization_and_first_moment" time="0.007" /><testcase classname="tests.test_hg" name="test_density_is_cdf_derivative_and_inverse_reciprocal" time="0.002" /><testcase classname="tests.test_hg" name="test_gradcheck_through_g_zero[hg_cdf]" time="0.006" /><testcase classname="tests.test_hg" name="test_gradcheck_through_g_zero[hg_icdf]" time="0.004" /><testcase classname="tests.test_hg" name="test_gradcheck_through_g_zero[hg_log_prob]" time="0.004" /><testcase classname="tests.test_hg" name="test_support_invalid_values_and_fused_evaluation" time="0.002" /><testcase classname="tests.test_model" name="test_identity_residual_has_hg_surface_density[dtype0]" time="0.008" /><testcase classname="tests.test_model" name="test_identity_residual_has_hg_surface_density[dtype1]" time="0.008" /><testcase classname="tests.test_model" name="test_sample_pdf_matches_arbitrary_direction_eval[-0.995-dtype0]" time="0.014" /><testcase classname="tests.test_model" name="test_sample_pdf_matches_arbitrary_direction_eval[-0.995-dtype1]" time="0.015" /><testcase classname="tests.test_model" name="test_sample_pdf_matches_arbitrary_direction_eval[0.0-dtype0]" time="0.015" /><testcase classname="tests.test_model" name="test_sample_pdf_matches_arbitrary_direction_eval[0.0-dtype1]" time="0.016" /><testcase classname="tests.test_model" name="test_sample_pdf_matches_arbitrary_direction_eval[0.995-dtype0]" time="0.014" /><testcase classname="tests.test_model" name="test_sample_pdf_matches_arbitrary_direction_eval[0.995-dtype1]" time="0.014" /><testcase classname="tests.test_model" name="test_solid_angle_normalization_and_exact_reflection" time="0.290" /><testcase classname="tests.test_model" name="test_each_direction_runs_each_conditioner_once" time="0.012" /><testcase classname="tests.test_model" name="test_distribution_shapes_and_context_broadcasting" time="0.028" /><testcase classname="tests.test_model" name="test_joint_gradient_includes_hg_and_probability_coordinates" time="0.016" /><testcase classname="tests.test_model" name="test_pole_density_uses_canonical_azimuth_for_signed_zeros" time="0.006" /><testcase classname="tests.test_model" name="test_one_blob_layout_and_dtype_conversion" time="0.001" /><testcase classname="tests.test_model" name="test_configuration_rejects_ambiguous_or_invalid_fields[change0]" time="0.000" /><testcase classname="tests.test_model" name="test_configuration_rejects_ambiguous_or_invalid_fields[change1]" time="0.000" /><testcase classname="tests.test_model" name="test_configuration_rejects_ambiguous_or_invalid_fields[change2]" time="0.000" /><testcase classname="tests.test_model" name="test_configuration_rejects_ambiguous_or_invalid_fields[change3]" time="0.000" /><testcase classname="tests.test_model" name="test_configuration_rejects_ambiguous_or_invalid_fields[change4]" time="0.000" /><testcase classname="tests.test_model" name="test_configuration_rejects_ambiguous_or_invalid_fields[change5]" time="0.000" /><testcase classname="tests.test_model" name="test_invalid_physical_inputs_fail_before_inference" time="0.003" /><testcase classname="tests.test_rainbow" name="test_exact_cell_densities_moment_and_frame" time="0.004" /><testcase classname="tests.test_rainbow" name="test_known_inverse_and_plateaus_without_jitter" time="0.003" /><testcase classname="tests.test_rainbow" name="test_zero_quantiles_skip_leading_zero_mass_cells" time="0.003" /><testcase classname="tests.test_rainbow" name="test_one_cell_record_is_uniform_on_solid_angle" time="0.002" /><testcase classname="tests.test_rainbow" name="test_sampling_matches_independent_cell_masses_and_axial_moment" time="0.072" /><testcase classname="tests.test_rainbow" name="test_recorded_transverse_rotation_is_respected" time="0.003" /><testcase classname="tests.test_rainbow" name="test_signed_incident_condition_and_axial_frame[-90.0]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_signed_incident_condition_and_axial_frame[-20.0]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_signed_incident_condition_and_axial_frame[20.0]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_signed_incident_condition_and_axial_frame[90.0]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_seam_pole_and_query_shape_conventions" time="0.003" /><testcase classname="tests.test_rainbow" name="test_tiny_forward_angle_does_not_disappear_when_cosine_rounds_to_one" time="0.002" /><testcase classname="tests.test_rainbow" name="test_unrepresentable_interior_sample_is_reported_instead_of_clamped" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_uniforms_are_rejected[uniforms0]" time="0.006" /><testcase classname="tests.test_rainbow" name="test_invalid_uniforms_are_rejected[uniforms1]" time="0.004" /><testcase classname="tests.test_rainbow" name="test_invalid_uniforms_are_rejected[uniforms2]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_uniforms_are_rejected[uniforms3]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_uniforms_are_rejected[uniforms4]" time="0.005" /><testcase classname="tests.test_rainbow" name="test_invalid_uniforms_are_rejected[uniforms5]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_uniforms_are_rejected[uniforms6]" time="0.004" /><testcase classname="tests.test_rainbow" name="test_invalid_uniforms_are_rejected[uniforms7]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_directions_are_rejected[direction0]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_directions_are_rejected[direction1]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_directions_are_rejected[direction2]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_directions_are_rejected[direction3]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_directions_are_rejected[direction4]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[schema-rainbow.phase_cdf.numpy.v1]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[complete-False]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[direction_convention-away_from_event]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[density_measure-theta_phi]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[cdf_axis_order-value4]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[shape_polar_axis-value5]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[theta_count-True]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[wavelength_nm--1]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[azimuth_periodic-False]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_unsupported_or_incomplete_metadata_is_rejected[wavelength_nm-100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_inconsistent_hg_metadata_is_rejected[g-0.4]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_inconsistent_hg_metadata_is_rejected[g-1]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_inconsistent_hg_metadata_is_rejected[g--1]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_inconsistent_hg_metadata_is_rejected[target-source_before_coarsening]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_inconsistent_hg_metadata_is_rejected[axis_particle_frame-value4]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_frame_and_duplicate_json_are_rejected" time="0.004" /><testcase classname="tests.test_rainbow" name="test_invalid_cdfs_are_rejected_across_small_validation_blocks[nonmonotone]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_cdfs_are_rejected_across_small_validation_blocks[nan]" time="0.003" /><testcase classname="tests.test_rainbow" name="test_invalid_cdfs_are_rejected_across_small_validation_blocks[endpoint]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_invalid_cdfs_are_rejected_across_small_validation_blocks[out_of_range]" time="0.005" /><testcase classname="tests.test_rainbow" name="test_invalid_cdfs_are_rejected_across_small_validation_blocks[u_duplicate]" time="0.004" /><testcase classname="tests.test_rainbow" name="test_invalid_cdfs_are_rejected_across_small_validation_blocks[u_endpoint]" time="0.004" /><testcase classname="tests.test_rainbow" name="test_invalid_cdfs_are_rejected_across_small_validation_blocks[phi_decrease]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_wrong_npy_layout_or_payload_is_rejected[float32]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_wrong_npy_layout_or_payload_is_rejected[big_endian]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_wrong_npy_layout_or_payload_is_rejected[fortran]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_wrong_npy_layout_or_payload_is_rejected[transpose]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_wrong_npy_layout_or_payload_is_rejected[trailing]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_wrong_npy_layout_or_payload_is_rejected[truncated]" time="0.002" /><testcase classname="tests.test_rainbow" name="test_partial_record_close_and_full_file_provenance" time="0.008" /><testcase classname="tests.test_rainbow_plotting" name="test_native_grid_preserves_measure_zeros_orientation_and_model_mode" time="0.006" /><testcase classname="tests.test_rainbow_plotting" name="test_cdf_scatter_matches_saved_cell_masses_and_keeps_global_rng" time="0.038" /><testcase classname="tests.test_rainbow_plotting" name="test_aligned_figures_manifest_and_log_color_range" time="1.461" /><testcase classname="tests.test_rainbow_plotting" name="test_isotropic_constant_plot_has_finite_display_range_without_changing_density" time="0.384" /><testcase classname="tests.test_rainbow_plotting" name="test_invalid_nf_grid_fails_without_floor_or_mode_change[nan]" time="0.004" /><testcase classname="tests.test_rainbow_plotting" name="test_invalid_nf_grid_fails_without_floor_or_mode_change[inf]" time="0.003" /><testcase classname="tests.test_rainbow_plotting" name="test_invalid_nf_grid_fails_without_floor_or_mode_change[-inf]" time="0.003" /><testcase classname="tests.test_rainbow_plotting" name="test_invalid_nf_grid_fails_without_floor_or_mode_change[-800.0]" time="0.003" /><testcase classname="tests.test_rainbow_plotting" name="test_invalid_nf_grid_fails_without_floor_or_mode_change[800.0]" time="0.003" /><testcase classname="tests.test_rainbow_plotting" name="test_plot_config_rejects_invalid_parameters[kwargs0]" time="0.000" /><testcase classname="tests.test_rainbow_plotting" name="test_plot_config_rejects_invalid_parameters[kwargs1]" time="0.000" /><testcase classname="tests.test_rainbow_plotting" name="test_plot_config_rejects_invalid_parameters[kwargs2]" time="0.000" /><testcase classname="tests.test_rainbow_plotting" name="test_plot_config_rejects_invalid_parameters[kwargs3]" time="0.000" /><testcase classname="tests.test_rainbow_plotting" name="test_plot_config_rejects_invalid_parameters[kwargs4]" time="0.000" /><testcase classname="tests.test_rainbow_plotting" name="test_plot_config_rejects_invalid_parameters[kwargs5]" time="0.000" /><testcase classname="tests.test_rainbow_plotting" name="test_grid_uses_cuda_for_inference_and_matches_cpu" time="0.000"><skipped type="pytest.skip" message="CUDA device is not available">/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/tests/test_rainbow_plotting.py:204: CUDA device is not available</skipped></testcase><testcase classname="tests.test_sampling_precision" name="test_rounded_pole_in_open_uniform_domain_raises_a_precision_error" time="0.005" /><testcase classname="tests.test_sampling_precision" name="test_validation_off_marks_only_rounded_pole_lanes_invalid" time="0.006" /><testcase classname="tests.test_sampling_precision" name="test_double_precision_resolves_this_specific_endpoint_compression" time="0.006" /><testcase classname="tests.test_single_condition" name="test_training_improves_independent_kl_and_preserves_external_g" time="1.158" /><testcase classname="tests.test_single_condition" name="test_controlled_resume_exact_and_does_not_use_test_early" time="0.367" /><testcase classname="tests.test_single_condition" name="test_resume_rejects_changed_plan_and_record_without_overwriting" time="0.088" /><testcase classname="tests.test_single_condition" name="test_uniform_reference_standard_metrics_and_rng_independence" time="0.128" /><testcase classname="tests.test_single_condition" name="test_float32_proposal_uniforms_are_representable_and_g_is_preserved" time="0.021" /><testcase classname="tests.test_single_condition" name="test_cli_inspect_train_evaluate_and_native_export_guard" time="1.322" /><testcase classname="tests.test_single_condition" name="test_nonfinite_update_does_not_overwrite_valid_checkpoint" time="0.103" /><testcase classname="tests.test_single_condition" name="test_incomplete_training_does_not_create_final_plots" time="0.036" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs0]" time="0.001" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs1]" time="0.001" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs2]" time="0.000" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs3]" time="0.001" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs4]" time="0.000" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs5]" time="0.000" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs6]" time="0.001" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs7]" time="0.000" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs8]" time="0.001" /><testcase classname="tests.test_single_condition" name="test_training_config_rejects_invalid_values[kwargs9]" time="0.000" /><testcase classname="tests.test_sphere_model" name="test_identity_residual_is_the_supplied_hg_without_g_regression[dtype0-4e-06--0.9991]" time="0.012" /><testcase classname="tests.test_sphere_model" name="test_identity_residual_is_the_supplied_hg_without_g_regression[dtype0-4e-06-0.0]" time="0.011" /><testcase classname="tests.test_sphere_model" name="test_identity_residual_is_the_supplied_hg_without_g_regression[dtype0-4e-06-0.9991]" time="0.011" /><testcase classname="tests.test_sphere_model" name="test_identity_residual_is_the_supplied_hg_without_g_regression[dtype1-7e-15--0.9991]" time="0.010" /><testcase classname="tests.test_sphere_model" name="test_identity_residual_is_the_supplied_hg_without_g_regression[dtype1-7e-15-0.0]" time="0.012" /><testcase classname="tests.test_sphere_model" name="test_identity_residual_is_the_supplied_hg_without_g_regression[dtype1-7e-15-0.9991]" time="0.011" /><testcase classname="tests.test_sphere_model" name="test_sampling_and_arbitrary_direction_eval_agree[-0.995-dtype0-8e-05-False]" time="0.012" /><testcase classname="tests.test_sphere_model" name="test_sampling_and_arbitrary_direction_eval_agree[-0.995-dtype0-8e-05-True]" time="0.012" /><testcase classname="tests.test_sphere_model" name="test_sampling_and_arbitrary_direction_eval_agree[-0.995-dtype1-8e-09-False]" time="0.012" /><testcase classname="tests.test_sphere_model" name="test_sampling_and_arbitrary_direction_eval_agree[-0.995-dtype1-8e-09-True]" time="0.013" /><testcase classname="tests.test_sphere_model" name="test_sampling_and_arbitrary_direction_eval_agree[0.995-dtype0-8e-05-False]" time="0.013" /><testcase classname="tests.test_sphere_model" name="test_sampling_and_arbitrary_direction_eval_agree[0.995-dtype0-8e-05-True]" time="0.014" /><testcase classname="tests.test_sphere_model" name="test_sampling_and_arbitrary_direction_eval_agree[0.995-dtype1-8e-09-False]" time="0.013" /><testcase classname="tests.test_sphere_model" name="test_sampling_and_arbitrary_direction_eval_agree[0.995-dtype1-8e-09-True]" time="0.012" /><testcase classname="tests.test_sphere_model" name="test_both_coordinates_are_coupled_and_joint_logdet_matches_autograd" time="0.019" /><testcase classname="tests.test_sphere_model" name="test_full_composition_preserves_the_periodic_seam[False]" time="0.006" /><testcase classname="tests.test_sphere_model" name="test_full_composition_preserves_the_periodic_seam[True]" time="0.006" /><testcase classname="tests.test_sphere_model" name="test_surface_normalization_with_independent_solid_angle_quadrature[False]" time="0.144" /><testcase classname="tests.test_sphere_model" name="test_surface_normalization_with_independent_solid_angle_quadrature[True]" time="0.130" /><testcase classname="tests.test_sphere_model" name="test_reflection_is_enforced_on_the_full_circle_and_optional_for_generic_model" time="0.024" /><testcase classname="tests.test_sphere_model" name="test_axial_incidence_eliminates_azimuth_dependence[False--1.0]" time="0.011" /><testcase classname="tests.test_sphere_model" name="test_axial_incidence_eliminates_azimuth_dependence[False-1.0]" time="0.011" /><testcase classname="tests.test_sphere_model" name="test_axial_incidence_eliminates_azimuth_dependence[True--1.0]" time="0.011" /><testcase classname="tests.test_sphere_model" name="test_axial_incidence_eliminates_azimuth_dependence[True-1.0]" time="0.011" /><testcase classname="tests.test_sphere_model" name="test_each_sample_or_eval_runs_each_conditioner_once" time="0.010" /><testcase classname="tests.test_sphere_model" name="test_external_physics_round_trips_exactly_and_never_downcasts_with_weights" time="0.004" /><testcase classname="tests.test_sphere_model" name="test_hg_device_cache_preserves_binary64_physics_across_dtype_moves_and_deepcopy" time="0.006" /><testcase classname="tests.test_sphere_model" name="test_loading_physics_refreshes_the_nonpersistent_hg_cache" time="0.004" /><testcase classname="tests.test_sphere_model" name="test_hg_calls_reuse_cached_device_scalar_without_per_call_scalar_construction" time="0.010" /><testcase classname="tests.test_sphere_model" name="test_exact_poles_use_canonical_azimuth_and_rounded_samples_are_reported" time="0.015" /><testcase classname="tests.test_sphere_model" name="test_invalid_external_g_is_rejected_without_clipping[-1.0]" time="0.001" /><testcase classname="tests.test_sphere_model" name="test_invalid_external_g_is_rejected_without_clipping[1.0]" time="0.001" /><testcase classname="tests.test_sphere_model" name="test_invalid_external_g_is_rejected_without_clipping[nan]" time="0.001" /><testcase classname="tests.test_sphere_model" name="test_invalid_external_g_is_rejected_without_clipping[inf]" time="0.001" /><testcase classname="tests.test_sphere_model" name="test_invalid_inputs_and_incompatible_checkpoint_fail_explicitly" time="0.002" /><testcase classname="tests.test_sphere_model" name="test_float32_uniform_conversion_reports_representation_failure_separately" time="0.006" /><testcase classname="tests.test_sphere_model" name="test_float32_conditioners_keep_double_precision_cylinder_round_trips[-0.995-False]" time="0.020" /><testcase classname="tests.test_sphere_model" name="test_float32_conditioners_keep_double_precision_cylinder_round_trips[-0.995-True]" time="0.023" /><testcase classname="tests.test_sphere_model" name="test_float32_conditioners_keep_double_precision_cylinder_round_trips[0.995-False]" time="0.020" /><testcase classname="tests.test_sphere_model" name="test_float32_conditioners_keep_double_precision_cylinder_round_trips[0.995-True]" time="0.021" /><testcase classname="tests.test_sphere_model" name="test_double_precision_splines_accept_uniforms_unrepresentable_in_float32" time="0.009" /><testcase classname="tests.test_sphere_model" name="test_mixed_precision_random_sampling_keeps_the_double_precision_uniform_stream" time="0.012" /><testcase classname="tests.test_sphere_model" name="test_mixed_precision_preserves_reflection_and_periodic_seam" time="0.015" /><testcase classname="tests.test_sphere_model" name="test_mixed_precision_preserves_axial_incidence_invariance[-1.0]" time="0.007" /><testcase classname="tests.test_sphere_model" name="test_mixed_precision_preserves_axial_incidence_invariance[1.0]" time="0.006" /><testcase classname="tests.test_sphere_model" name="test_mixed_precision_training_gradients_agree_with_double_precision_reference" time="0.019" /><testcase classname="tests.test_sphere_model" name="test_old_checkpoint_missing_spline_dtype_retains_its_original_precision" time="0.013" /><testcase classname="tests.test_sphere_model" name="test_trusted_sampling_evaluation_and_backward_do_not_read_host_scalars" time="0.012" /><testcase classname="tests.test_sphere_model" name="test_cuda_mixed_precision_sampling_evaluation_and_gradient_parity" time="0.000"><skipped type="pytest.skip" message="CUDA device is unavailable">/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/tests/test_sphere_model.py:425: CUDA device is unavailable</skipped></testcase><testcase classname="tests.test_sphere_splines" name="test_circle_seam_has_equal_positive_one_sided_derivatives[False]" time="0.002" /><testcase classname="tests.test_sphere_splines" name="test_circle_seam_has_equal_positive_one_sided_derivatives[True]" time="0.002" /><testcase classname="tests.test_sphere_splines" name="test_circular_round_trip_and_fused_inverse_logdet[dtype0-4e-06-False]" time="0.002" /><testcase classname="tests.test_sphere_splines" name="test_circular_round_trip_and_fused_inverse_logdet[dtype0-4e-06-True]" time="0.002" /><testcase classname="tests.test_sphere_splines" name="test_circular_round_trip_and_fused_inverse_logdet[dtype1-6e-14-False]" time="0.002" /><testcase classname="tests.test_sphere_splines" name="test_circular_round_trip_and_fused_inverse_logdet[dtype1-6e-14-True]" time="0.002" /><testcase classname="tests.test_sphere_splines" name="test_reflection_equivariance_without_identifying_opposite_meridians" time="0.002" /><testcase classname="tests.test_sphere_splines" name="test_reflection_constraints_keep_gradients_through_all_independent_logits[False]" time="0.037" /><testcase classname="tests.test_sphere_splines" name="test_reflection_constraints_keep_gradients_through_all_independent_logits[True]" time="0.039" /><testcase classname="tests.test_sphere_splines" name="test_circle_constructor_cannot_accept_independent_seam_slopes" time="0.001" /><testcase classname="tests.test_sphere_splines" name="test_axial_identity_blend_preserves_exact_identity_and_circle_boundary" time="0.001" /><testcase classname="tests.test_splines" name="test_identity_and_trainable_endpoint_slopes[dtype0-7e-07]" time="0.003" /><testcase classname="tests.test_splines" name="test_identity_and_trainable_endpoint_slopes[dtype1-2e-15]" time="0.003" /><testcase classname="tests.test_splines" name="test_round_trip_and_log_jacobian_cancellation[dtype0-3e-06]" time="0.003" /><testcase classname="tests.test_splines" name="test_round_trip_and_log_jacobian_cancellation[dtype1-5e-14]" time="0.003" /><testcase classname="tests.test_splines" name="test_reported_jacobians_match_autograd_both_directions" time="0.002" /><testcase classname="tests.test_splines" name="test_gradcheck_all_logits_and_input[False]" time="0.032" /><testcase classname="tests.test_splines" name="test_gradcheck_all_logits_and_input[True]" time="0.036" /><testcase classname="tests.test_splines" name="test_distribution_normalization_with_independent_quadrature" time="0.003" /><testcase classname="tests.test_splines" name="test_broadcasting_and_knots_including_boundaries" time="0.003" /><testcase classname="tests.test_splines" name="test_no_identity_tails_and_invalid_parameters" time="0.001" /><testcase classname="tests.test_splines" name="test_torch_cache_protocol_preserves_parameters_and_invalid_lanes" time="0.003" /><testcase classname="tests.test_splines" name="test_zuko_coupling_and_composition_protocol" time="0.005" /><testcase classname="tests.test_training" name="test_hg_warmup_and_residual_training_reduce_their_actual_objectives" time="0.813" /><testcase classname="tests.test_training" name="test_resume_matches_uninterrupted_cpu_updates_bit_for_bit[float64-0-7]" time="0.503" /><testcase classname="tests.test_training" name="test_resume_matches_uninterrupted_cpu_updates_bit_for_bit[float32-4-12]" time="0.640" /><testcase classname="tests.test_training" name="test_resume_rejects_changed_plan_or_dataset" time="0.084" /><testcase classname="tests.test_training" name="test_single_condition_metrics_are_not_claimed_as_generalization" time="0.037" /><testcase classname="tests.test_training" name="test_joint_stage_uses_full_nll_and_explicit_moment_regularizer" time="0.135" /><testcase classname="tests.test_training" name="test_hg_baseline_matches_identity_flow_for_sharp_lobes_and_rounded_vectors" time="0.005" /><testcase classname="tests.test_training" name="test_unattainable_training_moment_is_rejected_without_clamping[warmup--0.9995]" time="0.002" /><testcase classname="tests.test_training" name="test_unattainable_training_moment_is_rejected_without_clamping[warmup--0.999]" time="0.001" /><testcase classname="tests.test_training" name="test_unattainable_training_moment_is_rejected_without_clamping[warmup-0.999]" time="0.001" /><testcase classname="tests.test_training" name="test_unattainable_training_moment_is_rejected_without_clamping[warmup-0.9995]" time="0.001" /><testcase classname="tests.test_training" name="test_unattainable_training_moment_is_rejected_without_clamping[joint--0.9995]" time="0.001" /><testcase classname="tests.test_training" name="test_unattainable_training_moment_is_rejected_without_clamping[joint--0.999]" time="0.001" /><testcase classname="tests.test_training" name="test_unattainable_training_moment_is_rejected_without_clamping[joint-0.999]" time="0.001" /><testcase classname="tests.test_training" name="test_unattainable_training_moment_is_rejected_without_clamping[joint-0.9995]" time="0.001" /><testcase classname="tests.test_training" name="test_unattainable_validation_moment_does_not_leak_into_training_gate" time="0.027" /><testcase classname="tests.test_training" name="test_float32_g_limit_rounding_to_one_is_rejected_before_training" time="0.003" /></testsuite></testsuites>
+\ No newline at end of file
+diff --git a/reports/gpu_plots_synthetic_smoke.json b/reports/gpu_plots_synthetic_smoke.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b8ed5367eb7a63f651ec6085d579aebd51e6121
+--- /dev/null
++++ b/reports/gpu_plots_synthetic_smoke.json
+@@ -0,0 +1,631 @@
++{
++  "cuda_validation": "not_run_no_cuda_device",
++  "metrics": {
++    "best_validation": {
++      "base_g": 0.1987210964506126,
++      "density_measure": "solid_angle_sr",
++      "forward_kl_estimate": 0.010719058964159624,
++      "forward_kl_standard_error": 0.0033901916995245323,
++      "hg_forward_kl_estimate": 0.10459056125467867,
++      "hg_forward_kl_standard_error": 0.009995875180784665,
++      "hg_nll": 2.466448306781237,
++      "nll": 2.3725768044907185,
++      "nll_improvement_over_hg": 0.09387150229051905,
++      "nll_improvement_standard_error": 0.009631855290047639,
++      "nll_standard_error": 0.011619125869885855,
++      "sample_count": 2048,
++      "target_entropy_estimate": 2.3618577455265592,
++      "target_g": 0.1987210964506126
++    },
++    "complete": true,
++    "condition": {
++      "hg_g": 0.1987210964506126,
++      "incident_cosine": 0.3420201433256687,
++      "wavelength_nm": 550.0
++    },
++    "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
++    "family": "rainbow_single_condition",
++    "generalization_scope": "same condition only; no claim about unseen wavelength/incidence",
++    "global_step": 100,
++    "initial_validation": {
++      "base_g": 0.1987210964506126,
++      "density_measure": "solid_angle_sr",
++      "forward_kl_estimate": 0.1045905613713031,
++      "forward_kl_standard_error": 0.009995875178452263,
++      "hg_forward_kl_estimate": 0.10459056125467867,
++      "hg_forward_kl_standard_error": 0.009995875180784665,
++      "hg_nll": 2.466448306781237,
++      "nll": 2.466448306897862,
++      "nll_improvement_over_hg": -1.1662442962311753e-10,
++      "nll_improvement_standard_error": 9.399056055081066e-11,
++      "nll_standard_error": 0.007311492623285149,
++      "sample_count": 2048,
++      "target_entropy_estimate": 2.3618577455265592,
++      "target_g": 0.1987210964506126
++    },
++    "selected_step": 100,
++    "selection": "minimum validation NLL at scheduled evaluations",
++    "test": {
++      "base_g": 0.1987210964506126,
++      "code_fingerprint": "372fb5c5e46a6a2a6166026ca1344f3b6d0756fd7fda753408a550b382d9e63d",
++      "condition": {
++        "incident_cosine": 0.3420201433256687,
++        "wavelength_nm": 550.0
++      },
++      "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
++      "density_measure": "solid_angle_sr",
++      "forward_kl_estimate": 0.009576937004733953,
++      "forward_kl_standard_error": 0.0032730340320496726,
++      "hg_forward_kl_estimate": 0.11011204080547592,
++      "hg_forward_kl_standard_error": 0.009653351010246355,
++      "hg_nll": 2.4676223285127943,
++      "nll": 2.3670872247120522,
++      "nll_improvement_over_hg": 0.10053510380074196,
++      "nll_improvement_standard_error": 0.009402249432198868,
++      "nll_standard_error": 0.0114662058964362,
++      "precision": {
++        "conditioner": "float32",
++        "hg_geometry_log_pdf": "float64",
++        "spline": "float64"
++      },
++      "proposal": {
++        "ess_definition": "sum(w)^2 / (N * sum(w^2)); w=p_omega/q_omega",
++        "importance_weight_mean": 1.002321630773301,
++        "learned_moment_error": -0.0022352711686524362,
++        "learned_moment_estimate": 0.19648582528196015,
++        "learned_moment_standard_error": 0.023301489776837346,
++        "log_importance_weight_mean": 0.002318939952500765,
++        "reference_support_hits": 512,
++        "relative_ess": 0.9756543528743097,
++        "sample_count": 512,
++        "sample_eval_log_pdf_max_abs_error": 2.6645352591003757e-15,
++        "status": "ok",
++        "uniform_midpoint_bits": 52
++      },
++      "runtime": {
++        "cpu_threads": 1,
++        "deterministic_algorithms": true,
++        "device": "cpu",
++        "dtype": "float32",
++        "matmul_allow_tf32": false,
++        "numpy_version": "2.5.3",
++        "package_version": "0.3.0",
++        "python_version": "3.12.14",
++        "torch_version": "2.8.0+cpu",
++        "zuko_version": "1.6.0"
++      },
++      "sample_count": 2048,
++      "scope": "final_independent_test_points_same_condition",
++      "seed": 415,
++      "target_entropy_estimate": 2.3575102877073184,
++      "target_g": 0.1987210964506126
++    }
++  },
++  "model": {
++    "activation": "silu",
++    "hidden_features": [
++      16,
++      16
++    ],
++    "min_bin_height": 1e-05,
++    "min_bin_width": 1e-05,
++    "min_derivative": 0.0001,
++    "mirror_symmetry": true,
++    "num_bins": 8,
++    "num_coupling_layers": 2,
++    "spline_dtype": "float64"
++  },
++  "plot_metadata": {
++    "base_g": 0.1987210964506126,
++    "checkpoint": {
++      "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/runs/gpu_plots_synthetic/training/best.pt",
++      "sha256": "2d5fd175d8309546579629fda0eef7d2597927bf56ce6af482e071e79f05ce0e"
++    },
++    "color_scale": {
++      "colormap": "viridis",
++      "density_floor": null,
++      "limits": "joint_positive_extrema; rounding-level_constant_fields_padded_only_for_display",
++      "normalization": "matplotlib.colors.LogNorm",
++      "percentile_clipping": false,
++      "shared_between": [
++        "reference_pdf",
++        "nf_pdf"
++      ],
++      "vmax": 0.205611032072011,
++      "vmin": 0.012247347446778996,
++      "zero_color": "#d2d6dc"
++    },
++    "condition": [
++      550.0,
++      0.3420201433256687
++    ],
++    "configuration": {
++      "cdf_samples": 32768,
++      "dpi": 160,
++      "eval_batch_size": 16384,
++      "seed": 2027,
++      "write_pdf": false
++    },
++    "coordinates": {
++      "axes_width_over_height": 2.0,
++      "data_aspect": "one_degree_x_equals_one_degree_y",
++      "density_measure": "solid_angle_sr",
++      "equal_area": false,
++      "frame": "recorded_solver_source",
++      "scatter_chart_density": "p_per_sr * sin(theta); not p_per_sr alone",
++      "source_to_nf": [
++        [
++          -0.0,
++          1.0,
++          0.0
++        ],
++        [
++          -1.0,
++          -0.0,
++          0.0
++        ],
++        [
++          0.0,
++          0.0,
++          1.0
++        ]
++      ],
++      "theta_zero": "forward_at_top",
++      "x": "source_azimuth_phi_degrees",
++      "x_limits": [
++        -180.0,
++        180.0
++      ],
++      "y": "scattering_theta_degrees",
++      "y_limits": [
++        180.0,
++        0.0
++      ]
++    },
++    "data_provenance": {
++      "density_measure": "solid_angle_sr",
++      "files": {
++        "metadata.json": {
++          "bytes": 2042,
++          "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
++        },
++        "phi_cdf.npy": {
++          "bytes": 328,
++          "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
++        },
++        "theta_given_phi_cdf.npy": {
++          "bytes": 3392,
++          "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
++        },
++        "u_edges.npy": {
++          "bytes": 264,
++          "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
++        }
++      },
++      "metadata": {
++        "azimuth_periodic": true,
++        "cdf_axis_order": [
++          "phi_cell",
++          "theta_edge"
++        ],
++        "cell_model": "constant_density_per_spherical_cell",
++        "complete": true,
++        "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
++        "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
++        "density_measure": "solid_angle_sr",
++        "diffraction_policy": {
++          "computed": false
++        },
++        "direction_convention": "physical_propagation",
++        "dtype": "<f8",
++        "hg": {
++          "axis_particle_frame": [
++            0.9396926207859084,
++            -0.3420201433256687,
++            0.0
++          ],
++          "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
++          "g": 0.1987210964506126,
++          "g_source": 0.73,
++          "method": "first_moment_of_saved_cell_pdf",
++          "target": "saved_cdf"
++        },
++        "incident_inclination_degrees": 20.0,
++        "input_polarization": "unpolarized",
++        "material": {
++          "wavelength_convention": "vacuum_nm"
++        },
++        "normalization": "integral_p_domega_equals_one",
++        "order": "C",
++        "particle_frame_handedness": "right",
++        "particle_up_axis": [
++          0,
++          1,
++          0
++        ],
++        "phi_count": 24,
++        "phi_range_rad": [
++          -3.141592653589793,
++          3.141592653589793
++        ],
++        "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
++        "quality": {
++          "allow_underresolved": true,
++          "angular_convergence_certified": false
++        },
++        "sampling_frame_columns": [
++          [
++            0.0,
++            -0.3420201433256687,
++            0.9396926207859084
++          ],
++          [
++            0.0,
++            -0.9396926207859084,
++            -0.3420201433256687
++          ],
++          [
++            1.0,
++            0.0,
++            0.0
++          ]
++        ],
++        "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
++        "sampling_frame_map": "local_column_to_particle_column",
++        "schema": "rainbow.phase_cdf.numpy.v2",
++        "shape_polar_axis": [
++          0,
++          -1,
++          0
++        ],
++        "source_commit": "synthetic_fixture_no_solver_commit",
++        "source_dirty_at_configure": false,
++        "storage_processing": {
++          "additional_filter": "none",
++          "coarsening_tv": 0.04
++        },
++        "theta_count": 16,
++        "theta_pi": "backward",
++        "theta_zero": "forward",
++        "wavelength_nm": 550.0
++      },
++      "nf_frame_columns": [
++        [
++          -0.3420201433256687,
++          0.0,
++          0.9396926207859084
++        ],
++        [
++          -0.9396926207859084,
++          0.0,
++          -0.3420201433256687
++        ],
++        [
++          0.0,
++          -1.0,
++          0.0
++        ]
++      ],
++      "pole_pdf_representative": "source_phi_zero",
++      "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/runs/gpu_plots_synthetic/record",
++      "saved_g_check": 0.19872109645061267,
++      "saved_mass_check": 1.0,
++      "schema": "phaseflow.rainbow_reference.v1",
++      "source_repository": "https://github.com/Somatic-Cell/rainbow",
++      "source_to_nf": [
++        [
++          -0.0,
++          1.0,
++          0.0
++        ],
++        [
++          -1.0,
++          -0.0,
++          0.0
++        ],
++        [
++          0.0,
++          0.0,
++          1.0
++        ]
++      ],
++      "uniform_domain": "[0,1)",
++      "uniform_order": [
++        "phi_marginal",
++        "u_given_phi"
++      ]
++    },
++    "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
++    "figures": {
++      "comparison_axes_rectangles": [
++        [
++          0.038,
++          0.29,
++          0.276,
++          0.46741935483870967
++        ],
++        [
++          0.35,
++          0.29,
++          0.276,
++          0.46741935483870967
++        ],
++        [
++          0.662,
++          0.29,
++          0.276,
++          0.46741935483870967
++        ]
++      ],
++      "comparison_size_inches": [
++        21.0,
++        6.2
++      ],
++      "display_note": "PNG raster pixels may combine native cells narrower than a pixel.",
++      "individual_axes_rectangle": [
++        0.09,
++        0.19,
++        0.77,
++        0.6243243243243243
++      ],
++      "individual_size_inches": [
++        12.0,
++        7.4
++      ]
++    },
++    "files": {
++      "cdf_samples": [
++        "cdf_samples.png"
++      ],
++      "comparison": [
++        "comparison.png"
++      ],
++      "nf_pdf": [
++        "nf_pdf.png"
++      ],
++      "reference_pdf": [
++        "reference_pdf.png"
++      ]
++    },
++    "grid": {
++      "array_order": [
++        "theta_cell",
++        "phi_cell"
++      ],
++      "nf_mass_midpoint_estimate": 0.9958057756047414,
++      "nf_mass_warning": "Native-cell midpoint quadrature only; this is not an exact normalization test and can miss NF structure inside a cell. No density renormalization is applied.",
++      "nf_pdf": "point_values_not_cell_averages",
++      "nf_pdf_sha256": "b43ae28d427c82c2eb8b5f9809712de8924932383577f7309d7c52b56985b280",
++      "phi_count": 24,
++      "point_evaluation": "midpoint_in_u_and_source_phi",
++      "reference_mass_exact": 1.0,
++      "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
++      "reference_pdf_sha256": "6c8f0d415dbef514ed2839cb7862e5f39d5420857875a231736ed2e15b3d769e",
++      "resolution": "full_native_cdf_cells_no_angular_downsampling",
++      "theta_count": 16,
++      "theta_edges": "2*atan2(sqrt(u_edges),sqrt(1-u_edges))",
++      "zero_reference_cells": 0
++    },
++    "model": {
++      "configuration": {
++        "activation": "silu",
++        "hidden_features": [
++          16,
++          16
++        ],
++        "min_bin_height": 1e-05,
++        "min_bin_width": 1e-05,
++        "min_derivative": 0.0001,
++        "mirror_symmetry": true,
++        "num_bins": 8,
++        "num_coupling_layers": 2,
++        "spline_dtype": "float64"
++      },
++      "density_evaluation_dtype": "torch.float64",
++      "device": "cpu",
++      "family": "single_condition_circular_hg",
++      "parameter_dtype": "torch.float32"
++    },
++    "scatter": {
++      "rng": "numpy.PCG64(SeedSequence([seed,stream_id]))",
++      "sample_count": 32768,
++      "seed": 2027,
++      "source": "stored_cdf_independent_diagnostic_stream",
++      "source_phi_degrees_sha256": "6a4b8d67c02f29d9062af241bf9d0dc2153a3a255e8cc2411198b2d225a90b50",
++      "stream_id": 100,
++      "theta_degrees_sha256": "7d8fdd031321e7f352731053d1493ca3a3163891d506fac84232276bf8c86b70",
++      "uniform_midpoint_bits": 52
++    },
++    "schema": "phaseflow.rainbow_plots.v1",
++    "selected_step": 100,
++    "source_kind": "synthetic_fixture",
++    "title": "Synthetic fixture | 550 nm; incident inclination 20 degrees\nValidation-selected model (step 100)"
++  },
++  "purpose": "synthetic_implementation_validation_not_rainbow_physics",
++  "renderer_optix_validation": "not_run",
++  "runtime": {
++    "cpu_threads": 1,
++    "deterministic_algorithms": true,
++    "device": "cpu",
++    "dtype": "float32",
++    "matmul_allow_tf32": false,
++    "numpy_version": "2.5.3",
++    "package_version": "0.3.0",
++    "python_version": "3.12.14",
++    "torch_version": "2.8.0+cpu",
++    "zuko_version": "1.6.0"
++  },
++  "source_base_commit": "0956c7d52b36ce2c704fdab82e447ff80efbbfe2",
++  "source_provenance": {
++    "density_measure": "solid_angle_sr",
++    "files": {
++      "metadata.json": {
++        "bytes": 2042,
++        "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
++      },
++      "phi_cdf.npy": {
++        "bytes": 328,
++        "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
++      },
++      "theta_given_phi_cdf.npy": {
++        "bytes": 3392,
++        "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
++      },
++      "u_edges.npy": {
++        "bytes": 264,
++        "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
++      }
++    },
++    "metadata": {
++      "azimuth_periodic": true,
++      "cdf_axis_order": [
++        "phi_cell",
++        "theta_edge"
++      ],
++      "cell_model": "constant_density_per_spherical_cell",
++      "complete": true,
++      "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
++      "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
++      "density_measure": "solid_angle_sr",
++      "diffraction_policy": {
++        "computed": false
++      },
++      "direction_convention": "physical_propagation",
++      "dtype": "<f8",
++      "hg": {
++        "axis_particle_frame": [
++          0.9396926207859084,
++          -0.3420201433256687,
++          0.0
++        ],
++        "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
++        "g": 0.1987210964506126,
++        "g_source": 0.73,
++        "method": "first_moment_of_saved_cell_pdf",
++        "target": "saved_cdf"
++      },
++      "incident_inclination_degrees": 20.0,
++      "input_polarization": "unpolarized",
++      "material": {
++        "wavelength_convention": "vacuum_nm"
++      },
++      "normalization": "integral_p_domega_equals_one",
++      "order": "C",
++      "particle_frame_handedness": "right",
++      "particle_up_axis": [
++        0,
++        1,
++        0
++      ],
++      "phi_count": 24,
++      "phi_range_rad": [
++        -3.141592653589793,
++        3.141592653589793
++      ],
++      "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
++      "quality": {
++        "allow_underresolved": true,
++        "angular_convergence_certified": false
++      },
++      "sampling_frame_columns": [
++        [
++          0.0,
++          -0.3420201433256687,
++          0.9396926207859084
++        ],
++        [
++          0.0,
++          -0.9396926207859084,
++          -0.3420201433256687
++        ],
++        [
++          1.0,
++          0.0,
++          0.0
++        ]
++      ],
++      "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
++      "sampling_frame_map": "local_column_to_particle_column",
++      "schema": "rainbow.phase_cdf.numpy.v2",
++      "shape_polar_axis": [
++        0,
++        -1,
++        0
++      ],
++      "source_commit": "synthetic_fixture_no_solver_commit",
++      "source_dirty_at_configure": false,
++      "storage_processing": {
++        "additional_filter": "none",
++        "coarsening_tv": 0.04
++      },
++      "theta_count": 16,
++      "theta_pi": "backward",
++      "theta_zero": "forward",
++      "wavelength_nm": 550.0
++    },
++    "nf_frame_columns": [
++      [
++        -0.3420201433256687,
++        0.0,
++        0.9396926207859084
++      ],
++      [
++        -0.9396926207859084,
++        0.0,
++        -0.3420201433256687
++      ],
++      [
++        0.0,
++        -1.0,
++        0.0
++      ]
++    ],
++    "pole_pdf_representative": "source_phi_zero",
++    "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/runs/gpu_plots_synthetic/record",
++    "saved_g_check": 0.19872109645061267,
++    "saved_mass_check": 1.0,
++    "schema": "phaseflow.rainbow_reference.v1",
++    "source_repository": "https://github.com/Somatic-Cell/rainbow",
++    "source_to_nf": [
++      [
++        -0.0,
++        1.0,
++        0.0
++      ],
++      [
++        -1.0,
++        -0.0,
++        0.0
++      ],
++      [
++        0.0,
++        0.0,
++        1.0
++      ]
++    ],
++    "uniform_domain": "[0,1)",
++    "uniform_order": [
++      "phi_marginal",
++      "u_given_phi"
++    ]
++  },
++  "training": {
++    "batch_size": 256,
++    "checkpoint_every": 4,
++    "cpu_threads": 1,
++    "deterministic": true,
++    "device": "cpu",
++    "dtype": "float32",
++    "eval_batch_size": 512,
++    "eval_every": 20,
++    "grad_clip_norm": 10.0,
++    "learning_rate": 0.003,
++    "proposal_samples": 512,
++    "seed": 415,
++    "steps": 100,
++    "test_samples": 2048,
++    "train_samples": 2048,
++    "validation_samples": 2048
++  },
++  "training_code_fingerprint": "372fb5c5e46a6a2a6166026ca1344f3b6d0756fd7fda753408a550b382d9e63d"
++}
+diff --git a/requirements-validation.txt b/requirements-validation.txt
+index 46d07acf9f1e03dadce3d21b9e403350c5f9bfdd..80bb0b471041b2063dcd025d82a19eb9244e9898 100644
+--- a/requirements-validation.txt
++++ b/requirements-validation.txt
+@@ -9,3 +9,4 @@ ruff==0.16.10
+ build==1.6.1
+ setuptools==78.1.0
+ wheel==0.48.0
++matplotlib==3.11.2
+diff --git a/src/phaseflow/__init__.py b/src/phaseflow/__init__.py
+index a189b5c078935e8d16508b76c1ecdceeee05f253..e760d1ab1e9a122de1665688112bd1782a79ecb4 100644
+--- a/src/phaseflow/__init__.py
++++ b/src/phaseflow/__init__.py
+@@ -1,6 +1,6 @@
+ """Conditional spherical phase densities, measured per unit solid angle."""
+ 
+-__version__ = "0.2.0"
++__version__ = "0.3.0"
+ 
+ 
+ def __getattr__(name):
+diff --git a/src/phaseflow/cli.py b/src/phaseflow/cli.py
+index 0983e91bfafe12e93b80fc5662667a22f0e538a0..d309c73affdcbef9399d4342235971ef5d98bf0b 100644
+--- a/src/phaseflow/cli.py
++++ b/src/phaseflow/cli.py
+@@ -62,6 +62,9 @@ def _parser() -> argparse.ArgumentParser:
+     rainbow_train.add_argument("--resume", type=Path)
+     rainbow_train.add_argument("--max-steps-this-run", type=int)
+     rainbow_train.add_argument("--device")
++    rainbow_train.add_argument(
++        "--no-plots", action="store_true", help="explicitly skip plots after completed training"
++    )
+     rainbow_train.add_argument("--quiet", action="store_true")
+     rainbow_eval = commands.add_parser(
+         "evaluate-rainbow", help="independent same-condition NLL, forward KL and importance ESS"
+@@ -72,9 +75,22 @@ def _parser() -> argparse.ArgumentParser:
+     rainbow_eval.add_argument("--proposal-samples", type=int)
+     rainbow_eval.add_argument("--seed", type=int, default=2026)
+     rainbow_eval.add_argument("--batch-size", type=int, default=4096)
+-    rainbow_eval.add_argument("--device", default="cpu")
++    rainbow_eval.add_argument("--device", default="cuda")
+     rainbow_eval.add_argument("--cpu-threads", type=int, default=1)
+     rainbow_eval.add_argument("--output", type=Path)
++    rainbow_plot = commands.add_parser(
++        "plot-rainbow", help="aligned CDF PDF, CDF samples and NF PDF for one checkpoint"
++    )
++    rainbow_plot.add_argument("--record", required=True, type=Path)
++    rainbow_plot.add_argument("--checkpoint", required=True, type=Path)
++    rainbow_plot.add_argument("--output", "--output-dir", required=True, type=Path)
++    rainbow_plot.add_argument("--device", default="cuda")
++    rainbow_plot.add_argument("--samples", type=int, default=32768)
++    rainbow_plot.add_argument("--seed", type=int, default=2027)
++    rainbow_plot.add_argument("--batch-size", type=int, default=16384)
++    rainbow_plot.add_argument("--dpi", type=int, default=160)
++    rainbow_plot.add_argument("--write-pdf", action="store_true")
++    rainbow_plot.add_argument("--cpu-threads", type=int, default=1)
+     demo = commands.add_parser(
+         "demo",
+         aliases=["make-demo"],
+@@ -140,7 +156,9 @@ def _parser() -> argparse.ArgumentParser:
+ def main(argv: list[str] | None = None) -> int:
+     parser = _parser()
+     arguments = parser.parse_args(argv)
+-    if arguments.command in ("inspect-rainbow", "train-rainbow", "evaluate-rainbow"):
++    if arguments.command in (
++        "inspect-rainbow", "train-rainbow", "evaluate-rainbow", "plot-rainbow"
++    ):
+         return _rainbow_main(arguments)
+     if arguments.command in ("demo", "make-demo"):
+         if arguments.output.exists():
+@@ -247,11 +265,14 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+             _print_json(reference.summary())
+             return 0
+         if arguments.command == "train-rainbow":
++            from .plotting import RainbowPlotConfig
++
+             with arguments.config.open(encoding="utf-8") as handle:
+                 config = json.load(handle)
+             if (
+                 not isinstance(config, dict)
+-                or set(config) != {"schema_version", "family", "model", "training"}
++                or not {"schema_version", "family", "model", "training"} <= set(config)
++                or set(config) - {"schema_version", "family", "model", "training", "visualization"}
+                 or config["schema_version"] != 2
+                 or config["family"] != FAMILY
+             ):
+@@ -265,6 +286,15 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+             if arguments.device is not None:
+                 training_values["device"] = arguments.device
+             training_config = SingleTrainingConfig.from_dict(training_values)
++            visualization = config.get("visualization", {})
++            if not isinstance(visualization, dict):
++                raise ValueError("visualization config must be an object")
++            visualization = visualization.copy()
++            enabled = visualization.pop("enabled", True)
++            if type(enabled) is not bool:
++                raise ValueError("visualization.enabled must be boolean")
++            make_plots = enabled and not arguments.no_plots
++            plot_config = RainbowPlotConfig.from_dict(visualization)
+             result = train_single_condition(
+                 reference,
+                 model_config,
+@@ -273,6 +303,8 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+                 resume=arguments.resume,
+                 max_steps_this_run=arguments.max_steps_this_run,
+                 callback=None if arguments.quiet else progress,
++                make_plots=make_plots,
++                plot_config=plot_config,
+             )
+             _print_json(
+                 {
+@@ -281,6 +313,10 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+                     "global_step": result.global_step,
+                     "complete": result.complete,
+                     "metrics": result.metrics,
++                    "plots": (
++                        str((arguments.output / "plots" / "plots.json").resolve())
++                        if result.complete and make_plots else None
++                    ),
+                 }
+             )
+             return 0
+@@ -292,6 +328,31 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+         model, checkpoint = load_single_checkpoint(arguments.checkpoint, device=arguments.device)
+         if checkpoint["dataset_fingerprint"] != reference.fingerprint():
+             raise ValueError("evaluation record differs from the model's single-condition teacher")
++        if arguments.command == "plot-rainbow":
++            from .plotting import RainbowPlotConfig, plot_rainbow_comparison
++
++            report = plot_rainbow_comparison(
++                model,
++                reference,
++                arguments.output,
++                config=RainbowPlotConfig(
++                    cdf_samples=arguments.samples,
++                    seed=arguments.seed,
++                    eval_batch_size=arguments.batch_size,
++                    dpi=arguments.dpi,
++                    write_pdf=arguments.write_pdf,
++                ),
++                checkpoint_path=arguments.checkpoint,
++                selected_step=(
++                    checkpoint["global_step"] if checkpoint["kind"] == "inference" else None
++                ),
++                title=(
++                    "Validation-selected model" if checkpoint["kind"] == "inference"
++                    else "Training checkpoint model"
++                ) + f" (step {checkpoint['global_step']})",
++            )
++            _print_json(report)
++            return 0
+         report = evaluate_single_condition(
+             model,
+             reference,
+diff --git a/src/phaseflow/plotting.py b/src/phaseflow/plotting.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec9913bb2d5bd45157e40ced54508174fac0953a
+--- /dev/null
++++ b/src/phaseflow/plotting.py
+@@ -0,0 +1,516 @@
++"""Aligned scientific plots for one saved Rainbow CDF and a fitted sphere flow.
++
++Colors always represent density per steradian. The displayed (phi, theta)
++rectangle is not equal area: raw point density on it also includes sin(theta).
++The source CDF grid is retained exactly, including its nonuniform u boundaries.
++Matplotlib is imported only when figures are requested; no pyplot/global backend
++or global random generator is changed.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import math
++from dataclasses import asdict, dataclass
++from pathlib import Path
++from typing import TYPE_CHECKING, Any
++
++import numpy as np
++import torch
++from numpy.typing import NDArray
++
++if TYPE_CHECKING:
++    from matplotlib.axes import Axes
++    from matplotlib.figure import Figure
++
++    from .rainbow import RainbowReference
++    from .sphere_model import SingleConditionSphereFlow
++
++
++PLOT_SCHEMA = "phaseflow.rainbow_plots.v1"
++_CDF_PLOT_STREAM = 100
++_ZERO_COLOR = "#d2d6dc"
++_DENSITY_LABEL = r"PDF [sr$^{-1}$], logarithmic scale"
++_CHART_NOTE = (
++    "Equal angular scaling; this chart is not equal area. "
++    "CDF point density on the chart includes sin(theta)."
++)
++
++
++@dataclass(frozen=True)
++class RainbowPlotConfig:
++    """Display and batching settings; none change the learned distribution."""
++
++    cdf_samples: int = 32768
++    seed: int = 2027
++    eval_batch_size: int = 16384
++    dpi: int = 160
++    write_pdf: bool = False
++
++    def __post_init__(self) -> None:
++        for name in ("cdf_samples", "eval_batch_size", "dpi"):
++            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
++                raise ValueError(f"{name} must be a positive integer")
++        if type(self.seed) is not int or self.seed < 0:
++            raise ValueError("plot seed must be a nonnegative integer")
++        if type(self.write_pdf) is not bool:
++            raise ValueError("write_pdf must be a boolean")
++
++    def to_dict(self) -> dict[str, Any]:
++        return asdict(self)
++
++    @classmethod
++    def from_dict(cls, value: dict[str, Any]) -> RainbowPlotConfig:
++        if not isinstance(value, dict):
++            raise ValueError("plotting configuration must be an object")
++        try:
++            return cls(**value)
++        except TypeError as error:
++            raise ValueError(f"Invalid plotting configuration: {error}") from error
++
++
++@dataclass(frozen=True)
++class RainbowGrid:
++    """Native cell values, with image arrays indexed [theta_cell, phi_cell].
++
++    ``reference_pdf`` is the exact saved piecewise-constant density. ``nf_pdf``
++    is a point evaluation at each cell's midpoint in (u, phi), not a cell average.
++    Their solid-angle weighted sums therefore have different interpretations.
++    """
++
++    phi_edges_degrees: NDArray[np.float64]
++    theta_edges_degrees: NDArray[np.float64]
++    reference_pdf: NDArray[np.float64]
++    nf_pdf: NDArray[np.float64]
++    cell_solid_angles: NDArray[np.float64]
++    reference_mass_exact: float
++    nf_mass_midpoint_estimate: float
++
++
++def _positive_pdf(log_pdf: NDArray[np.float64], *, name: str, allow_zero: bool) -> np.ndarray:
++    valid = np.isfinite(log_pdf)
++    if allow_zero:
++        valid |= np.isneginf(log_pdf)
++    if not valid.all():
++        raise FloatingPointError(f"{name} has invalid log PDF values")
++    with np.errstate(under="ignore", over="ignore"):
++        pdf = np.exp(log_pdf)
++    if not np.isfinite(pdf).all() or np.any((pdf == 0) & np.isfinite(log_pdf)):
++        raise FloatingPointError(
++            f"{name} PDF is outside the positive finite float64 plotting range; "
++            "refusing to turn underflow into zero cells or apply a density floor"
++        )
++    return pdf
++
++
++def evaluate_rainbow_grid(
++    model: SingleConditionSphereFlow,
++    reference: RainbowReference,
++    *,
++    batch_size: int = 16384,
++) -> RainbowGrid:
++    """Evaluate every native CDF cell using bounded model-device batches.
++
++    CPU arrays hold the display grid; inference executes on ``model.device``.
++    Directions and geometry stay float64 even with a float32 conditioner. The
++    recorded source-to-NF rotation is applied before PDF evaluation. No global
++    RNG is used, and the caller's training/evaluation mode is restored on errors.
++    """
++    if type(batch_size) is not int or batch_size < 1:
++        raise ValueError("batch_size must be a positive integer")
++    # Check open ownership before accessing memmaps, including on a closed record.
++    reference._require_open()
++    n_phi, n_theta = reference.n_phi, reference.n_theta
++    u_edges = np.asarray(reference.u_edges)
++    delta_u = np.diff(u_edges)
++    solid_angle = (4 * np.pi / n_phi) * delta_u
++    phi_edges = np.linspace(-np.pi, np.pi, n_phi + 1, dtype=np.float64)
++    theta_edges = 2 * np.arctan2(np.sqrt(u_edges), np.sqrt(1 - u_edges))
++
++    # Take the logs separately to retain tiny nonzero marginal/conditional masses
++    # until representability of the plotted density has been checked explicitly.
++    with np.errstate(divide="ignore"):
++        reference_log_pdf = (
++            np.log(np.diff(reference.phi_cdf))[:, None]
++            + np.log(np.diff(reference.theta_cdf, axis=1))
++            - np.log(solid_angle)[None, :]
++        ).T
++    reference_pdf = _positive_pdf(reference_log_pdf, name="Reference", allow_zero=True)
++    del reference_log_pdf
++
++    # Form u and 1-u midpoints separately. If a very narrow terminal cell has a
++    # rounded midpoint u=1, the nonzero transverse direction is still retained.
++    u_mid = u_edges[:-1] / 2 + u_edges[1:] / 2
++    one_minus_u_mid = (1 - u_edges[:-1]) / 2 + (1 - u_edges[1:]) / 2
++    radius = 2 * np.sqrt(u_mid * one_minus_u_mid)
++    mu = one_minus_u_mid - u_mid
++    phi_mid = (phi_edges[:-1] + phi_edges[1:]) / 2
++    nf_log_pdf = np.empty(n_theta * n_phi, dtype=np.float64)
++    training_modes = [(module, module.training) for module in model.modules()]
++    try:
++        model.eval()
++        with torch.no_grad():
++            for start in range(0, nf_log_pdf.size, batch_size):
++                stop = min(start + batch_size, nf_log_pdf.size)
++                index = np.arange(start, stop, dtype=np.int64)
++                i, j = index // n_phi, index % n_phi
++                source = np.column_stack(
++                    (
++                        radius[i] * np.cos(phi_mid[j]),
++                        radius[i] * np.sin(phi_mid[j]),
++                        mu[i],
++                    )
++                )
++                outgoing = torch.as_tensor(
++                    source @ reference.source_to_nf.T,
++                    dtype=torch.float64,
++                    device=model.device,
++                )
++                values = model.log_prob(outgoing)
++                if values.shape != (stop - start,):
++                    raise ValueError("Model log_prob must return one value per grid direction")
++                nf_log_pdf[start:stop] = values.detach().to(dtype=torch.float64).cpu().numpy()
++    finally:
++        # Preserve deliberately mixed submodule modes as well as the root flag.
++        for module, training in training_modes:
++            module.training = training
++    nf_pdf = _positive_pdf(nf_log_pdf.reshape(n_theta, n_phi), name="NF", allow_zero=False)
++
++    reference_mass = float(
++        np.sum(reference_pdf.astype(np.longdouble) * solid_angle[:, None], dtype=np.longdouble)
++    )
++    nf_mass = float(
++        np.sum(nf_pdf.astype(np.longdouble) * solid_angle[:, None], dtype=np.longdouble)
++    )
++    if not np.isfinite(reference_mass) or not np.isfinite(nf_mass):
++        raise FloatingPointError("A solid-angle weighted plotting-grid mass is nonfinite")
++    return RainbowGrid(
++        phi_edges_degrees=np.rad2deg(phi_edges),
++        theta_edges_degrees=np.rad2deg(theta_edges),
++        reference_pdf=reference_pdf,
++        nf_pdf=nf_pdf,
++        cell_solid_angles=solid_angle,
++        reference_mass_exact=reference_mass,
++        nf_mass_midpoint_estimate=nf_mass,
++    )
++
++
++def cdf_scatter_coordinates(
++    reference: RainbowReference, *, samples: int = 32768, seed: int = 2027
++) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
++    """Generate independent CDF points and return source (phi, theta) degrees.
++
++    This is a diagnostic stream, not the fixed training pool or a model-selection
++    stream. Both uniform variates are 52-bit midpoint values strictly inside (0,1).
++    """
++    if type(samples) is not int or samples < 1:
++        raise ValueError("samples must be a positive integer")
++    if type(seed) is not int or seed < 0:
++        raise ValueError("seed must be a nonnegative integer")
++    rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence([seed, _CDF_PLOT_STREAM])))
++    uniforms = (rng.integers(0, 1 << 52, size=(samples, 2)) + 0.5) / (1 << 52)
++    outgoing_nf, _ = reference.sample(uniforms)
++    source = outgoing_nf @ reference.source_to_nf
++    phi = np.arctan2(source[:, 1], source[:, 0])
++    phi = (phi + np.pi) % (2 * np.pi) - np.pi
++    theta = np.arctan2(np.hypot(source[:, 0], source[:, 1]), source[:, 2])
++    return np.rad2deg(phi), np.rad2deg(theta)
++
++
++def _shared_color_limits(grid: RainbowGrid) -> tuple[float, float]:
++    positive_reference = grid.reference_pdf[grid.reference_pdf > 0]
++    low = min(float(positive_reference.min()), float(grid.nf_pdf.min()))
++    high = max(float(positive_reference.max()), float(grid.nf_pdf.max()))
++    # Constant (or rounding-level constant) fields need a nonzero display range.
++    # This changes the visual scale only, never the density arrays themselves.
++    if math.log(high) - math.log(low) < 1e-12:
++        padded_low, padded_high = low / math.sqrt(10), high * math.sqrt(10)
++        low = padded_low if padded_low > 0 else low
++        high = padded_high if math.isfinite(padded_high) else high
++    if not 0 < low < high < math.inf:
++        raise FloatingPointError("Cannot construct a finite positive shared log color scale")
++    return low, high
++
++
++def _configure_axes(ax: Axes) -> None:
++    ax.set_xlim(-180, 180)
++    ax.set_ylim(180, 0)
++    ax.set_aspect("equal", adjustable="box")
++    ax.set_xticks([-180, -90, 0, 90, 180])
++    ax.set_yticks([0, 45, 90, 135, 180])
++    ax.set_xlabel("Source azimuth phi [degrees]")
++    ax.set_ylabel("Scattering angle theta [degrees]")
++    ax.tick_params(labelsize=10)
++
++
++def _array_hash(value: NDArray[np.float64]) -> str:
++    return hashlib.sha256(np.ascontiguousarray(value, dtype="<f8").view(np.uint8)).hexdigest()
++
++
++def _file_hash(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as stream:
++        while block := stream.read(1024 * 1024):
++            digest.update(block)
++    return digest.hexdigest()
++
++
++def _save_figure(fig: Figure, path: Path, *, dpi: int, write_pdf: bool) -> list[str]:
++    paths = [path.name]
++    try:
++        # Deliberately avoid bbox_inches='tight': all individual output canvases
++        # and data rectangles must have exactly the same size and placement.
++        fig.savefig(path, dpi=dpi, facecolor="white")
++        if write_pdf:
++            pdf_path = path.with_suffix(".pdf")
++            fig.savefig(pdf_path, facecolor="white")
++            paths.append(pdf_path.name)
++    finally:
++        fig.clear()
++    return paths
++
++
++def plot_rainbow_comparison(
++    model: SingleConditionSphereFlow,
++    reference: RainbowReference,
++    output_directory: str | Path,
++    *,
++    config: RainbowPlotConfig | None = None,
++    checkpoint_path: str | Path | None = None,
++    selected_step: int | None = None,
++    title: str | None = None,
++) -> dict[str, Any]:
++    """Save three aligned maps, a combined figure and a provenance manifest.
++
++    Both PDF maps share one LogNorm over all positive values, without percentile
++    clipping, smoothing, extra normalization, or density floors. True zero CDF
++    cells have a separate gray color. Inference covers every native source cell;
++    raster display pixels need not resolve subpixel cells, so native numerical
++    grid statistics and resolution are recorded in ``plots.json``.
++
++    ``checkpoint_path`` records the exact file hash when supplied. The function
++    plots the passed model's current weights; callers loading a checkpoint must
++    validate the record identity before calling, as the CLI does.
++    """
++    # Headless object-oriented rendering does not set a global backend or import
++    # pyplot, and keeps CLI help / non-plotting commands free of matplotlib work.
++    from matplotlib.backends.backend_agg import FigureCanvasAgg
++    from matplotlib.colors import LogNorm
++    from matplotlib.figure import Figure
++    from matplotlib.patches import Patch
++
++    config = config or RainbowPlotConfig()
++    if not isinstance(config, RainbowPlotConfig):
++        raise ValueError("config must be a RainbowPlotConfig")
++    if selected_step is not None and (type(selected_step) is not int or selected_step < 0):
++        raise ValueError("selected_step must be a nonnegative integer or None")
++    if model.hg_g != reference.g or model.incident_cosine != float(reference.condition[1]):
++        raise ValueError("Model HG g or incident condition does not match the reference record")
++    checkpoint = None
++    if checkpoint_path is not None:
++        checkpoint_file = Path(checkpoint_path).resolve()
++        checkpoint = {"path": str(checkpoint_file), "sha256": _file_hash(checkpoint_file)}
++
++    grid = evaluate_rainbow_grid(model, reference, batch_size=config.eval_batch_size)
++    scatter_phi, scatter_theta = cdf_scatter_coordinates(
++        reference, samples=config.cdf_samples, seed=config.seed
++    )
++    vmin, vmax = _shared_color_limits(grid)
++    norm = LogNorm(vmin=vmin, vmax=vmax, clip=False)
++    # Use a perceptually ordered map and reserve gray for actual zero mass.
++    from matplotlib import colormaps
++
++    cmap = colormaps["viridis"].with_extremes(bad=_ZERO_COLOR)
++    metadata = reference.metadata
++    synthetic = metadata.get("synthetic") is True or any(
++        "synthetic" in str(metadata.get(key, "")).lower() for key in ("purpose", "source_commit")
++    )
++    source_kind = "Synthetic fixture" if synthetic else "Rainbow CDF record"
++    condition_label = (
++        f"{reference.wavelength_nm:g} nm; "
++        f"incident inclination {metadata['incident_inclination_degrees']:g} degrees"
++    )
++    heading = f"{source_kind} | {condition_label}"
++    if title is not None:
++        heading += f"\n{title}"
++    elif selected_step is not None:
++        heading += f"\nValidation-selected model (step {selected_step})"
++    panel_titles = (
++        "Reference PDF from the stored CDF",
++        f"Samples from the stored CDF (N = {config.cdf_samples:,})",
++        "NF PDF evaluated at source cell centers",
++    )
++
++    def draw_panel(ax: Axes, panel: int):
++        if panel == 1:
++            artist = ax.scatter(
++                scatter_phi,
++                scatter_theta,
++                s=1.3,
++                c="#172a3a",
++                alpha=0.3,
++                linewidths=0,
++                rasterized=True,
++            )
++            ax.set_facecolor("#fafbfd")
++        else:
++            values = grid.reference_pdf if panel == 0 else grid.nf_pdf
++            artist = ax.pcolormesh(
++                grid.phi_edges_degrees,
++                grid.theta_edges_degrees,
++                np.ma.masked_equal(values, 0),
++                norm=norm,
++                cmap=cmap,
++                shading="flat",
++                antialiased=False,
++                rasterized=True,
++            )
++        _configure_axes(ax)
++        ax.set_title(panel_titles[panel], fontsize=13, pad=12)
++        return artist
++
++    output = Path(output_directory).resolve()
++    output.mkdir(parents=True, exist_ok=True)
++    files: dict[str, list[str]] = {}
++    # Fixed rectangles ensure the scatter canvas has exactly the same dimensions
++    # as either PDF canvas, including the space reserved for their colorbars.
++    single_size = (12.0, 7.4)
++    rect = [0.09, 0.19, 0.77, 0.77 * single_size[0] / 2 / single_size[1]]
++    for panel, stem in enumerate(("reference_pdf", "cdf_samples", "nf_pdf")):
++        fig = Figure(figsize=single_size)
++        FigureCanvasAgg(fig)
++        ax = fig.add_axes(rect)
++        artist = draw_panel(ax, panel)
++        fig.suptitle(heading, x=0.5, y=0.965, fontsize=13)
++        if panel != 1:
++            colorbar_axis = fig.add_axes([0.880, rect[1], 0.018, rect[3]])
++            fig.colorbar(artist, cax=colorbar_axis, label=_DENSITY_LABEL)
++        if panel == 0 and np.any(grid.reference_pdf == 0):
++            fig.legend(
++                handles=[Patch(facecolor=_ZERO_COLOR, label="Zero PDF (not a log-scale floor)")],
++                loc="lower center",
++                bbox_to_anchor=(0.5, 0.065),
++                frameon=False,
++                fontsize=10,
++            )
++        fig.text(0.5, 0.038, _CHART_NOTE, ha="center", fontsize=9)
++        files[stem] = _save_figure(
++            fig, output / f"{stem}.png", dpi=config.dpi, write_pdf=config.write_pdf
++        )
++
++    fig = Figure(figsize=(21.0, 6.2))
++    FigureCanvasAgg(fig)
++    panel_width = 0.276
++    panel_height = panel_width * 21 / 2 / 6.2
++    comparison_rectangles = []
++    image_artist = None
++    for panel, left in enumerate((0.038, 0.350, 0.662)):
++        comparison_rectangles.append([left, 0.29, panel_width, panel_height])
++        ax = fig.add_axes(comparison_rectangles[-1])
++        artist = draw_panel(ax, panel)
++        ax.title.set_fontsize(12)
++        if panel != 1:
++            image_artist = artist
++    colorbar_axis = fig.add_axes([0.26, 0.12, 0.48, 0.025])
++    fig.colorbar(image_artist, cax=colorbar_axis, orientation="horizontal", label=_DENSITY_LABEL)
++    fig.suptitle(heading, x=0.5, y=0.925, fontsize=16)
++    fig.text(0.5, 0.021, _CHART_NOTE, ha="center", fontsize=11)
++    if np.any(grid.reference_pdf == 0):
++        fig.legend(
++            handles=[Patch(facecolor=_ZERO_COLOR, label="Zero reference PDF")],
++            loc="lower right",
++            bbox_to_anchor=(0.976, 0.105),
++            frameon=False,
++            fontsize=10,
++        )
++    files["comparison"] = _save_figure(
++        fig, output / "comparison.png", dpi=config.dpi, write_pdf=config.write_pdf
++    )
++
++    config_value = getattr(model, "config", None)
++    manifest: dict[str, Any] = {
++        "schema": PLOT_SCHEMA,
++        "source_kind": "synthetic_fixture" if synthetic else "rainbow_cdf_record",
++        "title": heading,
++        "configuration": config.to_dict(),
++        "condition": reference.condition.tolist(),
++        "base_g": reference.g,
++        "selected_step": selected_step,
++        "dataset_fingerprint": reference.fingerprint(),
++        "data_provenance": reference.provenance,
++        "checkpoint": checkpoint,
++        "model": {
++            "family": getattr(model, "model_family", type(model).__name__),
++            "configuration": config_value.to_dict() if config_value is not None else None,
++            "device": str(model.device),
++            "parameter_dtype": str(model.dtype),
++            "density_evaluation_dtype": "torch.float64",
++        },
++        "coordinates": {
++            "frame": "recorded_solver_source",
++            "x": "source_azimuth_phi_degrees",
++            "x_limits": [-180.0, 180.0],
++            "y": "scattering_theta_degrees",
++            "y_limits": [180.0, 0.0],
++            "theta_zero": "forward_at_top",
++            "data_aspect": "one_degree_x_equals_one_degree_y",
++            "axes_width_over_height": 2.0,
++            "equal_area": False,
++            "density_measure": "solid_angle_sr",
++            "source_to_nf": reference.source_to_nf.tolist(),
++            "scatter_chart_density": "p_per_sr * sin(theta); not p_per_sr alone",
++        },
++        "grid": {
++            "resolution": "full_native_cdf_cells_no_angular_downsampling",
++            "array_order": ["theta_cell", "phi_cell"],
++            "theta_count": reference.n_theta,
++            "phi_count": reference.n_phi,
++            "point_evaluation": "midpoint_in_u_and_source_phi",
++            "theta_edges": "2*atan2(sqrt(u_edges),sqrt(1-u_edges))",
++            "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
++            "nf_pdf": "point_values_not_cell_averages",
++            "reference_mass_exact": grid.reference_mass_exact,
++            "nf_mass_midpoint_estimate": grid.nf_mass_midpoint_estimate,
++            "nf_mass_warning": (
++                "Native-cell midpoint quadrature only; this is not an exact normalization test "
++                "and can miss NF structure inside a cell. No density renormalization is applied."
++            ),
++            "zero_reference_cells": int(np.count_nonzero(grid.reference_pdf == 0)),
++            "reference_pdf_sha256": _array_hash(grid.reference_pdf),
++            "nf_pdf_sha256": _array_hash(grid.nf_pdf),
++        },
++        "scatter": {
++            "source": "stored_cdf_independent_diagnostic_stream",
++            "sample_count": config.cdf_samples,
++            "seed": config.seed,
++            "stream_id": _CDF_PLOT_STREAM,
++            "rng": "numpy.PCG64(SeedSequence([seed,stream_id]))",
++            "uniform_midpoint_bits": 52,
++            "source_phi_degrees_sha256": _array_hash(scatter_phi),
++            "theta_degrees_sha256": _array_hash(scatter_theta),
++        },
++        "color_scale": {
++            "normalization": "matplotlib.colors.LogNorm",
++            "shared_between": ["reference_pdf", "nf_pdf"],
++            "vmin": vmin,
++            "vmax": vmax,
++            "limits": "joint_positive_extrema; rounding-level_constant_fields_padded_only_for_display",
++            "colormap": "viridis",
++            "zero_color": _ZERO_COLOR,
++            "percentile_clipping": False,
++            "density_floor": None,
++        },
++        "figures": {
++            "individual_size_inches": list(single_size),
++            "individual_axes_rectangle": rect,
++            "comparison_size_inches": [21.0, 6.2],
++            "comparison_axes_rectangles": comparison_rectangles,
++            "display_note": "PNG raster pixels may combine native cells narrower than a pixel.",
++        },
++        "files": files,
++    }
++    temporary = output / "plots.json.tmp"
++    temporary.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
++    temporary.replace(output / "plots.json")
++    return manifest
+diff --git a/src/phaseflow/single_condition.py b/src/phaseflow/single_condition.py
+index 37f7f61544a95ff583eb12cd629937ecb5de006e..889f4a5de1779f923a5b82de21632a35b8bc4855 100644
+--- a/src/phaseflow/single_condition.py
++++ b/src/phaseflow/single_condition.py
+@@ -10,16 +10,16 @@ from __future__ import annotations
+ import copy
+ import hashlib
+ import math
++import os
+ from dataclasses import asdict, dataclass, fields
+ from pathlib import Path
+-from typing import Any, Callable
++from typing import TYPE_CHECKING, Any, Callable
+ 
+ import numpy as np
+ import torch
+ import zuko
+ 
+ from . import __version__
+-from .hg import hg_log_prob
+ from .rainbow import RainbowReference
+ from .sphere_model import SingleConditionSphereFlow, SphereFlowConfig
+ from .training import (
+@@ -32,16 +32,20 @@ from .training import (
+     atomic_json,
+ )
+ 
++if TYPE_CHECKING:
++    from .plotting import RainbowPlotConfig
++
+ FAMILY = "rainbow_single_condition"
+-CHECKPOINT_VERSION = 2
++CHECKPOINT_VERSION = 3
++READABLE_CHECKPOINT_VERSIONS = (2, 3)
+ _STREAMS = {"train": 0, "validation": 1, "minibatches": 2, "test": 3, "proposal": 4}
+ 
+ 
+ @dataclass
+ class SingleTrainingConfig:
+     seed: int = 415
+-    device: str = "cpu"
+-    dtype: str = "float64"
++    device: str = "cuda"
++    dtype: str = "float32"
+     train_samples: int = 65536
+     validation_samples: int = 32768
+     test_samples: int = 65536
+@@ -121,6 +125,39 @@ def _generator(seed: int, stream: str) -> np.random.Generator:
+     return np.random.Generator(np.random.PCG64(np.random.SeedSequence([seed, _STREAMS[stream]])))
+ 
+ 
++def _minibatch_generator(seed: int, device: torch.device) -> torch.Generator:
++    # A dedicated stream, independent of model initialization and all CDF pools.
++    batch_seed = int(_generator(seed, "minibatches").integers(0, 2**63, dtype=np.int64))
++    return torch.Generator(device=device).manual_seed(batch_seed)
++
++
++def _resolve_device(device: str | torch.device) -> torch.device:
++    selected = torch.device(device)
++    if selected.type not in ("cpu", "cuda"):
++        raise ValueError("the Rainbow workflow supports cpu and cuda devices")
++    if selected.type == "cuda":
++        if not torch.cuda.is_available():
++            raise RuntimeError(
++                "CUDA is required by default but is not available. Install a CUDA-enabled "
++                "PyTorch build for your GPU/driver; use --device cpu only for an explicit "
++                "small correctness check. CPU fallback is not automatic."
++            )
++        index = torch.cuda.current_device() if selected.index is None else selected.index
++        if not 0 <= index < torch.cuda.device_count():
++            raise ValueError(f"CUDA device index {index} is unavailable")
++        return torch.device("cuda", index)
++    return torch.device("cpu")
++
++
++def _device_points(
++    points: tuple[np.ndarray, np.ndarray] | tuple[torch.Tensor, torch.Tensor],
++    device: torch.device,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    # Transfer once, then take views/index selections on the selected device.
++    # Directions and teacher log PDFs never pass through the MLP's FP32 dtype.
++    return tuple(torch.as_tensor(value, dtype=torch.float64, device=device) for value in points)
++
++
+ def _uniforms(generator: np.random.Generator, count: int, bits: int = 52) -> np.ndarray:
+     # A specified open 52-bit midpoint grid, not endpoint clipping or retries.
+     return (generator.integers(0, 2**bits, size=(count, 2), dtype=np.int64) + 0.5) / 2**bits
+@@ -167,6 +204,10 @@ def _runtime(device: torch.device, dtype: str) -> dict[str, Any]:
+     if device.type == "cuda":
+         result["cuda_version"] = torch.version.cuda
+         result["gpu_name"] = torch.cuda.get_device_name(device)
++        result["gpu_capability"] = list(torch.cuda.get_device_capability(device))
++        result["cublas_workspace_config"] = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
++    result["deterministic_algorithms"] = torch.are_deterministic_algorithms_enabled()
++    result["matmul_allow_tf32"] = torch.backends.cuda.matmul.allow_tf32
+     return result
+ 
+ 
+@@ -188,29 +229,34 @@ def _check_model_reference(model: SingleConditionSphereFlow, reference: RainbowR
+ def _likelihood_metrics(
+     model: SingleConditionSphereFlow,
+     reference: RainbowReference,
+-    points: tuple[np.ndarray, np.ndarray],
++    points: tuple[np.ndarray, np.ndarray] | tuple[torch.Tensor, torch.Tensor],
+     batch_size: int,
+ ) -> dict[str, Any]:
+     _check_model_reference(model, reference)
+-    directions, log_p = points
+-    device = next(model.parameters()).device
+-    log_q, log_hg = [], []
++    directions, log_p = _device_points(points, model.device)
++    log_q, log_hg = torch.empty_like(log_p), torch.empty_like(log_p)
+     for start in range(0, len(directions), batch_size):
+-        x = torch.as_tensor(
+-            directions[start : start + batch_size], dtype=torch.float64, device=device
+-        )
++        x = directions[start : start + batch_size]
+         q = model.log_prob(x)
+-        if q.shape != (len(x),) or not torch.isfinite(q).all():
+-            raise FloatingPointError("model log_prob is nonfinite or has the wrong shape")
+-        log_q.append(q.cpu().double().numpy())
++        if q.shape != (len(x),):
++            raise FloatingPointError("model log_prob has the wrong shape")
++        log_q[start : start + len(x)] = q
+         mu = x[:, 2] / torch.linalg.vector_norm(x, dim=-1)
+-        log_hg.append(hg_log_prob(mu, model.hg_g, validate_args=True).cpu().numpy())
+-    q, h = np.concatenate(log_q), np.concatenate(log_hg)
+-    nll, nll_se = _estimate(-q)
+-    kl, kl_se = _estimate(log_p - q)
+-    hg_nll, _ = _estimate(-h)
+-    hg_kl, hg_kl_se = _estimate(log_p - h)
+-    improvement, improvement_se = _estimate(q - h)
++        log_hg[start : start + len(x)] = model.hg_base_log_prob(mu)
++    statistics = torch.stack(
++        (-log_q, log_p - log_q, -log_hg, log_p - log_hg, log_q - log_hg, -log_p)
++    )
++    # Reduce on the GPU and transfer only twelve statistics once per evaluation.
++    summary = torch.stack(
++        (statistics.mean(-1), statistics.std(-1, correction=1) / math.sqrt(len(directions))),
++        dim=-1,
++    ).cpu().numpy()
++    if not np.isfinite(summary).all():
++        raise FloatingPointError("nonfinite likelihood statistic")
++    (nll, nll_se), (kl, kl_se), (hg_nll, _), (hg_kl, hg_kl_se), (
++        improvement,
++        improvement_se,
++    ), (entropy, _) = summary.tolist()
+     return {
+         "sample_count": len(directions),
+         "density_measure": "solid_angle_sr",
+@@ -223,7 +269,7 @@ def _likelihood_metrics(
+         "hg_forward_kl_standard_error": hg_kl_se,
+         "nll_improvement_over_hg": improvement,
+         "nll_improvement_standard_error": improvement_se,
+-        "target_entropy_estimate": float(-log_p.mean()),
++        "target_entropy_estimate": entropy,
+         "base_g": model.hg_g,
+         "target_g": reference.g,
+     }
+@@ -239,36 +285,28 @@ def _proposal_metrics(
+ ) -> dict[str, Any] | None:
+     if count == 0:
+         return None
+-    device = next(model.parameters()).device
+     generator = _generator(seed, "proposal")
+-    log_weights, cosines = [], []
+-    max_discrepancy = 0.0
++    bits = 23 if model.spline_dtype == torch.float32 else 52
++    uniforms = torch.as_tensor(
++        _uniforms(generator, count, bits=bits), dtype=torch.float64, device=model.device
++    )
++    generated = torch.empty((count, 5), dtype=torch.float64, device=model.device)
+     for start in range(0, count, batch_size):
+-        uniforms = torch.as_tensor(
+-            _uniforms(
+-                generator,
+-                min(batch_size, count - start),
+-                bits=23 if model.dtype == torch.float32 else 52,
+-            ),
+-            dtype=torch.float64,
+-            device=device,
+-        )
+-        x, log_q = model.sample_from_uniform(uniforms)
++        x, log_q = model.sample_from_uniform(uniforms[start : start + batch_size])
+         evaluated = model.log_prob(x)
+-        if (
+-            not torch.isfinite(x).all()
+-            or not torch.isfinite(log_q).all()
+-            or (not torch.isfinite(evaluated).all())
+-        ):
+-            raise FloatingPointError("nonfinite NF sample or PDF; samples are never discarded")
+-        max_discrepancy = max(max_discrepancy, float((log_q - evaluated).abs().max().item()))
+-        x_np = x.cpu().numpy()
+-        p = reference.log_prob(x_np)
+-        if np.isnan(p).any() or np.isposinf(p).any():
+-            raise FloatingPointError("invalid reference PDF at an NF sample")
+-        log_weights.append(p - log_q.cpu().double().numpy())
+-        cosines.append(x_np[:, 2] / np.linalg.norm(x_np, axis=-1))
+-    lw, mu = np.concatenate(log_weights), np.concatenate(cosines)
++        generated[start : start + len(x)] = torch.cat(
++            (x, log_q[:, None], evaluated[:, None]), dim=-1
++        )
++    values = generated.cpu().numpy()
++    if not np.isfinite(values).all():
++        raise FloatingPointError("nonfinite NF sample or PDF; samples are never discarded")
++    x_np, log_q_np, evaluated_np = values[:, :3], values[:, 3], values[:, 4]
++    p = reference.log_prob(x_np)
++    if np.isnan(p).any() or np.isposinf(p).any():
++        raise FloatingPointError("invalid reference PDF at an NF sample")
++    lw = p - log_q_np
++    mu = x_np[:, 2] / np.linalg.norm(x_np, axis=-1)
++    max_discrepancy = float(np.max(np.abs(log_q_np - evaluated_np)))
+     moment, moment_se = _estimate(mu)
+     positive = np.isfinite(lw)
+     relative_ess = log_mean_weight = mean_weight = None
+@@ -281,7 +319,7 @@ def _proposal_metrics(
+     return {
+         "sample_count": count,
+         "relative_ess": relative_ess,
+-        "uniform_midpoint_bits": 23 if model.dtype == torch.float32 else 52,
++        "uniform_midpoint_bits": bits,
+         "importance_weight_mean": mean_weight,
+         "log_importance_weight_mean": log_mean_weight,
+         "reference_support_hits": int(positive.sum()),
+@@ -321,7 +359,11 @@ def evaluate_single_condition(
+         raise ValueError("proposal_samples must be zero or at least two")
+     _check_model_reference(model, reference)
+     previous_mode = model.training
++    previous_validation = model.validate_args
+     model.eval()
++    # The CDF pool and generated lanes are checked in aggregate; avoid scalar
++    # device reads inside every coupling/sample call during batched evaluation.
++    model.validate_args = False
+     try:
+         result = _likelihood_metrics(
+             model, reference, _points(reference, samples, seed, "test"), batch_size
+@@ -336,21 +378,27 @@ def evaluate_single_condition(
+             dataset_fingerprint=reference.fingerprint(),
+             code_fingerprint=_code_hash(),
+             runtime=_runtime(model.device, str(model.dtype).removeprefix("torch.")),
++            precision={
++                "conditioner": str(model.dtype).removeprefix("torch."),
++                "spline": str(model.spline_dtype).removeprefix("torch."),
++                "hg_geometry_log_pdf": "float64",
++            },
+             proposal=_proposal_metrics(model, reference, proposal_samples, seed, batch_size),
+         )
+         return result
+     finally:
+         model.train(previous_mode)
++        model.validate_args = previous_validation
+ 
+ 
+ def read_single_checkpoint(path: str | Path) -> dict[str, Any]:
+     payload = torch.load(path, map_location="cpu", weights_only=True)
+     if (
+         not isinstance(payload, dict)
+-        or payload.get("checkpoint_version") != CHECKPOINT_VERSION
++        or payload.get("checkpoint_version") not in READABLE_CHECKPOINT_VERSIONS
+         or (payload.get("family") != FAMILY)
+     ):
+-        raise ValueError("not a version-2 Rainbow single-condition checkpoint")
++        raise ValueError("not a supported version-2/3 Rainbow single-condition checkpoint")
+     required = {
+         "kind",
+         "model_config",
+@@ -369,9 +417,10 @@ def read_single_checkpoint(path: str | Path) -> dict[str, Any]:
+ def load_single_checkpoint(
+     path: str | Path,
+     *,
+-    device: str | torch.device = "cpu",
++    device: str | torch.device = "cuda",
+ ) -> tuple[SingleConditionSphereFlow, dict[str, Any]]:
+     payload = read_single_checkpoint(path)
++    device = _resolve_device(device)
+     physics = payload["physics"]
+     model = SingleConditionSphereFlow(
+         physics["hg_g"],
+@@ -406,6 +455,8 @@ def train_single_condition(
+     resume: str | Path | None = None,
+     max_steps_this_run: int | None = None,
+     callback: Callable[[dict[str, Any]], None] | None = None,
++    make_plots: bool = True,
++    plot_config: RainbowPlotConfig | None = None,
+ ) -> SingleTrainResult:
+     """Train a fixed point pool; choose the best checkpoint only by validation NLL.
+ 
+@@ -417,6 +468,13 @@ def train_single_condition(
+         type(max_steps_this_run) is not int or max_steps_this_run < 0
+     ):
+         raise ValueError("max_steps_this_run must be a nonnegative integer")
++    if type(make_plots) is not bool:
++        raise ValueError("make_plots must be boolean")
++    from .plotting import RainbowPlotConfig
++
++    plotting = plot_config if plot_config is not None else RainbowPlotConfig()
++    if not isinstance(plotting, RainbowPlotConfig):
++        raise ValueError("plot_config must be a RainbowPlotConfig")
+     cfg = training_config
+     output = Path(output_directory)
+     previous = read_single_checkpoint(resume) if resume is not None else None
+@@ -438,6 +496,11 @@ def train_single_condition(
+     if previous is not None:
+         if previous["kind"] != "training":
+             raise ValueError("best.pt is inference-only; resume from checkpoint.pt")
++        if previous["checkpoint_version"] != CHECKPOINT_VERSION:
++            raise ValueError(
++                "exact resume requires a version-3 checkpoint from this implementation; "
++                "version-2 checkpoints remain readable for evaluation/plotting"
++            )
+         required = {
+             "training_config",
+             "optimizer_state",
+@@ -468,7 +531,15 @@ def train_single_condition(
+             raise ValueError("invalid checkpoint step")
+     # Reuse the legacy workflow's deterministic runtime primitives, not its model
+     # or HG warmup. Both configuration types provide these runtime-only fields.
+-    device = _setup_runtime(cfg)
++    if torch.device(cfg.device).type == "cuda" and cfg.deterministic:
++        workspace = os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
++        if workspace not in (":4096:8", ":16:8"):
++            raise ValueError(
++                "deterministic CUDA requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8 "
++                "before starting Python"
++            )
++    device = _resolve_device(cfg.device)
++    _setup_runtime(cfg)
+     runtime = _runtime(device, cfg.dtype)
+     if previous is not None and previous["runtime"] != runtime:
+         raise ValueError("exact resume requires the recorded runtime/device/dtype")
+@@ -478,6 +549,7 @@ def train_single_condition(
+         model_config,
+         dtype=_dtype(cfg.dtype),
+         device=device,
++        validate_args=False,
+     )
+     training_points = _points(reference, cfg.train_samples, cfg.seed, "train")
+     validation_points = _points(reference, cfg.validation_samples, cfg.seed, "validation")
+@@ -485,6 +557,11 @@ def train_single_condition(
+         "scope": "one_fixed_condition; independent point streams; no condition holdout",
+         "seed": cfg.seed,
+         "rng": "numpy.PCG64 with SeedSequence([seed, stream_id])",
++        "minibatch_rng": {
++            "engine": "torch.Generator",
++            "device": str(device),
++            "seed_derivation": "first PCG64 integer in [0,2^63) from stream minibatches",
++        },
+         "uniforms": "52-bit open midpoint grid",
+         "streams": _STREAMS,
+         "train_samples": cfg.train_samples,
+@@ -495,13 +572,23 @@ def train_single_condition(
+     }
+     if previous is not None and previous["sample_split"] != split:
+         raise ValueError("regenerated training/validation points differ from checkpoint")
+-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
+-    minibatches = _generator(cfg.seed, "minibatches")
++    # Retain one fixed pool on the device; the optimization loop has no NumPy
++    # indexing, CDF inversion, or host-to-device point transfers.
++    training_directions = torch.as_tensor(
++        training_points[0], dtype=torch.float64, device=device
++    )
++    validation_device = _device_points(validation_points, device)
++    del training_points, validation_points
++    parameters = list(model.parameters())
++    optimizer = torch.optim.Adam(
++        parameters, lr=cfg.learning_rate, foreach=device.type == "cuda"
++    )
++    minibatches = _minibatch_generator(cfg.seed, device)
+     history: list[dict[str, Any]] = []
+     step = best_step = 0
+     best_state: dict[str, Any]
+     if previous is None:
+-        latest = _likelihood_metrics(model, reference, validation_points, cfg.eval_batch_size)
++        latest = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
+         best_validation = copy.deepcopy(latest)
+         best_state = copy.deepcopy(model.state_dict())
+         history.append({"event": "initial", "global_step": 0, "validation": latest})
+@@ -509,7 +596,7 @@ def train_single_condition(
+         model.load_state_dict(previous["model_state"], strict=True)
+         _check_model_reference(model, reference)
+         optimizer.load_state_dict(previous["optimizer_state"])
+-        minibatches.bit_generator.state = previous["minibatch_rng_state"]
++        minibatches.set_state(previous["minibatch_rng_state"].cpu())
+         _restore_rng(previous["rng_state"])
+         step, best_step = previous["global_step"], previous["best_step"]
+         history = copy.deepcopy(previous["history"])
+@@ -525,6 +612,7 @@ def train_single_condition(
+             "family": FAMILY,
+             "model": model_config.to_dict(),
+             "training": cfg.to_dict(),
++            "visualization": {"enabled": make_plots, **plotting.to_dict()},
+         },
+     )
+     atomic_json(output / "data_summary.json", reference.summary())
+@@ -551,7 +639,7 @@ def train_single_condition(
+             "training_config": cfg.to_dict(),
+             "optimizer_state": optimizer.state_dict(),
+             "global_step": step,
+-            "minibatch_rng_state": minibatches.bit_generator.state,
++            "minibatch_rng_state": minibatches.get_state(),
+             "rng_state": _rng_state(),
+             "sample_split": split,
+             "history": history,
+@@ -573,42 +661,78 @@ def train_single_condition(
+         )
+         atomic_json(output / "history.json", history)
+ 
+-    save()
++    pending: list[tuple[int, torch.Tensor, torch.Tensor]] = []
++
++    def flush_updates() -> None:
++        """Check before publication; synchronize a block, not every parameter.
++
++        Each update retains only its detached loss and gradient norm. A failed
++        block is never written over the last valid atomic checkpoint.
++        """
++        if not pending:
++            return
++        summaries = torch.stack(
++            [torch.stack((loss, norm.to(loss.dtype))) for _, loss, norm in pending]
++        ).cpu().numpy()
++        invalid = ~np.isfinite(summaries).all(axis=-1)
++        if invalid.any():
++            failed_step = pending[int(np.flatnonzero(invalid)[0])][0]
++            raise FloatingPointError(
++                f"nonfinite training loss/gradient at update {failed_step}; "
++                "the last valid checkpoint was retained"
++            )
++        finite_parameters = torch.stack([torch.isfinite(p).all() for p in parameters]).all()
++        if not bool(finite_parameters):
++            raise FloatingPointError(
++                f"optimizer produced nonfinite parameters by update {step}; "
++                "the last valid checkpoint was retained"
++            )
++        history.extend(
++            {"global_step": update, "loss": float(values[0])}
++            for (update, _, _), values in zip(pending, summaries, strict=True)
++        )
++        pending.clear()
++
++    if previous is None or checkpoint_path.resolve() != Path(resume).resolve():
++        save()
+     if previous is None and callback is not None:
+         callback(history[0])
+     stop = cfg.steps if max_steps_this_run is None else min(cfg.steps, step + max_steps_this_run)
+     model.train()
+     while step < stop:
+-        indices = minibatches.integers(0, cfg.train_samples, size=cfg.batch_size)
+-        outgoing = torch.as_tensor(training_points[0][indices], dtype=torch.float64, device=device)
++        indices = torch.randint(
++            cfg.train_samples, (cfg.batch_size,), generator=minibatches, device=device
++        )
++        outgoing = training_directions[indices]
+         optimizer.zero_grad(set_to_none=True)
+         log_q = model.log_prob(outgoing)
+-        if log_q.shape != (cfg.batch_size,) or not torch.isfinite(log_q).all():
+-            raise FloatingPointError("nonfinite/malformed training log_prob")
++        if log_q.shape != (cfg.batch_size,):
++            raise FloatingPointError("malformed training log_prob")
+         loss = -log_q.mean()  # Target-distributed samples have unit loss weight.
+         loss.backward()
+-        for parameter in model.parameters():
+-            if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+-                raise FloatingPointError("nonfinite training gradient")
+-        if cfg.grad_clip_norm is not None:
+-            torch.nn.utils.clip_grad_norm_(
+-                model.parameters(), cfg.grad_clip_norm, error_if_nonfinite=True
+-            )
++        gradient_norm = torch.nn.utils.clip_grad_norm_(
++            parameters,
++            cfg.grad_clip_norm if cfg.grad_clip_norm is not None else math.inf,
++            error_if_nonfinite=False,
++            foreach=device.type == "cuda",
++        )
+         optimizer.step()
+-        if any(not torch.isfinite(p).all() for p in model.parameters()):
+-            raise FloatingPointError("optimizer produced nonfinite parameters")
+         step += 1
+-        entry = {"global_step": step, "loss": float(loss.detach().item())}
+-        if step % cfg.eval_every == 0 or step == cfg.steps:
+-            latest = _likelihood_metrics(model, reference, validation_points, cfg.eval_batch_size)
++        pending.append((step, loss.detach(), gradient_norm.detach()))
++        evaluation_due = step % cfg.eval_every == 0 or step == cfg.steps
++        checkpoint_due = step % cfg.checkpoint_every == 0 or step == cfg.steps
++        if evaluation_due or checkpoint_due or step == stop:
++            flush_updates()
++        if evaluation_due:
++            entry = history[-1]
++            latest = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
+             entry["validation"] = latest
+             if latest["nll"] < best_validation["nll"]:
+                 best_step, best_validation = step, copy.deepcopy(latest)
+                 best_state = copy.deepcopy(model.state_dict())
+             if callback is not None:
+                 callback(entry)
+-        history.append(entry)
+-        if step % cfg.checkpoint_every == 0 or step == cfg.steps:
++        if checkpoint_due:
+             save()
+     # Save only completed update boundaries. KeyboardInterrupt within an update
+     # propagates, leaving the preceding atomic checkpoint intact.
+@@ -647,4 +771,18 @@ def train_single_condition(
+         "generalization_scope": "same condition only; no claim about unseen wavelength/incidence",
+     }
+     atomic_json(output / "metrics.json", metrics)
++    if make_plots and step == cfg.steps:
++        from .plotting import plot_rainbow_comparison
++
++        # The selected model, not the last optimization iterate, supplies the
++        # inference map. Plotting has its own RNG and never selects checkpoints.
++        plot_rainbow_comparison(
++            selected,
++            reference,
++            output / "plots",
++            config=plotting,
++            checkpoint_path=best_path,
++            title=f"Validation-selected model (step {best_step})",
++            selected_step=best_step,
++        )
+     return SingleTrainResult(selected, checkpoint_path, best_path, metrics, step, step == cfg.steps)
+diff --git a/src/phaseflow/sphere_model.py b/src/phaseflow/sphere_model.py
+index 0635023ca8832609c75e6135af75f7ec8d1172a2..a5e98bc10ecf8c0b07242668cabf6dd0773b186d 100644
+--- a/src/phaseflow/sphere_model.py
++++ b/src/phaseflow/sphere_model.py
+@@ -56,6 +56,9 @@ class SphereFlowConfig:
+     ``num_bins`` is the number of bins on each full interval/circle.  With
+     reflection symmetry, half of the circular bins are independently learned.
+     Smooth SiLU conditioners preserve periodic differentiability at the seam.
++    ``spline_dtype='float64'`` keeps probability coordinates, constrained RQS
++    parameters and Jacobians in float64 even when MLP weights use float32.
++    ``'model'`` preserves the arithmetic of checkpoints predating this option.
+     """
+ 
+     hidden_features: tuple[int, ...] = (64, 64)
+@@ -66,6 +69,7 @@ class SphereFlowConfig:
+     min_bin_height: float = 1e-5
+     min_derivative: float = 1e-4
+     activation: str = "silu"
++    spline_dtype: str = "model"
+ 
+     def __post_init__(self) -> None:
+         object.__setattr__(self, "hidden_features", tuple(self.hidden_features))
+@@ -94,6 +98,8 @@ class SphereFlowConfig:
+             raise ValueError("min_derivative must be in (0,1) for identity initialization")
+         if self.activation != "silu":
+             raise ValueError("this model uses the smooth silu conditioner")
++        if self.spline_dtype not in ("model", "float64"):
++            raise ValueError("spline_dtype must be 'model' or 'float64'")
+ 
+     def to_dict(self) -> dict:
+         result = asdict(self)
+@@ -148,7 +154,12 @@ class _CylinderCoupling(nn.Module):
+             features = (strength * phi.cos())[..., None]
+             if not cfg.mirror_symmetry:
+                 features = torch.cat((features, (strength * phi.sin())[..., None]), -1)
+-        logits = self.hyper(features)
++        # The retained probability coordinate and its periodic embedding keep
++        # spline precision. Only the conditioner uses the neural-weight dtype;
++        # promote its logits before constraining bins or constructing knots.
++        # These casts retain autograd and do not transfer data to the host.
++        logits = self.hyper(features.to(dtype=self.hyper[0].weight.dtype))
++        logits = logits.to(dtype=retained.dtype)
+         widths, heights, derivatives = logits.split(self.parameter_sizes, dim=-1)
+         kwargs = {
+             "min_bin_width": cfg.min_bin_width,
+@@ -173,9 +184,11 @@ class SingleConditionSphereFlow(nn.Module):
+     are included in state_dict's versioned extra state.  Moving neural weights
+     to float32 therefore never rounds or clips the physical g.
+ 
+-    HG calculations and returned directions/log PDFs use float64; conditioner
+-    and spline calculations follow the model dtype.  Default float64 is
+-    intended for the initial correctness/accuracy experiments.
++    HG calculations and returned directions/log PDFs always use float64.
++    Conditioners use the model dtype; probability coordinates and RQS algebra
++    use ``config.spline_dtype``. Explicit float32 weights with float64 splines
++    avoid FP64 matrix multiplications without lowering HG/cylinder precision.
++    No float16/bfloat16 autocast or gradient scaling is applied internally.
+     """
+ 
+     model_family = "single_condition_circular_hg"
+@@ -201,6 +214,22 @@ class SingleConditionSphereFlow(nn.Module):
+             _CylinderCoupling(self.config, update_circle=bool(i % 2), dtype=dtype, device=device)
+             for i in range(self.config.num_coupling_layers)
+         )
++        # Reusing this device scalar avoids Python-float -> CUDA copies on each
++        # HG evaluation. It is a cache; only the exact Python value is persisted.
++        self.register_buffer(
++            "_hg_coefficient",
++            torch.tensor(self.hg_g, dtype=torch.float64, device=self.device),
++            persistent=False,
++        )
++
++    def _apply(self, fn, recurse: bool = True):
++        result = super()._apply(fn, recurse=recurse)
++        # Module.float()/to(dtype=...) also cast buffers. Rebuild from the
++        # authoritative binary64 scalar after movement, never from that cast.
++        self._hg_coefficient = torch.tensor(
++            self.hg_g, dtype=torch.float64, device=self.device
++        )
++        return result
+ 
+     def _set_physics(self, hg_g: float, incident_cosine: float) -> None:
+         if isinstance(hg_g, bool) or isinstance(incident_cosine, bool):
+@@ -213,6 +242,10 @@ class SingleConditionSphereFlow(nn.Module):
+         self._hg_g = g
+         self._incident_cosine = eta
+         self._azimuth_strength = math.sqrt((1 - eta) * (1 + eta))
++        if "_hg_coefficient" in self._buffers:
++            self._hg_coefficient = torch.tensor(
++                g, dtype=torch.float64, device=self.device
++            )
+ 
+     @property
+     def hg_g(self) -> float:
+@@ -226,6 +259,11 @@ class SingleConditionSphereFlow(nn.Module):
+     def dtype(self) -> torch.dtype:
+         return self.couplings[0].hyper[0].weight.dtype
+ 
++    @property
++    def spline_dtype(self) -> torch.dtype:
++        """Arithmetic dtype of cylinder coordinates, RQS knots and Jacobians."""
++        return torch.float64 if self.config.spline_dtype == "float64" else self.dtype
++
+     @property
+     def device(self) -> torch.device:
+         return self.couplings[0].hyper[0].weight.device
+@@ -243,16 +281,23 @@ class SingleConditionSphereFlow(nn.Module):
+         if (
+             state.get("model_family") != self.model_family
+             or state.get("schema_version") != self.schema_version
+-            or state.get("config") != self.config.to_dict()
+         ):
+             raise ValueError("checkpoint sphere model family, schema, or configuration differs")
++        # Old schema-1 checkpoints have no spline_dtype: its default 'model'
++        # retains their original arithmetic instead of silently upgrading it.
++        try:
++            saved_config = SphereFlowConfig.from_dict(state["config"])
++        except (KeyError, TypeError, ValueError) as error:
++            raise ValueError("checkpoint sphere model configuration differs") from error
++        if saved_config != self.config:
++            raise ValueError("checkpoint sphere model family, schema, or configuration differs")
+         self._set_physics(state["hg_g"], state["incident_cosine"])
+ 
+     def _run_couplings(self, value: Tensor, *, inverse: bool) -> tuple[Tensor, Tensor]:
+         if self.dtype not in (torch.float32, torch.float64):
+             raise TypeError("sphere flow supports only float32 and float64 model weights")
+-        value = value.to(device=self.device, dtype=self.dtype)
+-        log_det = torch.zeros(value.shape[:-1], device=self.device, dtype=self.dtype)
++        value = value.to(device=self.device, dtype=self.spline_dtype)
++        log_det = torch.zeros(value.shape[:-1], device=self.device, dtype=self.spline_dtype)
+         layers = reversed(self.couplings) if inverse else self.couplings
+         for layer in layers:
+             changed = 1 if layer.update_circle else 0
+@@ -294,7 +339,7 @@ class SingleConditionSphereFlow(nn.Module):
+     def log_prob(self, outgoing: Tensor) -> Tensor:
+         """Evaluate log q relative to solid angle, for arbitrary local directions."""
+         mu, v, valid = self._local_coordinates(outgoing)
+-        t, log_hg = hg_cdf_and_log_prob(mu, self.hg_g)
++        t, log_hg = hg_cdf_and_log_prob(mu, self._hg_coefficient)
+         _, log_r = self._run_couplings(torch.stack((t, v), -1), inverse=False)
+         result = log_hg + log_r.to(torch.float64)
+         return torch.where(valid, result, torch.full_like(result, torch.nan))
+@@ -302,6 +347,16 @@ class SingleConditionSphereFlow(nn.Module):
+     def pdf(self, outgoing: Tensor) -> Tensor:
+         return self.log_prob(outgoing).exp()
+ 
++    def hg_base_log_prob(self, mu: Tensor) -> Tensor:
++        """Evaluate the HG baseline per steradian from scattering cosine ``mu``.
++
++        Input is the cosine relative to the incident propagation axis, not an
++        outgoing xyz vector. Arithmetic uses float64 on the model's device;
++        an already-resident float64 tensor is reused without a transfer.
++        """
++        cosine = torch.as_tensor(mu, device=self.device, dtype=torch.float64)
++        return hg_log_prob(cosine, self._hg_coefficient)
++
+     def sample_from_uniform(self, uniforms: Tensor) -> tuple[Tensor, Tensor]:
+         """Use two uniforms (u0 in (0,1), u1 in [0,1)) without branch splitting.
+ 
+@@ -320,20 +375,20 @@ class SingleConditionSphereFlow(nn.Module):
+         )
+         if self.validate_args and not bool(valid_input.all()):
+             raise ValueError("uniforms require u0 in (0,1) and u1 in [0,1)")
+-        u = provided.to(dtype=self.dtype)
++        u = provided.to(dtype=self.spline_dtype)
+         valid_u = valid_input & (u[..., 0] > 0) & (u[..., 0] < 1) & (u[..., 1] < 1)
+         if self.validate_args and not bool(valid_u.all()):
+             raise FloatingPointError(
+-                "valid uniforms rounded to an excluded endpoint in the model dtype; "
+-                "use float64 or generate uniforms on the model's representable midpoint grid"
++                "valid uniforms rounded to an excluded endpoint in the spline coordinate dtype; "
++                "use float64 splines or their representable uniform midpoint grid"
+             )
+         cylinder, log_inverse_det = self._run_couplings(u, inverse=True)
+         cylinder = cylinder.to(torch.float64)
+-        mu = hg_icdf(cylinder[..., 0], self.hg_g)
++        mu = hg_icdf(cylinder[..., 0], self._hg_coefficient)
+         phi = 2 * math.pi * (cylinder[..., 1] - 0.5)
+         radius = ((1 - mu) * (1 + mu)).sqrt()
+         directions = torch.stack((radius * phi.cos(), radius * phi.sin(), mu), -1)
+-        log_prob = hg_log_prob(mu, self.hg_g) - log_inverse_det.to(torch.float64)
++        log_prob = self.hg_base_log_prob(mu) - log_inverse_det.to(torch.float64)
+         valid = (
+             valid_u
+             & torch.isfinite(directions).all(dim=-1)
+@@ -358,11 +413,11 @@ class SingleConditionSphereFlow(nn.Module):
+         """Draw reproducible uniform midpoint floats, then transform them."""
+         if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples < 1:
+             raise ValueError("num_samples must be a positive integer")
+-        bits = 23 if self.dtype == torch.float32 else 52
++        bits = 23 if self.spline_dtype == torch.float32 else 52
+         integers = torch.randint(
+             1 << bits, (num_samples, 2), device=self.device, generator=generator
+         )
+-        uniforms = (integers.to(self.dtype) + 0.5) * (2.0**-bits)
++        uniforms = (integers.to(self.spline_dtype) + 0.5) * (2.0**-bits)
+         return self.sample_from_uniform(uniforms)
+ 
+     def forward(self, outgoing: Tensor) -> Tensor:
+diff --git a/tests/test_gpu_workflow.py b/tests/test_gpu_workflow.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8bfccbe56292488e6ab2158c02d801058fa2fa5f
+--- /dev/null
++++ b/tests/test_gpu_workflow.py
+@@ -0,0 +1,312 @@
++"""GPU execution contracts and CUDA integration gates for synthetic Rainbow data.
++
++CUDA-marked tests require real hardware. CPU tests validate fail-fast defaults
++and legacy checkpoint interpretation; they do not establish CUDA performance.
++"""
++
++from __future__ import annotations
++
++import copy
++import json
++from collections import Counter
++from pathlib import Path
++
++import numpy as np
++import pytest
++import torch
++from test_single_condition import smooth_teacher
++
++import phaseflow.single_condition as workflow
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import (
++    FAMILY,
++    SingleTrainingConfig,
++    evaluate_single_condition,
++    load_single_checkpoint,
++    read_single_checkpoint,
++    train_single_condition,
++)
++from phaseflow.sphere_model import SingleConditionSphereFlow, SphereFlowConfig
++
++CUDA_REQUIRED = pytest.mark.skipif(
++    not torch.cuda.is_available(), reason="requires a CUDA device; CPU is not a substitute"
++)
++
++
++def gpu_model_config() -> SphereFlowConfig:
++    return SphereFlowConfig(
++        hidden_features=(16, 16), num_coupling_layers=2, num_bins=8, spline_dtype="float64"
++    )
++
++
++def gpu_training_config(*, steps: int, eval_every: int = 4) -> SingleTrainingConfig:
++    return SingleTrainingConfig(
++        seed=415,
++        device="cuda:0",
++        dtype="float32",
++        train_samples=1024,
++        validation_samples=1024,
++        test_samples=1024,
++        proposal_samples=128,
++        batch_size=256,
++        steps=steps,
++        learning_rate=0.005,
++        eval_every=eval_every,
++        checkpoint_every=eval_every,
++        eval_batch_size=256,
++    )
++
++
++def assert_tensor_state_equal(left, right) -> None:
++    """Require exact state equality, including optimizer and generator tensors."""
++    if isinstance(left, torch.Tensor):
++        assert isinstance(right, torch.Tensor)
++        assert left.dtype == right.dtype and left.shape == right.shape
++        assert torch.equal(left, right)
++    elif isinstance(left, dict):
++        assert left.keys() == right.keys()
++        for key in left:
++            assert_tensor_state_equal(left[key], right[key])
++    elif isinstance(left, (list, tuple)):
++        assert type(left) is type(right) and len(left) == len(right)
++        for first, second in zip(left, right, strict=True):
++            assert_tensor_state_equal(first, second)
++    else:
++        assert left == right
++
++
++def test_shipped_training_defaults_require_cuda_and_float32_conditioners():
++    defaults = SingleTrainingConfig()
++    assert defaults.device == "cuda" and defaults.dtype == "float32"
++    path = Path(__file__).resolve().parents[1] / "configs" / "rainbow_single.json"
++    shipped = json.loads(path.read_text(encoding="utf-8"))
++    assert shipped["training"]["device"] == "cuda"
++    assert shipped["training"]["dtype"] == "float32"
++    assert shipped["model"]["spline_dtype"] == "float64"
++
++
++def test_default_training_fails_without_cuda_before_sampling_or_writing(tmp_path, monkeypatch):
++    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
++    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
++
++    def unexpected_sampling(*_args, **_kwargs):
++        pytest.fail("CUDA validation must precede generation of the large CDF pools")
++
++    monkeypatch.setattr(workflow, "_points", unexpected_sampling)
++    output = tmp_path / "run"
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
++        with pytest.raises(RuntimeError, match="CPU fallback is not automatic"):
++            train_single_condition(
++                record, gpu_model_config(), SingleTrainingConfig(), output, make_plots=False
++            )
++    assert not output.exists()
++
++
++def test_invalid_deterministic_cublas_configuration_fails_before_device_setup(
++    tmp_path, monkeypatch
++):
++    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":invalid")
++
++    def unexpected_device_setup(*_args, **_kwargs):
++        pytest.fail("invalid deterministic cuBLAS configuration must fail before CUDA setup")
++
++    monkeypatch.setattr(torch.cuda, "is_available", unexpected_device_setup)
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
++        with pytest.raises(ValueError, match="CUBLAS_WORKSPACE_CONFIG"):
++            train_single_condition(
++                record,
++                gpu_model_config(),
++                SingleTrainingConfig(),
++                tmp_path / "run",
++                make_plots=False,
++            )
++    assert not (tmp_path / "run").exists()
++
++
++@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
++def test_version2_checkpoint_loads_on_explicit_cpu_without_reinterpreting_precision(
++    tmp_path, monkeypatch, dtype
++):
++    # This primitive/tensor fixture uses a real model state in the old format;
++    # it deliberately omits the newly introduced spline_dtype configuration.
++    torch.manual_seed(214)
++    config = SphereFlowConfig(hidden_features=(8,), num_coupling_layers=2, num_bins=8)
++    g = 0.198_721_096_450_612_6
++    eta = -0.138_276_463_281_792
++    original = SingleConditionSphereFlow(g, eta, config, dtype=dtype)
++    with torch.no_grad():
++        for coupling in original.couplings:
++            coupling.hyper[-1].weight.normal_(0, 0.04)
++    old_config = config.to_dict()
++    old_config.pop("spline_dtype")
++    state = copy.deepcopy(original.state_dict())
++    state["_extra_state"]["config"].pop("spline_dtype")
++    path = tmp_path / "version2.pt"
++    torch.save(
++        {
++            "checkpoint_version": 2,
++            "family": FAMILY,
++            "kind": "inference",
++            "model_config": old_config,
++            "model_state": state,
++            "physics": {"hg_g": g, "incident_cosine": eta, "wavelength_nm": 550.0},
++            "dtype": str(dtype).removeprefix("torch."),
++            "global_step": 0,
++            "dataset_fingerprint": "synthetic-version2-compatibility-fixture",
++            "code_fingerprint": "synthetic-version2-compatibility-fixture",
++        },
++        path,
++    )
++    restored, payload = load_single_checkpoint(path, device="cpu")
++    assert payload["checkpoint_version"] == 2
++    assert restored.device == torch.device("cpu")
++    assert restored.dtype == restored.spline_dtype == dtype
++    assert restored.config.spline_dtype == "model"
++    assert restored.hg_g == g and restored.incident_cosine == eta
++    uniforms = torch.tensor([[0.13, 0.24], [0.46, 0.68], [0.87, 0.92]], dtype=dtype)
++    for expected, actual in zip(
++        original.sample_from_uniform(uniforms), restored.sample_from_uniform(uniforms), strict=True
++    ):
++        assert torch.equal(expected, actual)
++    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
++    with pytest.raises(RuntimeError, match="CPU fallback is not automatic"):
++        load_single_checkpoint(path)
++
++
++@pytest.mark.cuda
++@CUDA_REQUIRED
++def test_cuda_resident_point_pools_mixed_precision_learning_and_evaluation(tmp_path, monkeypatch):
++    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
++    device = torch.device("cuda", 0)
++    streams = Counter()
++    transfers = Counter()
++    training_calls = []
++    original_points = workflow._points
++    original_device_points = workflow._device_points
++    original_log_prob = SingleConditionSphereFlow.log_prob
++
++    def track_points(reference, count, seed, stream):
++        streams[stream] += 1
++        return original_points(reference, count, seed, stream)
++
++    def check_pool_transfer(points, destination):
++        assert destination == device
++        result = original_device_points(points, destination)
++        for source, resident in zip(points, result, strict=True):
++            assert resident.device == device and resident.dtype == torch.float64
++            if isinstance(source, torch.Tensor):
++                # Validation visits must reuse the original device pool.
++                assert source.device == device and source.data_ptr() == resident.data_ptr()
++                transfers["resident"] += 1
++            else:
++                assert isinstance(source, np.ndarray)
++                transfers["host"] += 1
++        return result
++
++    def check_model_inputs(model, outgoing):
++        assert outgoing.device == device and outgoing.dtype == torch.float64
++        assert model.dtype == torch.float32 and model.spline_dtype == torch.float64
++        if torch.is_grad_enabled():
++            training_calls.append(len(outgoing))
++            assert not model.validate_args
++        return original_log_prob(model, outgoing)
++
++    monkeypatch.setattr(workflow, "_points", track_points)
++    monkeypatch.setattr(workflow, "_device_points", check_pool_transfer)
++    monkeypatch.setattr(SingleConditionSphereFlow, "log_prob", check_model_inputs)
++    cfg = gpu_training_config(steps=32, eval_every=8)
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
++        result = train_single_condition(
++            record, gpu_model_config(), cfg, tmp_path / "run", make_plots=False
++        )
++        assert result.complete and result.model.device == device
++        assert result.model.hg_g == record.g
++        assert training_calls == [cfg.batch_size] * cfg.steps
++        assert streams == {"train": 1, "validation": 1, "test": 1}
++        # Both arrays of validation/test transfer once, regardless of updates.
++        # Training transfers directions directly, without unused teacher PDFs.
++        assert transfers["host"] == 4 and transfers["resident"] >= 2
++        initial = result.metrics["initial_validation"]
++        selected = result.metrics["best_validation"]
++        assert selected["nll"] < initial["nll"] - 0.005
++        assert result.metrics["test"]["nll_improvement_over_hg"] > 0.005
++        report = evaluate_single_condition(
++            result.model, record, samples=256, proposal_samples=128, batch_size=64, seed=913
++        )
++        assert report["runtime"]["device"] == "cuda:0"
++        assert report["precision"] == {
++            "conditioner": "float32", "spline": "float64", "hg_geometry_log_pdf": "float64"
++        }
++        assert report["base_g"] == record.g
++        assert report["proposal"]["uniform_midpoint_bits"] == 52
++        assert 0 < report["proposal"]["relative_ess"] <= 1.00000000001
++        assert report["proposal"]["sample_eval_log_pdf_max_abs_error"] < 1e-5
++
++
++@pytest.mark.cuda
++@CUDA_REQUIRED
++def test_cuda_resume_restores_optimizer_and_generator_exactly_at_unscheduled_boundary(
++    tmp_path, monkeypatch
++):
++    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
++    checked_optimizer_loads = []
++    original_load = torch.optim.Adam.load_state_dict
++
++    def check_loaded_optimizer(optimizer, state_dict):
++        result = original_load(optimizer, state_dict)
++        assert optimizer.state
++        for parameter, state in optimizer.state.items():
++            assert parameter.device == torch.device("cuda", 0)
++            assert parameter.dtype == torch.float32
++            for name in ("exp_avg", "exp_avg_sq"):
++                assert state[name].device == parameter.device
++                assert state[name].dtype == parameter.dtype
++            # Adam's step counter may remain CPU when capturable=False.
++            assert int(state["step"]) == 5
++        checked_optimizer_loads.append(True)
++        return result
++
++    monkeypatch.setattr(torch.optim.Adam, "load_state_dict", check_loaded_optimizer)
++    cfg = gpu_training_config(steps=12)
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
++        full = train_single_condition(
++            record, gpu_model_config(), cfg, tmp_path / "full", make_plots=False
++        )
++        partial = train_single_condition(
++            record,
++            gpu_model_config(),
++            cfg,
++            tmp_path / "resumed",
++            max_steps_this_run=5,
++            make_plots=False,
++        )
++        assert not partial.complete and partial.metrics["test"] is None
++        interrupted = read_single_checkpoint(partial.checkpoint_path)
++        assert interrupted["checkpoint_version"] == 3
++        assert interrupted["minibatch_rng_state"].dtype == torch.uint8
++        assert interrupted["sample_split"]["minibatch_rng"]["device"] == "cuda:0"
++        assert [entry["global_step"] for entry in interrupted["history"] if "validation" in entry] == [
++            0, 4
++        ]
++        continued = train_single_condition(
++            record,
++            gpu_model_config(),
++            cfg,
++            tmp_path / "resumed",
++            resume=partial.checkpoint_path,
++            make_plots=False,
++        )
++        assert checked_optimizer_loads == [True]
++        expected = read_single_checkpoint(full.checkpoint_path)
++        actual = read_single_checkpoint(continued.checkpoint_path)
++        for key in (
++            "model_state", "best_state", "optimizer_state", "minibatch_rng_state", "rng_state"
++        ):
++            assert_tensor_state_equal(expected[key], actual[key])
++        assert expected["history"] == actual["history"]
++        assert full.metrics == continued.metrics
++        assert_tensor_state_equal(full.model.state_dict(), continued.model.state_dict())
++        restored, _ = load_single_checkpoint(continued.best_path, device="cuda:0")
++        assert restored.hg_g == record.g
++        assert restored.dtype == torch.float32 and restored.spline_dtype == torch.float64
++        assert_tensor_state_equal(restored.state_dict(), continued.model.state_dict())
+diff --git a/tests/test_rainbow_plotting.py b/tests/test_rainbow_plotting.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..db7761efb215846e013da887b268b6f946323467
+--- /dev/null
++++ b/tests/test_rainbow_plotting.py
+@@ -0,0 +1,214 @@
++"""Coordinate, measure and rendering checks using explicitly synthetic records."""
++
++from __future__ import annotations
++
++import json
++import math
++
++import numpy as np
++import pytest
++import torch
++from test_rainbow import write_rainbow_fixture
++
++from phaseflow.plotting import (
++    RainbowPlotConfig,
++    cdf_scatter_coordinates,
++    evaluate_rainbow_grid,
++    plot_rainbow_comparison,
++)
++from phaseflow.rainbow import RainbowReference
++from phaseflow.sphere_model import SingleConditionSphereFlow, SphereFlowConfig
++
++
++class DirectionalDensity(torch.nn.Module):
++    """Normalized analytic q=(1+0.6*x_nf)/(4*pi) for an independent frame check."""
++
++    def __init__(self, reference, *, device="cpu", invalid_log_pdf=None):
++        super().__init__()
++        self.register_buffer("anchor", torch.zeros((), dtype=torch.float64, device=device))
++        self.hg_g = reference.g
++        self.incident_cosine = float(reference.condition[1])
++        self.invalid_log_pdf = invalid_log_pdf
++        self.calls = []
++
++    @property
++    def device(self):
++        return self.anchor.device
++
++    @property
++    def dtype(self):
++        return self.anchor.dtype
++
++    def log_prob(self, outgoing):
++        self.calls.append((outgoing.shape, outgoing.device, outgoing.dtype, torch.is_grad_enabled()))
++        assert not self.training
++        if self.invalid_log_pdf is not None:
++            return torch.full_like(outgoing[..., 0], self.invalid_log_pdf)
++        return torch.log1p(0.6 * outgoing[..., 0]) - math.log(4 * math.pi)
++
++
++def test_native_grid_preserves_measure_zeros_orientation_and_model_mode(tmp_path):
++    angle = 0.37
++    masses, edges, _ = write_rainbow_fixture(tmp_path / "record", frame_rotation=angle)
++    with RainbowReference(tmp_path / "record") as record:
++        model = DirectionalDensity(record)
++        assert model.training
++        rng_before = torch.get_rng_state().clone()
++        grid = evaluate_rainbow_grid(model, record, batch_size=5)
++        assert model.training
++        torch.testing.assert_close(rng_before, torch.get_rng_state(), rtol=0, atol=0)
++        solid_angles = (4 * np.pi / masses.shape[0]) * np.diff(edges)
++        np.testing.assert_allclose(grid.reference_pdf, masses.T / solid_angles[:, None], rtol=1e-14)
++        np.testing.assert_array_equal(grid.reference_pdf == 0, masses.T == 0)
++        np.testing.assert_allclose(grid.cell_solid_angles, solid_angles, rtol=1e-15)
++        # Independent canonical-frame derivation: x_nf = r*sin(phi_source+angle).
++        source_phi = -np.pi + (np.arange(4) + 0.5) * np.pi / 2
++        u_mid = (edges[:-1] + edges[1:]) / 2
++        expected = (
++            1 + 0.6 * (2 * np.sqrt(u_mid * (1 - u_mid)))[:, None] * np.sin(source_phi + angle)
++        ) / (4 * np.pi)
++        np.testing.assert_allclose(grid.nf_pdf, expected, rtol=1e-14)
++        np.testing.assert_allclose(grid.theta_edges_degrees, np.rad2deg(np.arccos(1 - 2 * edges)))
++        np.testing.assert_array_equal(grid.phi_edges_degrees, [-180, -90, 0, 90, 180])
++        assert grid.reference_mass_exact == pytest.approx(1, abs=1e-14)
++        assert grid.nf_mass_midpoint_estimate == pytest.approx(1, abs=1e-14)
++        assert [call[0] for call in model.calls] == [(5, 3), (5, 3), (2, 3)]
++        assert all(call[1].type == "cpu" and call[2] == torch.float64 for call in model.calls)
++        assert all(not call[3] for call in model.calls)
++
++
++def test_cdf_scatter_matches_saved_cell_masses_and_keeps_global_rng(tmp_path):
++    masses, edges, _ = write_rainbow_fixture(tmp_path / "record", frame_rotation=-0.29)
++    with RainbowReference(tmp_path / "record") as record:
++        rng_before = np.random.get_state()
++        phi, theta = cdf_scatter_coordinates(record, samples=50000, seed=29)
++        rng_after = np.random.get_state()
++        assert rng_before[0] == rng_after[0]
++        np.testing.assert_array_equal(rng_before[1], rng_after[1])
++        assert rng_before[2:] == rng_after[2:]
++        again = cdf_scatter_coordinates(record, samples=50000, seed=29)
++        np.testing.assert_array_equal(phi, again[0])
++        np.testing.assert_array_equal(theta, again[1])
++        assert np.all((-180 <= phi) & (phi < 180))
++        assert np.all((0 < theta) & (theta < 180))
++        # Bin in actual u, not in uniform theta. This also detects a missing or
++        # reversed source/NF rotation in the plotted points.
++        u = np.sin(np.deg2rad(theta) / 2) ** 2
++        observed, _, _ = np.histogram2d(phi, u, bins=[np.linspace(-180, 180, 5), edges])
++        np.testing.assert_allclose(observed / len(phi), masses, atol=0.005, rtol=0)
++        assert not np.any(observed[masses == 0])
++
++
++def test_aligned_figures_manifest_and_log_color_range(tmp_path):
++    from matplotlib.image import imread
++
++    write_rainbow_fixture(tmp_path / "record")
++    with RainbowReference(tmp_path / "record") as record:
++        model = DirectionalDensity(record)
++        grid = evaluate_rainbow_grid(model, record)
++        manifest = plot_rainbow_comparison(
++            model,
++            record,
++            tmp_path / "plots",
++            config=RainbowPlotConfig(cdf_samples=1000, dpi=60, write_pdf=True),
++            selected_step=17,
++        )
++        assert model.training
++        positive = grid.reference_pdf[grid.reference_pdf > 0]
++        assert manifest["color_scale"]["vmin"] == min(positive.min(), grid.nf_pdf.min())
++        assert manifest["color_scale"]["vmax"] == max(positive.max(), grid.nf_pdf.max())
++        assert manifest["color_scale"]["density_floor"] is None
++        assert manifest["color_scale"]["shared_between"] == ["reference_pdf", "nf_pdf"]
++        assert manifest["grid"]["zero_reference_cells"] == 6
++        assert manifest["grid"]["theta_count"] == 3 and manifest["grid"]["phi_count"] == 4
++        assert manifest["selected_step"] == 17
++        assert manifest["source_kind"] == "synthetic_fixture"
++        assert "Synthetic fixture" in manifest["title"]
++        assert "550 nm" in manifest["title"]
++        assert manifest["dataset_fingerprint"] == record.fingerprint()
++        assert manifest["coordinates"]["y_limits"] == [180.0, 0.0]
++        assert manifest["coordinates"]["axes_width_over_height"] == 2
++        assert manifest["coordinates"]["equal_area"] is False
++        assert manifest["scatter"]["source"] == "stored_cdf_independent_diagnostic_stream"
++        assert manifest["scatter"]["stream_id"] >= 100
++        np.testing.assert_array_equal(manifest["coordinates"]["source_to_nf"], record.source_to_nf)
++        images = [imread(tmp_path / "plots" / f"{name}.png") for name in manifest["files"]]
++        assert all(image.shape == (444, 720, 4) for image in images[:3])
++        assert images[3].shape == (372, 1260, 4)
++        assert all(np.count_nonzero(np.any(image[..., :3] < 0.8, axis=-1)) > 200 for image in images)
++        for paths in manifest["files"].values():
++            assert len(paths) == 2
++            for filename in paths:
++                assert (tmp_path / "plots" / filename).stat().st_size > 1000
++        loaded = json.loads((tmp_path / "plots/plots.json").read_text())
++        assert loaded == manifest
++        width, height = manifest["figures"]["individual_size_inches"]
++        _, _, ax_width, ax_height = manifest["figures"]["individual_axes_rectangle"]
++        assert ax_width * width / (ax_height * height) == pytest.approx(2)
++
++
++def test_isotropic_constant_plot_has_finite_display_range_without_changing_density(tmp_path):
++    write_rainbow_fixture(
++        tmp_path / "record", masses=np.ones((1, 1)), u_edges=np.array([0.0, 1.0])
++    )
++    with RainbowReference(tmp_path / "record") as record:
++        model = SingleConditionSphereFlow(
++            record.g,
++            record.condition[1],
++            SphereFlowConfig(num_coupling_layers=2, num_bins=4, hidden_features=(4,)),
++            device="cpu",
++        )
++        model.eval()
++        grid = evaluate_rainbow_grid(model, record)
++        assert grid.reference_pdf[0, 0] == pytest.approx(1 / (4 * np.pi), abs=1e-15)
++        assert grid.nf_pdf[0, 0] == pytest.approx(1 / (4 * np.pi), abs=1e-15)
++        result = plot_rainbow_comparison(
++            model,
++            record,
++            tmp_path / "plots",
++            config=RainbowPlotConfig(cdf_samples=10, dpi=30),
++        )
++        assert not model.training
++        assert 0 < result["color_scale"]["vmin"] < 1 / (4 * np.pi)
++        assert result["color_scale"]["vmax"] > 1 / (4 * np.pi)
++        assert result["grid"]["reference_mass_exact"] == pytest.approx(1, abs=1e-14)
++        assert result["grid"]["nf_mass_midpoint_estimate"] == pytest.approx(1, abs=1e-14)
++
++
++@pytest.mark.parametrize("bad_value", [math.nan, math.inf, -math.inf, -800.0, 800.0])
++def test_invalid_nf_grid_fails_without_floor_or_mode_change(tmp_path, bad_value):
++    write_rainbow_fixture(tmp_path / "record")
++    with RainbowReference(tmp_path / "record") as record:
++        model = DirectionalDensity(record, invalid_log_pdf=bad_value)
++        with pytest.raises(FloatingPointError, match="NF"):
++            evaluate_rainbow_grid(model, record, batch_size=5)
++        assert model.training
++
++
++@pytest.mark.parametrize(
++    "kwargs",
++    [
++        {"cdf_samples": 0},
++        {"cdf_samples": True},
++        {"seed": -1},
++        {"eval_batch_size": 0},
++        {"dpi": 0},
++        {"write_pdf": 1},
++    ],
++)
++def test_plot_config_rejects_invalid_parameters(kwargs):
++    with pytest.raises(ValueError):
++        RainbowPlotConfig(**kwargs)
++
++
++@pytest.mark.cuda
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device is not available")
++def test_grid_uses_cuda_for_inference_and_matches_cpu(tmp_path):
++    write_rainbow_fixture(tmp_path / "record")
++    with RainbowReference(tmp_path / "record") as record:
++        cpu = DirectionalDensity(record)
++        gpu = DirectionalDensity(record, device="cuda")
++        on_cpu = evaluate_rainbow_grid(cpu, record, batch_size=5)
++        on_gpu = evaluate_rainbow_grid(gpu, record, batch_size=5)
++        assert all(call[1].type == "cuda" for call in gpu.calls)
++        np.testing.assert_allclose(on_cpu.nf_pdf, on_gpu.nf_pdf, rtol=2e-14)
+diff --git a/tests/test_single_condition.py b/tests/test_single_condition.py
+index 4664c49978937c893cc29fbdeef5b7d495e63290..c85425c1eae0eebfcc6665768c5434f61a12456d 100644
+--- a/tests/test_single_condition.py
++++ b/tests/test_single_condition.py
+@@ -7,6 +7,7 @@ from __future__ import annotations
+ 
+ import json
+ from dataclasses import replace
++from functools import partial
+ 
+ import numpy as np
+ import pytest
+@@ -27,6 +28,10 @@ from phaseflow.single_condition import (
+ from phaseflow.sphere_model import SingleConditionSphereFlow, SphereFlowConfig
+ from phaseflow.training import load_model_checkpoint
+ 
++# Most numerical tests do not need four raster figures for every short run.
++# The CLI integration below exercises automatic plotting with the real default.
++train_single_condition = partial(train_single_condition, make_plots=False)
++
+ 
+ def smooth_teacher(path, *, isotropic=False):
+     """Exact cell integrals of (1+b mu)(1-a cos(2 phi_source))/(4 pi)."""
+@@ -42,6 +47,8 @@ def smooth_teacher(path, *, isotropic=False):
+ 
+ def small_config(**changes):
+     config = SingleTrainingConfig(
++        device="cpu",
++        dtype="float64",
+         train_samples=2048,
+         validation_samples=2048,
+         test_samples=2048,
+@@ -84,7 +91,7 @@ def test_training_improves_independent_kl_and_preserves_external_g(tmp_path):
+         assert test["base_g"] == record.g
+         assert 0 < test["proposal"]["relative_ess"] <= 1.00000000001
+         assert test["proposal"]["sample_eval_log_pdf_max_abs_error"] < 1e-9
+-        restored, checkpoint = load_single_checkpoint(result.best_path)
++        restored, checkpoint = load_single_checkpoint(result.best_path, device="cpu")
+         assert_state_equal(restored.state_dict(), result.model.state_dict())
+         assert checkpoint["kind"] == "inference"
+         assert checkpoint["global_step"] == result.metrics["selected_step"]
+@@ -115,7 +122,7 @@ def test_controlled_resume_exact_and_does_not_use_test_early(tmp_path):
+         assert_state_equal(a["best_state"], b["best_state"])
+         assert a["history"] == b["history"]
+         assert full.metrics == continued.metrics
+-        assert a["minibatch_rng_state"] == b["minibatch_rng_state"]
++        assert torch.equal(a["minibatch_rng_state"], b["minibatch_rng_state"])
+         with pytest.raises(ValueError, match="inference-only"):
+             train_single_condition(
+                 record, small_model(), cfg, tmp_path / "invalid", resume=continued.best_path
+@@ -180,6 +187,7 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
+                 "family": FAMILY,
+                 "model": small_model().to_dict(),
+                 "training": small_config(steps=2).to_dict(),
++                "visualization": {"cdf_samples": 128, "dpi": 80},
+             }
+         )
+     )
+@@ -204,6 +212,10 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
+     )
+     trained = json.loads(capsys.readouterr().out)
+     assert trained["complete"] is True
++    plot_manifest = json.loads((run / "plots/plots.json").read_text())
++    assert plot_manifest["selected_step"] == trained["metrics"]["selected_step"]
++    for name in ("reference_pdf.png", "cdf_samples.png", "nf_pdf.png", "comparison.png"):
++        assert (run / "plots" / name).is_file()
+     report_path = tmp_path / "evaluation.json"
+     assert (
+         main(
+@@ -215,6 +227,8 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
+                 str(run / "best.pt"),
+                 "--samples",
+                 "128",
++                "--device",
++                "cpu",
+                 "--seed",
+                 "19",
+                 "--output",
+@@ -228,10 +242,51 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
+     assert report["sample_count"] == 128 and report["scope"] == "independent_points_same_condition"
+     with pytest.raises(ValueError, match="Native/OptiX export"):
+         load_model_checkpoint(run / "best.pt")
+-    model, _ = load_single_checkpoint(run / "best.pt")
++    model, _ = load_single_checkpoint(run / "best.pt", device="cpu")
+     with pytest.raises(ValueError, match="new native format"):
+         export_model(model, tmp_path / "unsupported_export")
+     assert not (tmp_path / "unsupported_export").exists()
++    assert main([
++        "plot-rainbow", "--record", str(record_path), "--checkpoint", str(run / "best.pt"),
++        "--output", str(tmp_path / "replot"), "--device", "cpu", "--samples", "128",
++        "--dpi", "80",
++    ]) == 0
++    replotted = json.loads(capsys.readouterr().out)
++    assert replotted["selected_step"] == trained["metrics"]["selected_step"]
++
++
++def test_nonfinite_update_does_not_overwrite_valid_checkpoint(tmp_path, monkeypatch):
++    """A GPU-style deferred finite check must keep the previous saved boundary."""
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
++        cfg = small_config(steps=8)
++        output = tmp_path / "run"
++        partial_run = train_single_condition(
++            record, small_model(), cfg, output, max_steps_this_run=4
++        )
++        before = partial_run.checkpoint_path.read_bytes()
++        original_step = torch.optim.Adam.step
++
++        def invalid_step(optimizer, *args, **kwargs):
++            result = original_step(optimizer, *args, **kwargs)
++            with torch.no_grad():
++                optimizer.param_groups[0]["params"][0].fill_(float("nan"))
++            return result
++
++        monkeypatch.setattr(torch.optim.Adam, "step", invalid_step)
++        with pytest.raises(FloatingPointError, match="nonfinite.*update"):
++            train_single_condition(
++                record, small_model(), cfg, output, resume=partial_run.checkpoint_path
++            )
++        assert before == partial_run.checkpoint_path.read_bytes()
++
++
++def test_incomplete_training_does_not_create_final_plots(tmp_path):
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
++        output = tmp_path / "run"
++        result = train_single_condition(
++            record, small_model(), small_config(), output, max_steps_this_run=1, make_plots=True
++        )
++        assert not result.complete and not (output / "plots").exists()
+ 
+ 
+ @pytest.mark.parametrize(
+diff --git a/tests/test_sphere_model.py b/tests/test_sphere_model.py
+index 9a0175c571972fde8ea8148c8bf76b8c368cd16d..4c8477e7aebe320cdce1513912a9bc427ded3f23 100644
+--- a/tests/test_sphere_model.py
++++ b/tests/test_sphere_model.py
+@@ -11,13 +11,19 @@ from phaseflow.hg import hg_icdf, hg_log_prob
+ from phaseflow.sphere_model import SingleConditionSphereFlow, SphereFlowConfig
+ 
+ 
+-def make_model(*, g=0.35, eta=0.2, reflected=True, dtype=torch.float64, perturb=True):
++def make_model(
++    *, g=0.35, eta=0.2, reflected=True, dtype=torch.float64, spline_dtype="model", perturb=True
++):
+     torch.manual_seed(802)
+     model = SingleConditionSphereFlow(
+         g,
+         eta,
+         SphereFlowConfig(
+-            hidden_features=(12,), num_bins=8, num_coupling_layers=4, mirror_symmetry=reflected
++            hidden_features=(12,),
++            num_bins=8,
++            num_coupling_layers=4,
++            mirror_symmetry=reflected,
++            spline_dtype=spline_dtype,
+         ),
+         dtype=dtype,
+     )
+@@ -180,6 +186,72 @@ def test_external_physics_round_trips_exactly_and_never_downcasts_with_weights()
+     assert SphereFlowConfig.from_dict(restored.config.to_dict()) == restored.config
+ 
+ 
++def test_hg_device_cache_preserves_binary64_physics_across_dtype_moves_and_deepcopy():
++    g = 0.999_999_971_283_746
++    model = make_model(g=g, spline_dtype="float64")
++    expected_bits = torch.tensor(g, dtype=torch.float64).view(torch.int64)
++
++    def check_cached_physics(candidate):
++        assert candidate.hg_g == g
++        assert candidate._hg_coefficient.dtype == torch.float64
++        assert candidate._hg_coefficient.device == candidate.device
++        assert torch.equal(candidate._hg_coefficient.cpu().view(torch.int64), expected_bits)
++        assert "_hg_coefficient" not in candidate.state_dict()
++        mu = torch.tensor([-0.31, 0.72, 1 - 2**-32], dtype=torch.float64)
++        torch.testing.assert_close(
++            candidate.hg_base_log_prob(mu).cpu(), hg_log_prob(mu, g), rtol=0, atol=0
++        )
++
++    check_cached_physics(model)
++    check_cached_physics(model.float())
++    check_cached_physics(model.double())
++    check_cached_physics(model.to("cpu", dtype=torch.float32))
++    copied = copy.deepcopy(model)
++    check_cached_physics(copied)
++    assert copied._hg_coefficient.data_ptr() != model._hg_coefficient.data_ptr()
++
++
++def test_loading_physics_refreshes_the_nonpersistent_hg_cache():
++    source = make_model(g=-0.918_372_645_091_827, spline_dtype="float64")
++    target = make_model(g=0.0, spline_dtype="float64", dtype=torch.float32)
++    target.set_extra_state(copy.deepcopy(source.get_extra_state()))
++    assert target.hg_g == source.hg_g
++    assert target._hg_coefficient.item() == source.hg_g
++    assert target._hg_coefficient.dtype == torch.float64
++    replacement = make_model(g=0.731_982_734_651_092, spline_dtype="float64")
++    target.load_state_dict(replacement.state_dict())
++    assert target.hg_g == replacement.hg_g
++    assert target._hg_coefficient.item() == replacement.hg_g
++    assert target._hg_coefficient.dtype == torch.float64
++    assert target.dtype == torch.float32
++    assert "_hg_coefficient" not in target.state_dict()
++
++
++def test_hg_calls_reuse_cached_device_scalar_without_per_call_scalar_construction(monkeypatch):
++    model = make_model(dtype=torch.float32, spline_dtype="float64")
++    model.validate_args = False
++    uniforms = torch.tensor([[0.19, 0.24], [0.67, 0.83]], dtype=torch.float64)
++    original_as_tensor = torch.as_tensor
++    cached_pointer = model._hg_coefficient.data_ptr()
++
++    def tensor_input_only(value, *args, **kwargs):
++        assert isinstance(value, torch.Tensor), "per-call scalar construction can copy CPU -> CUDA"
++        return original_as_tensor(value, *args, **kwargs)
++
++    def no_tensor_construction(*_args, **_kwargs):
++        pytest.fail("the fixed HG coefficient must not be recreated during model arithmetic")
++
++    with monkeypatch.context() as context:
++        context.setattr(torch, "as_tensor", tensor_input_only)
++        context.setattr(torch, "tensor", no_tensor_construction)
++        directions, logp = model.sample_from_uniform(uniforms)
++        evaluated = model.log_prob(directions)
++        baseline = model.hg_base_log_prob(directions[:, 2])
++    assert model._hg_coefficient.data_ptr() == cached_pointer
++    assert bool(torch.isfinite(baseline).all())
++    torch.testing.assert_close(logp, evaluated, rtol=0, atol=3e-12)
++
++
+ def test_exact_poles_use_canonical_azimuth_and_rounded_samples_are_reported():
+     model = make_model()
+     directions = torch.tensor(
+@@ -224,3 +296,160 @@ def test_float32_uniform_conversion_reports_representation_failure_separately():
+     model.validate_args = False
+     directions, logp = model.sample_from_uniform(precise)
+     assert bool(torch.isnan(directions).all()) and bool(torch.isnan(logp).all())
++
++
++@pytest.mark.parametrize("reflected", [False, True])
++@pytest.mark.parametrize("g", [-0.995, 0.995])
++def test_float32_conditioners_keep_double_precision_cylinder_round_trips(reflected, g):
++    model = make_model(
++        g=g, reflected=reflected, dtype=torch.float32, spline_dtype="float64"
++    )
++    u = 0.98 * torch.rand(251, 2, dtype=torch.float64) + 0.01
++    transformed, logdet = model._run_couplings(u, inverse=False)
++    restored, reverse = model._run_couplings(transformed, inverse=True)
++    assert model.dtype == torch.float32 and model.spline_dtype == torch.float64
++    assert transformed.dtype == logdet.dtype == torch.float64
++    torch.testing.assert_close(restored, u, rtol=0, atol=3e-13)
++    torch.testing.assert_close(logdet + reverse, torch.zeros_like(logdet), rtol=0, atol=3e-12)
++    directions, logp = model.sample_from_uniform(u)
++    torch.testing.assert_close(logp, model.log_prob(directions), rtol=0, atol=8e-9)
++
++
++def test_double_precision_splines_accept_uniforms_unrepresentable_in_float32():
++    model = make_model(g=0.0, dtype=torch.float32, spline_dtype="float64", perturb=False)
++    u = torch.tensor([[1 - 2**-26, 1 - 2**-40]], dtype=torch.float64)
++    assert bool((u.float() == 1).all())
++    directions, logp = model.sample_from_uniform(u)
++    assert bool(torch.isfinite(directions).all() & torch.isfinite(logp).all())
++    assert bool((directions[:, 2].abs() < 1).all())
++    torch.testing.assert_close(logp, model.log_prob(directions), rtol=0, atol=8e-13)
++
++
++def test_mixed_precision_random_sampling_keeps_the_double_precision_uniform_stream():
++    # Equal weights, with only their dtype changed, must retain the same
++    # externally reproducible base stream when both use float64 coordinates.
++    mixed = make_model(dtype=torch.float32, spline_dtype="float64")
++    full_double = copy.deepcopy(mixed).double()
++    mixed_samples, _ = mixed.sample_and_log_prob(
++        37, generator=torch.Generator().manual_seed(591)
++    )
++    double_samples, _ = full_double.sample_and_log_prob(
++        37, generator=torch.Generator().manual_seed(591)
++    )
++    torch.testing.assert_close(mixed_samples, double_samples, rtol=0, atol=2e-7)
++
++
++def test_mixed_precision_preserves_reflection_and_periodic_seam():
++    model = make_model(dtype=torch.float32, spline_dtype="float64")
++    u = torch.tensor([[0.19, 0.16], [0.51, 0.36], [0.87, 0.71]], dtype=torch.float64)
++    reflected_u = torch.stack((u[:, 0], 1 - u[:, 1]), -1)
++    directions, logp = model.sample_from_uniform(u)
++    reflected_directions, reflected_logp = model.sample_from_uniform(reflected_u)
++    torch.testing.assert_close(
++        reflected_directions, directions * torch.tensor([1.0, -1.0, 1.0]), rtol=0, atol=3e-13
++    )
++    torch.testing.assert_close(reflected_logp, logp, rtol=0, atol=3e-12)
++    seam = torch.tensor([[0.27, 0.0], [0.27, 1.0]], dtype=torch.float64)
++    transformed, logdet = model._run_couplings(seam, inverse=False)
++    torch.testing.assert_close(transformed[0, 0], transformed[1, 0], rtol=0, atol=0)
++    torch.testing.assert_close(transformed[:, 1], seam[:, 1], rtol=0, atol=0)
++    torch.testing.assert_close(logdet[0], logdet[1], rtol=0, atol=3e-14)
++
++
++@pytest.mark.parametrize("eta", [-1.0, 1.0])
++def test_mixed_precision_preserves_axial_incidence_invariance(eta):
++    model = make_model(eta=eta, dtype=torch.float32, spline_dtype="float64")
++    phi = torch.linspace(-math.pi, math.pi, 41, dtype=torch.float64)
++    directions = directions_from_angles(torch.tensor(0.37, dtype=torch.float64), phi)
++    logp = model.log_prob(directions)
++    torch.testing.assert_close(logp, logp[0].expand_as(logp), rtol=0, atol=3e-15)
++
++
++def test_mixed_precision_training_gradients_agree_with_double_precision_reference():
++    mixed = make_model(dtype=torch.float32, spline_dtype="float64")
++    full_double = copy.deepcopy(mixed).double()
++    mu = torch.linspace(-0.9, 0.9, 97, dtype=torch.float64)
++    phi = torch.linspace(-2.9, 2.9, 97, dtype=torch.float64)
++    directions = directions_from_angles(mu, phi)
++    mixed_loss = -mixed.log_prob(directions).mean()
++    reference_loss = -full_double.log_prob(directions).mean()
++    torch.testing.assert_close(mixed_loss, reference_loss, rtol=0, atol=2e-7)
++    mixed_loss.backward()
++    reference_loss.backward()
++    for parameter, reference_parameter in zip(mixed.parameters(), full_double.parameters()):
++        assert parameter.grad is not None and reference_parameter.grad is not None
++        assert parameter.grad.dtype == torch.float32
++        assert bool(torch.isfinite(parameter.grad).all())
++        torch.testing.assert_close(
++            parameter.grad.double(), reference_parameter.grad, rtol=5e-4, atol=3e-7
++        )
++
++
++def test_old_checkpoint_missing_spline_dtype_retains_its_original_precision():
++    original = make_model(dtype=torch.float32)
++    old_state = copy.deepcopy(original.state_dict())
++    old_state["_extra_state"]["config"].pop("spline_dtype")
++    old_config = SphereFlowConfig.from_dict(old_state["_extra_state"]["config"])
++    assert old_config.spline_dtype == "model"
++    restored = SingleConditionSphereFlow(0.0, 0.0, old_config, dtype=torch.float32)
++    restored.load_state_dict(old_state)
++    assert restored.spline_dtype == torch.float32
++    assert restored.hg_g == original.hg_g
++    u = torch.tensor([[0.2, 0.3], [0.6, 0.7]], dtype=torch.float32)
++    for actual, expected in zip(restored.sample_from_uniform(u), original.sample_from_uniform(u)):
++        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
++    mixed = make_model(dtype=torch.float32, spline_dtype="float64")
++    with pytest.raises(ValueError, match="configuration differs"):
++        mixed.load_state_dict(old_state)
++    with pytest.raises(ValueError, match="spline_dtype"):
++        SphereFlowConfig(spline_dtype="float16")
++
++
++def test_trusted_sampling_evaluation_and_backward_do_not_read_host_scalars(monkeypatch):
++    model = make_model(dtype=torch.float32, spline_dtype="float64")
++    model.validate_args = False
++    u = torch.tensor([[0.2, 0.3], [0.6, 0.7]], dtype=torch.float64)
++
++    def scalar_read_forbidden(*_args, **_kwargs):
++        raise AssertionError("trusted flow arithmetic must not synchronize tensor scalars")
++
++    with monkeypatch.context() as context:
++        for name in ("__bool__", "__float__", "__int__", "item"):
++            context.setattr(torch.Tensor, name, scalar_read_forbidden)
++        directions, logp = model.sample_from_uniform(u)
++        evaluated = model.log_prob(directions.detach())
++        (-evaluated.mean()).backward()
++    torch.testing.assert_close(logp, evaluated, rtol=0, atol=3e-12)
++
++
++@pytest.mark.cuda
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device is unavailable")
++def test_cuda_mixed_precision_sampling_evaluation_and_gradient_parity():
++    cpu = make_model(dtype=torch.float32, spline_dtype="float64")
++    cuda = copy.deepcopy(cpu).cuda()
++    assert cuda._hg_coefficient.device == cuda.device
++    assert cuda._hg_coefficient.dtype == torch.float64
++    assert cuda._hg_coefficient.item() == cpu.hg_g
++    cpu.validate_args = cuda.validate_args = False
++    u = torch.tensor([[0.12, 0.08], [0.31, 0.4], [0.68, 0.83]], dtype=torch.float64)
++    previous_tf32 = torch.backends.cuda.matmul.allow_tf32
++    try:
++        torch.backends.cuda.matmul.allow_tf32 = False
++        cpu_directions, cpu_logp = cpu.sample_from_uniform(u)
++        cuda_directions, cuda_logp = cuda.sample_from_uniform(u.cuda())
++        torch.testing.assert_close(cuda_directions.cpu(), cpu_directions, rtol=0, atol=3e-7)
++        torch.testing.assert_close(cuda_logp.cpu(), cpu_logp, rtol=0, atol=3e-6)
++        cpu_loss = -cpu.log_prob(cpu_directions.detach()).mean()
++        # Evaluate identical physical directions when comparing training gradients.
++        cuda_loss = -cuda.log_prob(cpu_directions.detach().cuda()).mean()
++        cpu_loss.backward()
++        cuda_loss.backward()
++        for cpu_parameter, cuda_parameter in zip(cpu.parameters(), cuda.parameters()):
++            torch.testing.assert_close(
++                cuda_parameter.grad.cpu(), cpu_parameter.grad, rtol=5e-4, atol=3e-6
++            )
++        torch.testing.assert_close(
++            cuda_logp, cuda.log_prob(cuda_directions), rtol=0, atol=3e-6
++        )
++    finally:
++        torch.backends.cuda.matmul.allow_tf32 = previous_tf32

@@ -9,12 +9,13 @@
     "min_bin_width": 0.00001,
     "min_bin_height": 0.00001,
     "min_derivative": 0.0001,
-    "activation": "silu"
+    "activation": "silu",
+    "spline_dtype": "float64"
   },
   "training": {
     "seed": 415,
-    "device": "cpu",
-    "dtype": "float64",
+    "device": "cuda",
+    "dtype": "float32",
     "train_samples": 65536,
     "validation_samples": 32768,
     "test_samples": 65536,
@@ -28,5 +29,13 @@
     "grad_clip_norm": 10.0,
     "deterministic": true,
     "cpu_threads": 1
+  },
+  "visualization": {
+    "enabled": true,
+    "cdf_samples": 32768,
+    "seed": 2027,
+    "eval_batch_size": 16384,
+    "dpi": 160,
+    "write_pdf": false
   }
 }

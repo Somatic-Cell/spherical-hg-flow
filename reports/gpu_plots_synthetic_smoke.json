@@ -1,0 +1,631 @@
+{
+  "cuda_validation": "not_run_no_cuda_device",
+  "metrics": {
+    "best_validation": {
+      "base_g": 0.1987210964506126,
+      "density_measure": "solid_angle_sr",
+      "forward_kl_estimate": 0.010719058964159624,
+      "forward_kl_standard_error": 0.0033901916995245323,
+      "hg_forward_kl_estimate": 0.10459056125467867,
+      "hg_forward_kl_standard_error": 0.009995875180784665,
+      "hg_nll": 2.466448306781237,
+      "nll": 2.3725768044907185,
+      "nll_improvement_over_hg": 0.09387150229051905,
+      "nll_improvement_standard_error": 0.009631855290047639,
+      "nll_standard_error": 0.011619125869885855,
+      "sample_count": 2048,
+      "target_entropy_estimate": 2.3618577455265592,
+      "target_g": 0.1987210964506126
+    },
+    "complete": true,
+    "condition": {
+      "hg_g": 0.1987210964506126,
+      "incident_cosine": 0.3420201433256687,
+      "wavelength_nm": 550.0
+    },
+    "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+    "family": "rainbow_single_condition",
+    "generalization_scope": "same condition only; no claim about unseen wavelength/incidence",
+    "global_step": 100,
+    "initial_validation": {
+      "base_g": 0.1987210964506126,
+      "density_measure": "solid_angle_sr",
+      "forward_kl_estimate": 0.1045905613713031,
+      "forward_kl_standard_error": 0.009995875178452263,
+      "hg_forward_kl_estimate": 0.10459056125467867,
+      "hg_forward_kl_standard_error": 0.009995875180784665,
+      "hg_nll": 2.466448306781237,
+      "nll": 2.466448306897862,
+      "nll_improvement_over_hg": -1.1662442962311753e-10,
+      "nll_improvement_standard_error": 9.399056055081066e-11,
+      "nll_standard_error": 0.007311492623285149,
+      "sample_count": 2048,
+      "target_entropy_estimate": 2.3618577455265592,
+      "target_g": 0.1987210964506126
+    },
+    "selected_step": 100,
+    "selection": "minimum validation NLL at scheduled evaluations",
+    "test": {
+      "base_g": 0.1987210964506126,
+      "code_fingerprint": "372fb5c5e46a6a2a6166026ca1344f3b6d0756fd7fda753408a550b382d9e63d",
+      "condition": {
+        "incident_cosine": 0.3420201433256687,
+        "wavelength_nm": 550.0
+      },
+      "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+      "density_measure": "solid_angle_sr",
+      "forward_kl_estimate": 0.009576937004733953,
+      "forward_kl_standard_error": 0.0032730340320496726,
+      "hg_forward_kl_estimate": 0.11011204080547592,
+      "hg_forward_kl_standard_error": 0.009653351010246355,
+      "hg_nll": 2.4676223285127943,
+      "nll": 2.3670872247120522,
+      "nll_improvement_over_hg": 0.10053510380074196,
+      "nll_improvement_standard_error": 0.009402249432198868,
+      "nll_standard_error": 0.0114662058964362,
+      "precision": {
+        "conditioner": "float32",
+        "hg_geometry_log_pdf": "float64",
+        "spline": "float64"
+      },
+      "proposal": {
+        "ess_definition": "sum(w)^2 / (N * sum(w^2)); w=p_omega/q_omega",
+        "importance_weight_mean": 1.002321630773301,
+        "learned_moment_error": -0.0022352711686524362,
+        "learned_moment_estimate": 0.19648582528196015,
+        "learned_moment_standard_error": 0.023301489776837346,
+        "log_importance_weight_mean": 0.002318939952500765,
+        "reference_support_hits": 512,
+        "relative_ess": 0.9756543528743097,
+        "sample_count": 512,
+        "sample_eval_log_pdf_max_abs_error": 2.6645352591003757e-15,
+        "status": "ok",
+        "uniform_midpoint_bits": 52
+      },
+      "runtime": {
+        "cpu_threads": 1,
+        "deterministic_algorithms": true,
+        "device": "cpu",
+        "dtype": "float32",
+        "matmul_allow_tf32": false,
+        "numpy_version": "2.5.3",
+        "package_version": "0.3.0",
+        "python_version": "3.12.14",
+        "torch_version": "2.8.0+cpu",
+        "zuko_version": "1.6.0"
+      },
+      "sample_count": 2048,
+      "scope": "final_independent_test_points_same_condition",
+      "seed": 415,
+      "target_entropy_estimate": 2.3575102877073184,
+      "target_g": 0.1987210964506126
+    }
+  },
+  "model": {
+    "activation": "silu",
+    "hidden_features": [
+      16,
+      16
+    ],
+    "min_bin_height": 1e-05,
+    "min_bin_width": 1e-05,
+    "min_derivative": 0.0001,
+    "mirror_symmetry": true,
+    "num_bins": 8,
+    "num_coupling_layers": 2,
+    "spline_dtype": "float64"
+  },
+  "plot_metadata": {
+    "base_g": 0.1987210964506126,
+    "checkpoint": {
+      "path": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/runs/gpu_plots_synthetic/training/best.pt",
+      "sha256": "2d5fd175d8309546579629fda0eef7d2597927bf56ce6af482e071e79f05ce0e"
+    },
+    "color_scale": {
+      "colormap": "viridis",
+      "density_floor": null,
+      "limits": "joint_positive_extrema; rounding-level_constant_fields_padded_only_for_display",
+      "normalization": "matplotlib.colors.LogNorm",
+      "percentile_clipping": false,
+      "shared_between": [
+        "reference_pdf",
+        "nf_pdf"
+      ],
+      "vmax": 0.205611032072011,
+      "vmin": 0.012247347446778996,
+      "zero_color": "#d2d6dc"
+    },
+    "condition": [
+      550.0,
+      0.3420201433256687
+    ],
+    "configuration": {
+      "cdf_samples": 32768,
+      "dpi": 160,
+      "eval_batch_size": 16384,
+      "seed": 2027,
+      "write_pdf": false
+    },
+    "coordinates": {
+      "axes_width_over_height": 2.0,
+      "data_aspect": "one_degree_x_equals_one_degree_y",
+      "density_measure": "solid_angle_sr",
+      "equal_area": false,
+      "frame": "recorded_solver_source",
+      "scatter_chart_density": "p_per_sr * sin(theta); not p_per_sr alone",
+      "source_to_nf": [
+        [
+          -0.0,
+          1.0,
+          0.0
+        ],
+        [
+          -1.0,
+          -0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "theta_zero": "forward_at_top",
+      "x": "source_azimuth_phi_degrees",
+      "x_limits": [
+        -180.0,
+        180.0
+      ],
+      "y": "scattering_theta_degrees",
+      "y_limits": [
+        180.0,
+        0.0
+      ]
+    },
+    "data_provenance": {
+      "density_measure": "solid_angle_sr",
+      "files": {
+        "metadata.json": {
+          "bytes": 2042,
+          "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+        },
+        "phi_cdf.npy": {
+          "bytes": 328,
+          "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+        },
+        "theta_given_phi_cdf.npy": {
+          "bytes": 3392,
+          "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+        },
+        "u_edges.npy": {
+          "bytes": 264,
+          "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+        }
+      },
+      "metadata": {
+        "azimuth_periodic": true,
+        "cdf_axis_order": [
+          "phi_cell",
+          "theta_edge"
+        ],
+        "cell_model": "constant_density_per_spherical_cell",
+        "complete": true,
+        "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+        "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+        "density_measure": "solid_angle_sr",
+        "diffraction_policy": {
+          "computed": false
+        },
+        "direction_convention": "physical_propagation",
+        "dtype": "<f8",
+        "hg": {
+          "axis_particle_frame": [
+            0.9396926207859084,
+            -0.3420201433256687,
+            0.0
+          ],
+          "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+          "g": 0.1987210964506126,
+          "g_source": 0.73,
+          "method": "first_moment_of_saved_cell_pdf",
+          "target": "saved_cdf"
+        },
+        "incident_inclination_degrees": 20.0,
+        "input_polarization": "unpolarized",
+        "material": {
+          "wavelength_convention": "vacuum_nm"
+        },
+        "normalization": "integral_p_domega_equals_one",
+        "order": "C",
+        "particle_frame_handedness": "right",
+        "particle_up_axis": [
+          0,
+          1,
+          0
+        ],
+        "phi_count": 24,
+        "phi_range_rad": [
+          -3.141592653589793,
+          3.141592653589793
+        ],
+        "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+        "quality": {
+          "allow_underresolved": true,
+          "angular_convergence_certified": false
+        },
+        "sampling_frame_columns": [
+          [
+            0.0,
+            -0.3420201433256687,
+            0.9396926207859084
+          ],
+          [
+            0.0,
+            -0.9396926207859084,
+            -0.3420201433256687
+          ],
+          [
+            1.0,
+            0.0,
+            0.0
+          ]
+        ],
+        "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+        "sampling_frame_map": "local_column_to_particle_column",
+        "schema": "rainbow.phase_cdf.numpy.v2",
+        "shape_polar_axis": [
+          0,
+          -1,
+          0
+        ],
+        "source_commit": "synthetic_fixture_no_solver_commit",
+        "source_dirty_at_configure": false,
+        "storage_processing": {
+          "additional_filter": "none",
+          "coarsening_tv": 0.04
+        },
+        "theta_count": 16,
+        "theta_pi": "backward",
+        "theta_zero": "forward",
+        "wavelength_nm": 550.0
+      },
+      "nf_frame_columns": [
+        [
+          -0.3420201433256687,
+          0.0,
+          0.9396926207859084
+        ],
+        [
+          -0.9396926207859084,
+          0.0,
+          -0.3420201433256687
+        ],
+        [
+          0.0,
+          -1.0,
+          0.0
+        ]
+      ],
+      "pole_pdf_representative": "source_phi_zero",
+      "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/runs/gpu_plots_synthetic/record",
+      "saved_g_check": 0.19872109645061267,
+      "saved_mass_check": 1.0,
+      "schema": "phaseflow.rainbow_reference.v1",
+      "source_repository": "https://github.com/Somatic-Cell/rainbow",
+      "source_to_nf": [
+        [
+          -0.0,
+          1.0,
+          0.0
+        ],
+        [
+          -1.0,
+          -0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "uniform_domain": "[0,1)",
+      "uniform_order": [
+        "phi_marginal",
+        "u_given_phi"
+      ]
+    },
+    "dataset_fingerprint": "a125fa27f345e98cfbba269e73aa45e695d143769d6d62add39974bf6d001ab9",
+    "figures": {
+      "comparison_axes_rectangles": [
+        [
+          0.038,
+          0.29,
+          0.276,
+          0.46741935483870967
+        ],
+        [
+          0.35,
+          0.29,
+          0.276,
+          0.46741935483870967
+        ],
+        [
+          0.662,
+          0.29,
+          0.276,
+          0.46741935483870967
+        ]
+      ],
+      "comparison_size_inches": [
+        21.0,
+        6.2
+      ],
+      "display_note": "PNG raster pixels may combine native cells narrower than a pixel.",
+      "individual_axes_rectangle": [
+        0.09,
+        0.19,
+        0.77,
+        0.6243243243243243
+      ],
+      "individual_size_inches": [
+        12.0,
+        7.4
+      ]
+    },
+    "files": {
+      "cdf_samples": [
+        "cdf_samples.png"
+      ],
+      "comparison": [
+        "comparison.png"
+      ],
+      "nf_pdf": [
+        "nf_pdf.png"
+      ],
+      "reference_pdf": [
+        "reference_pdf.png"
+      ]
+    },
+    "grid": {
+      "array_order": [
+        "theta_cell",
+        "phi_cell"
+      ],
+      "nf_mass_midpoint_estimate": 0.9958057756047414,
+      "nf_mass_warning": "Native-cell midpoint quadrature only; this is not an exact normalization test and can miss NF structure inside a cell. No density renormalization is applied.",
+      "nf_pdf": "point_values_not_cell_averages",
+      "nf_pdf_sha256": "b43ae28d427c82c2eb8b5f9809712de8924932383577f7309d7c52b56985b280",
+      "phi_count": 24,
+      "point_evaluation": "midpoint_in_u_and_source_phi",
+      "reference_mass_exact": 1.0,
+      "reference_pdf": "exact_saved_cell_mass_divided_by_cell_solid_angle",
+      "reference_pdf_sha256": "6c8f0d415dbef514ed2839cb7862e5f39d5420857875a231736ed2e15b3d769e",
+      "resolution": "full_native_cdf_cells_no_angular_downsampling",
+      "theta_count": 16,
+      "theta_edges": "2*atan2(sqrt(u_edges),sqrt(1-u_edges))",
+      "zero_reference_cells": 0
+    },
+    "model": {
+      "configuration": {
+        "activation": "silu",
+        "hidden_features": [
+          16,
+          16
+        ],
+        "min_bin_height": 1e-05,
+        "min_bin_width": 1e-05,
+        "min_derivative": 0.0001,
+        "mirror_symmetry": true,
+        "num_bins": 8,
+        "num_coupling_layers": 2,
+        "spline_dtype": "float64"
+      },
+      "density_evaluation_dtype": "torch.float64",
+      "device": "cpu",
+      "family": "single_condition_circular_hg",
+      "parameter_dtype": "torch.float32"
+    },
+    "scatter": {
+      "rng": "numpy.PCG64(SeedSequence([seed,stream_id]))",
+      "sample_count": 32768,
+      "seed": 2027,
+      "source": "stored_cdf_independent_diagnostic_stream",
+      "source_phi_degrees_sha256": "6a4b8d67c02f29d9062af241bf9d0dc2153a3a255e8cc2411198b2d225a90b50",
+      "stream_id": 100,
+      "theta_degrees_sha256": "7d8fdd031321e7f352731053d1493ca3a3163891d506fac84232276bf8c86b70",
+      "uniform_midpoint_bits": 52
+    },
+    "schema": "phaseflow.rainbow_plots.v1",
+    "selected_step": 100,
+    "source_kind": "synthetic_fixture",
+    "title": "Synthetic fixture | 550 nm; incident inclination 20 degrees\nValidation-selected model (step 100)"
+  },
+  "purpose": "synthetic_implementation_validation_not_rainbow_physics",
+  "renderer_optix_validation": "not_run",
+  "runtime": {
+    "cpu_threads": 1,
+    "deterministic_algorithms": true,
+    "device": "cpu",
+    "dtype": "float32",
+    "matmul_allow_tf32": false,
+    "numpy_version": "2.5.3",
+    "package_version": "0.3.0",
+    "python_version": "3.12.14",
+    "torch_version": "2.8.0+cpu",
+    "zuko_version": "1.6.0"
+  },
+  "source_base_commit": "0956c7d52b36ce2c704fdab82e447ff80efbbfe2",
+  "source_provenance": {
+    "density_measure": "solid_angle_sr",
+    "files": {
+      "metadata.json": {
+        "bytes": 2042,
+        "sha256": "1defde5974bb8c0e6a657c989af01b90e86d67190d42648a8a7923a7dd26683b"
+      },
+      "phi_cdf.npy": {
+        "bytes": 328,
+        "sha256": "370936b7096ed7f011a4178abb6f18d988290fbda0776169822020530b7d04b6"
+      },
+      "theta_given_phi_cdf.npy": {
+        "bytes": 3392,
+        "sha256": "2000f8ecca1c616a668d372b074d1ae088777e8e34c1ed6b25ef75d26c4c4cc4"
+      },
+      "u_edges.npy": {
+        "bytes": 264,
+        "sha256": "89fb43ebbb17a08ede09ccfff10bc7b18163c59d426850a5685e31988ebc9827"
+      }
+    },
+    "metadata": {
+      "azimuth_periodic": true,
+      "cdf_axis_order": [
+        "phi_cell",
+        "theta_edge"
+      ],
+      "cell_model": "constant_density_per_spherical_cell",
+      "complete": true,
+      "coordinate_contract_id": "rainbow.phase_cdf.coordinates.v1",
+      "coordinates": "u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)",
+      "density_measure": "solid_angle_sr",
+      "diffraction_policy": {
+        "computed": false
+      },
+      "direction_convention": "physical_propagation",
+      "dtype": "<f8",
+      "hg": {
+        "axis_particle_frame": [
+          0.9396926207859084,
+          -0.3420201433256687,
+          0.0
+        ],
+        "cosine_convention": "dot(incident_propagation,outgoing_propagation)",
+        "g": 0.1987210964506126,
+        "g_source": 0.73,
+        "method": "first_moment_of_saved_cell_pdf",
+        "target": "saved_cdf"
+      },
+      "incident_inclination_degrees": 20.0,
+      "input_polarization": "unpolarized",
+      "material": {
+        "wavelength_convention": "vacuum_nm"
+      },
+      "normalization": "integral_p_domega_equals_one",
+      "order": "C",
+      "particle_frame_handedness": "right",
+      "particle_up_axis": [
+        0,
+        1,
+        0
+      ],
+      "phi_count": 24,
+      "phi_range_rad": [
+        -3.141592653589793,
+        3.141592653589793
+      ],
+      "purpose": "synthetic arithmetic fixture; not a rainbow solver result",
+      "quality": {
+        "allow_underresolved": true,
+        "angular_convergence_certified": false
+      },
+      "sampling_frame_columns": [
+        [
+          0.0,
+          -0.3420201433256687,
+          0.9396926207859084
+        ],
+        [
+          0.0,
+          -0.9396926207859084,
+          -0.3420201433256687
+        ],
+        [
+          1.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "sampling_frame_layout": "rows_xyz_columns_e0_e1_k",
+      "sampling_frame_map": "local_column_to_particle_column",
+      "schema": "rainbow.phase_cdf.numpy.v2",
+      "shape_polar_axis": [
+        0,
+        -1,
+        0
+      ],
+      "source_commit": "synthetic_fixture_no_solver_commit",
+      "source_dirty_at_configure": false,
+      "storage_processing": {
+        "additional_filter": "none",
+        "coarsening_tv": 0.04
+      },
+      "theta_count": 16,
+      "theta_pi": "backward",
+      "theta_zero": "forward",
+      "wavelength_nm": 550.0
+    },
+    "nf_frame_columns": [
+      [
+        -0.3420201433256687,
+        0.0,
+        0.9396926207859084
+      ],
+      [
+        -0.9396926207859084,
+        0.0,
+        -0.3420201433256687
+      ],
+      [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    ],
+    "pole_pdf_representative": "source_phi_zero",
+    "record_directory": "/workspace/scratch/ae46757a28eb/spherical-hg-flow-gpu-plots/runs/gpu_plots_synthetic/record",
+    "saved_g_check": 0.19872109645061267,
+    "saved_mass_check": 1.0,
+    "schema": "phaseflow.rainbow_reference.v1",
+    "source_repository": "https://github.com/Somatic-Cell/rainbow",
+    "source_to_nf": [
+      [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      [
+        -1.0,
+        -0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "uniform_domain": "[0,1)",
+    "uniform_order": [
+      "phi_marginal",
+      "u_given_phi"
+    ]
+  },
+  "training": {
+    "batch_size": 256,
+    "checkpoint_every": 4,
+    "cpu_threads": 1,
+    "deterministic": true,
+    "device": "cpu",
+    "dtype": "float32",
+    "eval_batch_size": 512,
+    "eval_every": 20,
+    "grad_clip_norm": 10.0,
+    "learning_rate": 0.003,
+    "proposal_samples": 512,
+    "seed": 415,
+    "steps": 100,
+    "test_samples": 2048,
+    "train_samples": 2048,
+    "validation_samples": 2048
+  },
+  "training_code_fingerprint": "372fb5c5e46a6a2a6166026ca1344f3b6d0756fd7fda753408a550b382d9e63d"
+}

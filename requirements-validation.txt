@@ -9,3 +9,4 @@ ruff==0.16.10
 build==1.6.1
 setuptools==78.1.0
 wheel==0.48.0
+matplotlib==3.11.2

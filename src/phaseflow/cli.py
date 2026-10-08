@@ -62,6 +62,9 @@ def _parser() -> argparse.ArgumentParser:
     rainbow_train.add_argument("--resume", type=Path)
     rainbow_train.add_argument("--max-steps-this-run", type=int)
     rainbow_train.add_argument("--device")
+    rainbow_train.add_argument(
+        "--no-plots", action="store_true", help="explicitly skip plots after completed training"
+    )
     rainbow_train.add_argument("--quiet", action="store_true")
     rainbow_eval = commands.add_parser(
         "evaluate-rainbow", help="independent same-condition NLL, forward KL and importance ESS"
@@ -72,9 +75,22 @@ def _parser() -> argparse.ArgumentParser:
     rainbow_eval.add_argument("--proposal-samples", type=int)
     rainbow_eval.add_argument("--seed", type=int, default=2026)
     rainbow_eval.add_argument("--batch-size", type=int, default=4096)
-    rainbow_eval.add_argument("--device", default="cpu")
+    rainbow_eval.add_argument("--device", default="cuda")
     rainbow_eval.add_argument("--cpu-threads", type=int, default=1)
     rainbow_eval.add_argument("--output", type=Path)
+    rainbow_plot = commands.add_parser(
+        "plot-rainbow", help="aligned CDF PDF, CDF samples and NF PDF for one checkpoint"
+    )
+    rainbow_plot.add_argument("--record", required=True, type=Path)
+    rainbow_plot.add_argument("--checkpoint", required=True, type=Path)
+    rainbow_plot.add_argument("--output", "--output-dir", required=True, type=Path)
+    rainbow_plot.add_argument("--device", default="cuda")
+    rainbow_plot.add_argument("--samples", type=int, default=32768)
+    rainbow_plot.add_argument("--seed", type=int, default=2027)
+    rainbow_plot.add_argument("--batch-size", type=int, default=16384)
+    rainbow_plot.add_argument("--dpi", type=int, default=160)
+    rainbow_plot.add_argument("--write-pdf", action="store_true")
+    rainbow_plot.add_argument("--cpu-threads", type=int, default=1)
     demo = commands.add_parser(
         "demo",
         aliases=["make-demo"],
@@ -140,7 +156,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
-    if arguments.command in ("inspect-rainbow", "train-rainbow", "evaluate-rainbow"):
+    if arguments.command in (
+        "inspect-rainbow", "train-rainbow", "evaluate-rainbow", "plot-rainbow"
+    ):
         return _rainbow_main(arguments)
     if arguments.command in ("demo", "make-demo"):
         if arguments.output.exists():
@@ -247,11 +265,14 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
             _print_json(reference.summary())
             return 0
         if arguments.command == "train-rainbow":
+            from .plotting import RainbowPlotConfig
+
             with arguments.config.open(encoding="utf-8") as handle:
                 config = json.load(handle)
             if (
                 not isinstance(config, dict)
-                or set(config) != {"schema_version", "family", "model", "training"}
+                or not {"schema_version", "family", "model", "training"} <= set(config)
+                or set(config) - {"schema_version", "family", "model", "training", "visualization"}
                 or config["schema_version"] != 2
                 or config["family"] != FAMILY
             ):
@@ -265,6 +286,15 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
             if arguments.device is not None:
                 training_values["device"] = arguments.device
             training_config = SingleTrainingConfig.from_dict(training_values)
+            visualization = config.get("visualization", {})
+            if not isinstance(visualization, dict):
+                raise ValueError("visualization config must be an object")
+            visualization = visualization.copy()
+            enabled = visualization.pop("enabled", True)
+            if type(enabled) is not bool:
+                raise ValueError("visualization.enabled must be boolean")
+            make_plots = enabled and not arguments.no_plots
+            plot_config = RainbowPlotConfig.from_dict(visualization)
             result = train_single_condition(
                 reference,
                 model_config,
@@ -273,6 +303,8 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
                 resume=arguments.resume,
                 max_steps_this_run=arguments.max_steps_this_run,
                 callback=None if arguments.quiet else progress,
+                make_plots=make_plots,
+                plot_config=plot_config,
             )
             _print_json(
                 {
@@ -281,6 +313,10 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
                     "global_step": result.global_step,
                     "complete": result.complete,
                     "metrics": result.metrics,
+                    "plots": (
+                        str((arguments.output / "plots" / "plots.json").resolve())
+                        if result.complete and make_plots else None
+                    ),
                 }
             )
             return 0
@@ -292,6 +328,31 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
         model, checkpoint = load_single_checkpoint(arguments.checkpoint, device=arguments.device)
         if checkpoint["dataset_fingerprint"] != reference.fingerprint():
             raise ValueError("evaluation record differs from the model's single-condition teacher")
+        if arguments.command == "plot-rainbow":
+            from .plotting import RainbowPlotConfig, plot_rainbow_comparison
+
+            report = plot_rainbow_comparison(
+                model,
+                reference,
+                arguments.output,
+                config=RainbowPlotConfig(
+                    cdf_samples=arguments.samples,
+                    seed=arguments.seed,
+                    eval_batch_size=arguments.batch_size,
+                    dpi=arguments.dpi,
+                    write_pdf=arguments.write_pdf,
+                ),
+                checkpoint_path=arguments.checkpoint,
+                selected_step=(
+                    checkpoint["global_step"] if checkpoint["kind"] == "inference" else None
+                ),
+                title=(
+                    "Validation-selected model" if checkpoint["kind"] == "inference"
+                    else "Training checkpoint model"
+                ) + f" (step {checkpoint['global_step']})",
+            )
+            _print_json(report)
+            return 0
         report = evaluate_single_condition(
             model,
             reference,

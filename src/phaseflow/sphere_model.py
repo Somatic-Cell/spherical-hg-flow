@@ -56,6 +56,9 @@ class SphereFlowConfig:
     ``num_bins`` is the number of bins on each full interval/circle.  With
     reflection symmetry, half of the circular bins are independently learned.
     Smooth SiLU conditioners preserve periodic differentiability at the seam.
+    ``spline_dtype='float64'`` keeps probability coordinates, constrained RQS
+    parameters and Jacobians in float64 even when MLP weights use float32.
+    ``'model'`` preserves the arithmetic of checkpoints predating this option.
     """
 
     hidden_features: tuple[int, ...] = (64, 64)
@@ -66,6 +69,7 @@ class SphereFlowConfig:
     min_bin_height: float = 1e-5
     min_derivative: float = 1e-4
     activation: str = "silu"
+    spline_dtype: str = "model"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "hidden_features", tuple(self.hidden_features))
@@ -94,6 +98,8 @@ class SphereFlowConfig:
             raise ValueError("min_derivative must be in (0,1) for identity initialization")
         if self.activation != "silu":
             raise ValueError("this model uses the smooth silu conditioner")
+        if self.spline_dtype not in ("model", "float64"):
+            raise ValueError("spline_dtype must be 'model' or 'float64'")
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -148,7 +154,12 @@ class _CylinderCoupling(nn.Module):
             features = (strength * phi.cos())[..., None]
             if not cfg.mirror_symmetry:
                 features = torch.cat((features, (strength * phi.sin())[..., None]), -1)
-        logits = self.hyper(features)
+        # The retained probability coordinate and its periodic embedding keep
+        # spline precision. Only the conditioner uses the neural-weight dtype;
+        # promote its logits before constraining bins or constructing knots.
+        # These casts retain autograd and do not transfer data to the host.
+        logits = self.hyper(features.to(dtype=self.hyper[0].weight.dtype))
+        logits = logits.to(dtype=retained.dtype)
         widths, heights, derivatives = logits.split(self.parameter_sizes, dim=-1)
         kwargs = {
             "min_bin_width": cfg.min_bin_width,
@@ -173,9 +184,11 @@ class SingleConditionSphereFlow(nn.Module):
     are included in state_dict's versioned extra state.  Moving neural weights
     to float32 therefore never rounds or clips the physical g.
 
-    HG calculations and returned directions/log PDFs use float64; conditioner
-    and spline calculations follow the model dtype.  Default float64 is
-    intended for the initial correctness/accuracy experiments.
+    HG calculations and returned directions/log PDFs always use float64.
+    Conditioners use the model dtype; probability coordinates and RQS algebra
+    use ``config.spline_dtype``. Explicit float32 weights with float64 splines
+    avoid FP64 matrix multiplications without lowering HG/cylinder precision.
+    No float16/bfloat16 autocast or gradient scaling is applied internally.
     """
 
     model_family = "single_condition_circular_hg"
@@ -201,6 +214,22 @@ class SingleConditionSphereFlow(nn.Module):
             _CylinderCoupling(self.config, update_circle=bool(i % 2), dtype=dtype, device=device)
             for i in range(self.config.num_coupling_layers)
         )
+        # Reusing this device scalar avoids Python-float -> CUDA copies on each
+        # HG evaluation. It is a cache; only the exact Python value is persisted.
+        self.register_buffer(
+            "_hg_coefficient",
+            torch.tensor(self.hg_g, dtype=torch.float64, device=self.device),
+            persistent=False,
+        )
+
+    def _apply(self, fn, recurse: bool = True):
+        result = super()._apply(fn, recurse=recurse)
+        # Module.float()/to(dtype=...) also cast buffers. Rebuild from the
+        # authoritative binary64 scalar after movement, never from that cast.
+        self._hg_coefficient = torch.tensor(
+            self.hg_g, dtype=torch.float64, device=self.device
+        )
+        return result
 
     def _set_physics(self, hg_g: float, incident_cosine: float) -> None:
         if isinstance(hg_g, bool) or isinstance(incident_cosine, bool):
@@ -213,6 +242,10 @@ class SingleConditionSphereFlow(nn.Module):
         self._hg_g = g
         self._incident_cosine = eta
         self._azimuth_strength = math.sqrt((1 - eta) * (1 + eta))
+        if "_hg_coefficient" in self._buffers:
+            self._hg_coefficient = torch.tensor(
+                g, dtype=torch.float64, device=self.device
+            )
 
     @property
     def hg_g(self) -> float:
@@ -225,6 +258,11 @@ class SingleConditionSphereFlow(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return self.couplings[0].hyper[0].weight.dtype
+
+    @property
+    def spline_dtype(self) -> torch.dtype:
+        """Arithmetic dtype of cylinder coordinates, RQS knots and Jacobians."""
+        return torch.float64 if self.config.spline_dtype == "float64" else self.dtype
 
     @property
     def device(self) -> torch.device:
@@ -243,16 +281,23 @@ class SingleConditionSphereFlow(nn.Module):
         if (
             state.get("model_family") != self.model_family
             or state.get("schema_version") != self.schema_version
-            or state.get("config") != self.config.to_dict()
         ):
+            raise ValueError("checkpoint sphere model family, schema, or configuration differs")
+        # Old schema-1 checkpoints have no spline_dtype: its default 'model'
+        # retains their original arithmetic instead of silently upgrading it.
+        try:
+            saved_config = SphereFlowConfig.from_dict(state["config"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("checkpoint sphere model configuration differs") from error
+        if saved_config != self.config:
             raise ValueError("checkpoint sphere model family, schema, or configuration differs")
         self._set_physics(state["hg_g"], state["incident_cosine"])
 
     def _run_couplings(self, value: Tensor, *, inverse: bool) -> tuple[Tensor, Tensor]:
         if self.dtype not in (torch.float32, torch.float64):
             raise TypeError("sphere flow supports only float32 and float64 model weights")
-        value = value.to(device=self.device, dtype=self.dtype)
-        log_det = torch.zeros(value.shape[:-1], device=self.device, dtype=self.dtype)
+        value = value.to(device=self.device, dtype=self.spline_dtype)
+        log_det = torch.zeros(value.shape[:-1], device=self.device, dtype=self.spline_dtype)
         layers = reversed(self.couplings) if inverse else self.couplings
         for layer in layers:
             changed = 1 if layer.update_circle else 0
@@ -294,13 +339,23 @@ class SingleConditionSphereFlow(nn.Module):
     def log_prob(self, outgoing: Tensor) -> Tensor:
         """Evaluate log q relative to solid angle, for arbitrary local directions."""
         mu, v, valid = self._local_coordinates(outgoing)
-        t, log_hg = hg_cdf_and_log_prob(mu, self.hg_g)
+        t, log_hg = hg_cdf_and_log_prob(mu, self._hg_coefficient)
         _, log_r = self._run_couplings(torch.stack((t, v), -1), inverse=False)
         result = log_hg + log_r.to(torch.float64)
         return torch.where(valid, result, torch.full_like(result, torch.nan))
 
     def pdf(self, outgoing: Tensor) -> Tensor:
         return self.log_prob(outgoing).exp()
+
+    def hg_base_log_prob(self, mu: Tensor) -> Tensor:
+        """Evaluate the HG baseline per steradian from scattering cosine ``mu``.
+
+        Input is the cosine relative to the incident propagation axis, not an
+        outgoing xyz vector. Arithmetic uses float64 on the model's device;
+        an already-resident float64 tensor is reused without a transfer.
+        """
+        cosine = torch.as_tensor(mu, device=self.device, dtype=torch.float64)
+        return hg_log_prob(cosine, self._hg_coefficient)
 
     def sample_from_uniform(self, uniforms: Tensor) -> tuple[Tensor, Tensor]:
         """Use two uniforms (u0 in (0,1), u1 in [0,1)) without branch splitting.
@@ -320,20 +375,20 @@ class SingleConditionSphereFlow(nn.Module):
         )
         if self.validate_args and not bool(valid_input.all()):
             raise ValueError("uniforms require u0 in (0,1) and u1 in [0,1)")
-        u = provided.to(dtype=self.dtype)
+        u = provided.to(dtype=self.spline_dtype)
         valid_u = valid_input & (u[..., 0] > 0) & (u[..., 0] < 1) & (u[..., 1] < 1)
         if self.validate_args and not bool(valid_u.all()):
             raise FloatingPointError(
-                "valid uniforms rounded to an excluded endpoint in the model dtype; "
-                "use float64 or generate uniforms on the model's representable midpoint grid"
+                "valid uniforms rounded to an excluded endpoint in the spline coordinate dtype; "
+                "use float64 splines or their representable uniform midpoint grid"
             )
         cylinder, log_inverse_det = self._run_couplings(u, inverse=True)
         cylinder = cylinder.to(torch.float64)
-        mu = hg_icdf(cylinder[..., 0], self.hg_g)
+        mu = hg_icdf(cylinder[..., 0], self._hg_coefficient)
         phi = 2 * math.pi * (cylinder[..., 1] - 0.5)
         radius = ((1 - mu) * (1 + mu)).sqrt()
         directions = torch.stack((radius * phi.cos(), radius * phi.sin(), mu), -1)
-        log_prob = hg_log_prob(mu, self.hg_g) - log_inverse_det.to(torch.float64)
+        log_prob = self.hg_base_log_prob(mu) - log_inverse_det.to(torch.float64)
         valid = (
             valid_u
             & torch.isfinite(directions).all(dim=-1)
@@ -358,11 +413,11 @@ class SingleConditionSphereFlow(nn.Module):
         """Draw reproducible uniform midpoint floats, then transform them."""
         if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples < 1:
             raise ValueError("num_samples must be a positive integer")
-        bits = 23 if self.dtype == torch.float32 else 52
+        bits = 23 if self.spline_dtype == torch.float32 else 52
         integers = torch.randint(
             1 << bits, (num_samples, 2), device=self.device, generator=generator
         )
-        uniforms = (integers.to(self.dtype) + 0.5) * (2.0**-bits)
+        uniforms = (integers.to(self.spline_dtype) + 0.5) * (2.0**-bits)
         return self.sample_from_uniform(uniforms)
 
     def forward(self, outgoing: Tensor) -> Tensor:

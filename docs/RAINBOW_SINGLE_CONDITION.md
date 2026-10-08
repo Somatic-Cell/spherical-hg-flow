@@ -199,7 +199,8 @@ $$
 =\log h_g(\mu)-\log\left|\det D N^{-1}(b)\right|
 $$
 
-を同時に返します．残差写像の初期値は恒等写像なので，学習開始時は HG 分布です．
+を同時に返します．残差写像の初期値は恒等写像で，浮動小数点の丸めの範囲内で
+学習開始時は HG 分布です．
 追加の `sin(theta)`，`2*pi`，鏡映の確率因子はありません．
 
 ### 層順序と周期境界
@@ -283,7 +284,9 @@ NF 座標の `phi=0` を代表値にします．教師のセル PDF はソルバ
 | 更新回数 | 2,000 |
 | Optimizer / 学習率 | Adam / `1e-3` |
 | Validation / checkpoint 間隔 | 100 更新 |
-| 実行精度・device | float64 / CPU，1 thread |
+| Device | CUDA；利用できなければ停止 |
+| Conditioner の重み・MLP | float32 |
+| HG・方向・RQS・返却 log PDF | float64 |
 | Seed | 415 |
 
 Bin 下限は数値上の設定であると同時に表現可能な集中度を制限します．値を変更した比較では
@@ -294,10 +297,31 @@ Bin 下限は数値上の設定であると同時に表現可能な集中度を�
 `train_samples` を変え，更新回数・batch size・validation/test の点数と seed を揃えます．
 これにより教師点数の効果と最適化に投入する更新量を分けて比較できます．
 
-乱数は NumPy PCG64 と `SeedSequence([seed, stream_id])` から作ります．
-train，validation，minibatch の抽出，test，proposal に独立な stream を割り当てます．
-教師点群は 52-bit midpoint grid 上の開区間一様値から生成するので，乱数の端点を
-丸めて回避する処理はありません．
+### GPU 上の学習経路
+
+設定の `training.device` は `cuda`，`training.dtype` は `float32`，
+`model.spline_dtype` は `float64` が出発点です．CUDA が利用できない場合に，
+自動的に CPU へ切り替える処理はありません．`cuda:1` などで使用する GPU を選べます．
+CPU 上の小規模な数学・統合テストには `--device cpu` を明示します．
+
+保存 CDF の読み込み・検証と教師点群の初回生成は CPU 上で行います．生成した固定学習点群と
+validation 点群を選択した device に一度転送し，学習時の minibatch の抽出も同じ device 上で
+行います．更新のたびに NumPy の点群を切り出して CPU から GPU へ転送しません．
+したがって固定点群は VRAM に収まる必要があります．学習・validation の方向と PDF 用の
+FP64 tensor だけなら，合わせて概ね `32 * (train_samples + validation_samples)` byte です．
+これに MLP，optimizer，batch の中間値などのメモリが加わります．
+
+損失と勾配の有限性を device 上で記録し，validation・checkpoint・中断の境界でまとめて
+CPU 側へ取り出します．不正な更新を検出した場合は更新位置を報告し，失敗した重みを
+成功した checkpoint として保存しません．パラメータごとに CPU と同期する検査は避けます．
+CUDA の Adam は foreach を使い，TF32 と AMP / FP16 は自動的に有効化しません．
+GPU 向けのデータ移動・実行構成ですが，特定 GPU での速度を測定した設定ではありません．
+
+教師点群と proposal の乱数は NumPy PCG64 と `SeedSequence([seed, stream_id])` から作ります．
+train，validation，test，proposal は独立な stream です．minibatch は別の stream から得た seed を
+持つ，選択 device 上の専用 `torch.Generator` で抽出し，その状態を checkpoint に保存します．
+CPU と CUDA の乱数列が一致するとは仮定しません．教師点群は 52-bit midpoint grid 上の
+開区間一様値から生成するので，乱数の端点を丸めて回避する処理はありません．
 
 重みは **validation NLL の最小値**で選びます．選択する時点は初期状態，`eval_every` ごと，
 予定された最終更新です．一時停止を挟んだことだけを理由に候補時点を増やさないため，
@@ -313,11 +337,81 @@ train，validation，minibatch の抽出，test，proposal に独立な stream �
 | `checkpoint.pt` | 最新の更新地点，optimizer，RNG，最良重みを含む再開用状態 |
 | `best.pt` | validation で選択した評価・推論用モデル |
 | `metrics.json` | 初期・最良 validation，完了フラグ，完了後の最終 test |
+| `plots/` | 完了時に選択重みで作る教師 PDF・CDF 点群・NF PDF と比較図 |
 
 再開は `checkpoint.pt` を使います．データの hash，設定，実装，記録された実行環境を
 照合してから，点群と乱数状態を復元します．別のコード・device・設定へ移ることを，
 同じ実験の厳密な再開として扱いません．`best.pt` は optimizer を含まないので再開できません．
 checkpoint は primitive / tensor の状態を `weights_only=True` で読み込みます．
+新しい再開状態は checkpoint version 3 です．以前の version 2 は，保存されたモデルの
+精度設定を保持した評価・推論用として読み込めます．minibatch の乱数方式と実装が変わっているため，
+version 2 からの再開を同じ実験の厳密な続行とは扱いません．
+
+PyTorch / CUDA の再現性には実行環境による範囲があります．この実装は同じ設定・入力・実装・
+記録環境での再開を検証対象とし，別の GPU や PyTorch バージョンでの同一乱数列・bit 単位の
+同一結果は主張しません．[PyTorch 2.8 の再現性の説明](https://docs.pytorch.org/docs/2.8/notes/randomness.html)
+も参照してください．
+
+## 学習完了後の可視化
+
+既定では，予定した更新が全て終わった後に `best.pt` と同じ validation 選択重みを使い，
+`plots/` に次の画像を保存します．中断中の重みや test の結果で選択した重みではありません．
+
+| ファイル | 表示内容 |
+|---|---|
+| `reference_pdf.png` | 保存 CDF のセル質量を実際の立体角で割った教師 PDF，対数色表示 |
+| `cdf_samples.png` | 同じ保存 CDF から独立に生成した点群の散布図 |
+| `nf_pdf.png` | 学習済み NF の任意方向 PDF 評価，対数色表示 |
+| `comparison.png` | 上記 3 枚を並べた比較図 |
+| `plots.json` | 可視化設定，入力と checkpoint の hash，座標・密度・サンプルの情報 |
+
+全てのマップの横軸はソルバの方位角 `phi_s`，範囲は `[-180,180]` 度です．
+縦軸は入射伝播方向からの散乱角 `theta`，範囲は `[0,180]` 度で，前方散乱の 0 度を上に
+表示します．1 度の横・縦の長さを揃え，表示領域のアスペクト比を横 : 縦 = 2 : 1 にします．
+NF 座標へ回転した点をそのまま描かず，記録されたフレームとの変換を使ってソルバ座標に戻します．
+
+教師図は保存された全セルを使い，実際の `u_edges` から求めた散乱角の境界で表示します．
+NF も同じ全セルの `u` の中点・方位角の中点で PDF を評価し，同じ境界で色を配置します．
+角度方向の間引きはしません．`plots.json` に保存される NF の格子積分はこの中点則による
+診断値であり，解析的な正規化の値や保存 CDF の厳密な積分とは区別します．
+
+2 枚の PDF 図では正の値に対する **同じ LogNorm と同じ色範囲**を使います．
+両図に存在する正の値の最小・最大を色範囲にし，パーセンタイルによる切り捨てはしません．
+教師の厳密なゼロは灰色で区別し，対数表示のために正の floor を足しません．
+全ての正の値が同じ場合だけ，表示用の色範囲を上下に広げます．PDF 自体は変更しません．
+両方とも単位は `sr^-1` であり，画像上の角度面積あたりの密度ではありません．
+
+点群は CDF サンプラの定性的な確認用で，既定では 32,768 点です．これは可視化専用の
+独立な点群であり，学習 pool 自体を全点表示するものではありません．乱数 seed と点数を保存し，
+学習・validation・test の点数を変えずに散布図の点数を変更できます．
+`theta,phi_s` の長方形は等面積投影ではないため，点の見かけの密集度は
+`p_Omega * sin(theta)` に従います．前方の PDF が大きい場所ほど必ず画面上の点が密になる，
+という読み方はせず，ピーク・谷の位置や方位角の対応を確認します．定量比較は立体角に関する
+NLL / KL を使います．
+
+設定ファイルの最上位にある `visualization` で描画だけを調整できます．
+
+```json
+"visualization": {
+  "enabled": true,
+  "cdf_samples": 32768,
+  "seed": 2027,
+  "eval_batch_size": 16384,
+  "dpi": 160,
+  "write_pdf": false
+}
+```
+
+`--no-plots` は完了後の自動描画を明示的に省略します．`--max-steps-this-run` で予定の途中で
+停止したときには，自動図は作りません．学習済み checkpoint から図だけを作り直す場合は，
+次のコマンドを使用できます．NF の評価は既定で CUDA，画像の構成と保存は Matplotlib で行います．
+
+```powershell
+.\.venv\Scripts\phaseflow.exe plot-rainbow --record $record --checkpoint runs/rainbow_single/best.pt --output runs/rainbow_single/plots --samples 32768 --seed 2027
+```
+
+`--batch-size` は描画時の NF 評価の batch size，`--dpi` は出力解像度です．
+`--write-pdf` を付けると，PNG に加えて PDF 形式の図も出力します．
 
 ## 評価指標の読み方
 
@@ -392,10 +486,11 @@ with RainbowReference("path/to/one_record") as reference:
     model = SingleConditionSphereFlow(
         hg_g=reference.g,
         incident_cosine=float(reference.condition[1]),
-        config=SphereFlowConfig(),
-        dtype=torch.float64,
+        config=SphereFlowConfig(spline_dtype="float64"),
+        dtype=torch.float32,
+        device="cuda",
     )
-    model_log_pdf = model.log_prob(torch.from_numpy(directions))
+    model_log_pdf = model.log_prob(torch.as_tensor(directions, device="cuda"))
     sampled, sampled_log_pdf = model.sample_and_log_prob(4096)
     teacher_at_model_samples = reference.log_prob(sampled.detach().cpu().numpy())
 ```
@@ -415,9 +510,20 @@ memory map は使用できません．metadata は copy として取得でき，
 
 ## 数値精度と今後の範囲
 
-HG，方向，返却する log PDF は float64 です．ネットワークと spline の計算はモデル dtype に従い，
-最初の実験では float64 を既定値にしています．外部 `g` は Python の binary64 値として保存し，
-ネットワークを `.float()` にしても値を丸めたり `g_limit` に置き換えたりしません．
+HG，方向，返却する log PDF は float64 です．ネットワークの重み・MLP の計算精度は
+`training.dtype`，RQS の計算精度は `model.spline_dtype` で分けて指定します．
+提供する GPU 設定ではそれぞれ `float32` と `float64` です．conditioner 用の特徴を作ってから
+MLP の dtype へ変換し，得られた logits を spline の dtype に戻して正のパラメータ制約・
+RQS・逆写像・Jacobian を計算します．方向を FP32 に落として前方の角度差を失う処理はしません．
+
+`SphereFlowConfig` 自体の省略時の `spline_dtype="model"` は，spline の精度をモデルの
+重みと同じにする選択肢です．旧 checkpoint の意味を保つための既定値で，提供設定ファイルでは
+明示的に `float64` を指定します．MLP も FP64 に揃えた精度比較には `training.dtype="float64"`
+を使います．どちらの精度設定も checkpoint に保存します．
+
+外部 `g` は Python の binary64 値として保存し，ネットワークを `.float()` にしても値を
+丸めたり `g_limit` に置き換えたりしません．NF の逆変換に渡す開区間一様値は，実際の spline 精度が
+FP64 なら 52-bit，FP32 なら 23-bit の midpoint grid を使います．
 
 強い集中により内部の逆写像が極へ丸められた場合は，数値的な失敗として報告します．
 別の方向へ置き換える，サンプルを捨てる，自動で引き直す，という処理は行いません．
@@ -427,6 +533,12 @@ HG，方向，返却する log PDF は float64 です．ネットワークと sp
 このバージョンは，単一条件で実際に最尤学習を行う実装です．ただし，今回の環境での
 データ契約・学習・再開の検証には合成レコードを用いており，実際の Rainbow の出力での
 近似精度や物理再現性はまだ測定していません．合成レコードを物理的教師データとして報告しません．
+[GPU 経路・可視化の検証報告](../reports/GPU_PLOTS_VALIDATION.md) に，実行済みの範囲と結果を記録します．
+
+CUDA 用の検査は `cuda` marker を持ちます．実機では `python -c "import torch; assert torch.cuda.is_available()"`
+で利用可能性を確認してから，`python -m pytest -m cuda -q` を実行してください．
+これらは GPU 上の精度・学習・再開・描画時のモデル評価を検査し，CPU しかない環境では skip されます．
+skip を CUDA の成功例に数えず，速度の評価は同じ GPU 上で別に測定します．
 
 次の段階は，実際の一条件でサンプル数とモデル容量を調べた後，片方の条件を変える実験，
 二条件モデルとエンコーディング，外部 `g` の条件間での供給を設計することです．

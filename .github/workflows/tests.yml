@@ -1,4 +1,4 @@
-name: Python and native reference
+name: CPU correctness and legacy native reference
 
 on:
   push:

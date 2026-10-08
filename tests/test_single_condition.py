@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from functools import partial
 
 import numpy as np
 import pytest
@@ -27,6 +28,10 @@ from phaseflow.single_condition import (
 from phaseflow.sphere_model import SingleConditionSphereFlow, SphereFlowConfig
 from phaseflow.training import load_model_checkpoint
 
+# Most numerical tests do not need four raster figures for every short run.
+# The CLI integration below exercises automatic plotting with the real default.
+train_single_condition = partial(train_single_condition, make_plots=False)
+
 
 def smooth_teacher(path, *, isotropic=False):
     """Exact cell integrals of (1+b mu)(1-a cos(2 phi_source))/(4 pi)."""
@@ -42,6 +47,8 @@ def smooth_teacher(path, *, isotropic=False):
 
 def small_config(**changes):
     config = SingleTrainingConfig(
+        device="cpu",
+        dtype="float64",
         train_samples=2048,
         validation_samples=2048,
         test_samples=2048,
@@ -84,7 +91,7 @@ def test_training_improves_independent_kl_and_preserves_external_g(tmp_path):
         assert test["base_g"] == record.g
         assert 0 < test["proposal"]["relative_ess"] <= 1.00000000001
         assert test["proposal"]["sample_eval_log_pdf_max_abs_error"] < 1e-9
-        restored, checkpoint = load_single_checkpoint(result.best_path)
+        restored, checkpoint = load_single_checkpoint(result.best_path, device="cpu")
         assert_state_equal(restored.state_dict(), result.model.state_dict())
         assert checkpoint["kind"] == "inference"
         assert checkpoint["global_step"] == result.metrics["selected_step"]
@@ -115,7 +122,7 @@ def test_controlled_resume_exact_and_does_not_use_test_early(tmp_path):
         assert_state_equal(a["best_state"], b["best_state"])
         assert a["history"] == b["history"]
         assert full.metrics == continued.metrics
-        assert a["minibatch_rng_state"] == b["minibatch_rng_state"]
+        assert torch.equal(a["minibatch_rng_state"], b["minibatch_rng_state"])
         with pytest.raises(ValueError, match="inference-only"):
             train_single_condition(
                 record, small_model(), cfg, tmp_path / "invalid", resume=continued.best_path
@@ -180,6 +187,7 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
                 "family": FAMILY,
                 "model": small_model().to_dict(),
                 "training": small_config(steps=2).to_dict(),
+                "visualization": {"cdf_samples": 128, "dpi": 80},
             }
         )
     )
@@ -204,6 +212,10 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
     )
     trained = json.loads(capsys.readouterr().out)
     assert trained["complete"] is True
+    plot_manifest = json.loads((run / "plots/plots.json").read_text())
+    assert plot_manifest["selected_step"] == trained["metrics"]["selected_step"]
+    for name in ("reference_pdf.png", "cdf_samples.png", "nf_pdf.png", "comparison.png"):
+        assert (run / "plots" / name).is_file()
     report_path = tmp_path / "evaluation.json"
     assert (
         main(
@@ -215,6 +227,8 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
                 str(run / "best.pt"),
                 "--samples",
                 "128",
+                "--device",
+                "cpu",
                 "--seed",
                 "19",
                 "--output",
@@ -228,10 +242,51 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
     assert report["sample_count"] == 128 and report["scope"] == "independent_points_same_condition"
     with pytest.raises(ValueError, match="Native/OptiX export"):
         load_model_checkpoint(run / "best.pt")
-    model, _ = load_single_checkpoint(run / "best.pt")
+    model, _ = load_single_checkpoint(run / "best.pt", device="cpu")
     with pytest.raises(ValueError, match="new native format"):
         export_model(model, tmp_path / "unsupported_export")
     assert not (tmp_path / "unsupported_export").exists()
+    assert main([
+        "plot-rainbow", "--record", str(record_path), "--checkpoint", str(run / "best.pt"),
+        "--output", str(tmp_path / "replot"), "--device", "cpu", "--samples", "128",
+        "--dpi", "80",
+    ]) == 0
+    replotted = json.loads(capsys.readouterr().out)
+    assert replotted["selected_step"] == trained["metrics"]["selected_step"]
+
+
+def test_nonfinite_update_does_not_overwrite_valid_checkpoint(tmp_path, monkeypatch):
+    """A GPU-style deferred finite check must keep the previous saved boundary."""
+    with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
+        cfg = small_config(steps=8)
+        output = tmp_path / "run"
+        partial_run = train_single_condition(
+            record, small_model(), cfg, output, max_steps_this_run=4
+        )
+        before = partial_run.checkpoint_path.read_bytes()
+        original_step = torch.optim.Adam.step
+
+        def invalid_step(optimizer, *args, **kwargs):
+            result = original_step(optimizer, *args, **kwargs)
+            with torch.no_grad():
+                optimizer.param_groups[0]["params"][0].fill_(float("nan"))
+            return result
+
+        monkeypatch.setattr(torch.optim.Adam, "step", invalid_step)
+        with pytest.raises(FloatingPointError, match="nonfinite.*update"):
+            train_single_condition(
+                record, small_model(), cfg, output, resume=partial_run.checkpoint_path
+            )
+        assert before == partial_run.checkpoint_path.read_bytes()
+
+
+def test_incomplete_training_does_not_create_final_plots(tmp_path):
+    with RainbowReference(smooth_teacher(tmp_path / "record")) as record:
+        output = tmp_path / "run"
+        result = train_single_condition(
+            record, small_model(), small_config(), output, max_steps_this_run=1, make_plots=True
+        )
+        assert not result.complete and not (output / "plots").exists()
 
 
 @pytest.mark.parametrize(

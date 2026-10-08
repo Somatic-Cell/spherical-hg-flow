@@ -41,6 +41,15 @@ The current primary workflow is the **single-condition Rainbow model** documente
 
 ## Evaluation, reproducibility and scope
 
+- The primary training, evaluation and inference path targets CUDA by default.
+  Fail explicitly when requested CUDA is unavailable; CPU is an explicit
+  correctness-test/debug choice. Keep fixed training and validation tensors on
+  the selected device and avoid CPU minibatch copies or per-parameter host
+  synchronization in the optimization loop.
+- Distinguish the MLP parameter dtype from the spline/probability-coordinate
+  dtype. The production starting configuration uses FP32 conditioners and FP64
+  HG, geometry and RQS arithmetic. Do not silently enable AMP/FP16, TF32, or
+  downgrade externally supplied g. Record both precision choices.
 - Keep the fixed training pool, validation stream and test stream independent.
   Model selection uses validation data; final test data must not select weights.
   Record seeds, sample counts, update count, optimizer/RNG state, complete
@@ -60,6 +69,11 @@ The current primary workflow is the **single-condition Rainbow model** documente
   actual mathematical or integration risk over implementation-mirroring tests.
 - Label synthetic fixtures as such. They validate the adapter and learning
   pipeline, not the Rainbow solver's physics, convergence, or real-data accuracy.
+- After completed training, visualize the selected weights together with the
+  exact stored-CDF PDF and CDF-generated point cloud. Keep all maps in the same
+  recorded source frame, axes, extent and aspect. Share the two PDF maps' log
+  color scale; mark true zero target density rather than flooring it. A scatter
+  map in theta/azimuth coordinates is not an equal-area density estimate.
 - Report only actually executed platforms and measurements. CPU Python or host
   C++ tests do not establish CUDA training, NVCC compilation, OptiX integration,
   renderer correctness, or GPU sampling/evaluation speed.
@@ -81,3 +95,7 @@ they do not override the current workflow above.
 Run `pytest -q` and `ruff check .` from the repository root for local checks.
 Record the measured scope when reporting results; retained historical reports
 do not validate new changes.
+On a CUDA machine, first require `python -c "import torch; assert torch.cuda.is_available()"`,
+then run `python -m pytest -m cuda -q`. A CUDA-marked suite consisting only of
+skips is not a GPU validation result. Do not assume a self-hosted GPU CI runner
+exists or report unexecuted CUDA checks as passed.
