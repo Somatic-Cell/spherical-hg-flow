@@ -1,0 +1,2799 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 4c8f64f..32650e8 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -59,6 +59,11 @@ The current primary workflow is the **single-condition Rainbow model** documente
+   Model selection uses validation data; final test data must not select weights.
+   Record seeds, sample counts, update count, optimizer/RNG state, complete
+   configuration, input file hashes and physical-source metadata.
++- Capacity sweeps plan the final optimizer update count before training. Archive
++  each milestone's best validation state before continuing, and never reuse a
++  later selected checkpoint for an earlier milestone. Sample-count comparisons
++  verify and preserve their completed parent experiment. Sampler-audit output
++  must be in a directory tree disjoint from the saved run or milestone archive.
+ - Use NLL / forward KL with the correct solid-angle measure. Negative continuous
+   NLL is valid. A finite-sample KL estimate can fluctuate below zero; do not
+   replace it by zero or rename a plain NLL as KL. Evaluate importance ESS using
+diff --git a/README.md b/README.md
+index 2f87031..08c05ec 100644
+--- a/README.md
++++ b/README.md
+@@ -217,6 +217,26 @@ call sweep.bat replot
+ 通常の `sweep.bat` で再開する代わりに，図の更新には `replot` を使います．
+ 新しい探索を始める場合は新しい `OUTPUT` を指定します．
+ 
++### 点群を検査し，bin 数と最適化ステップ数を比較する
++
++追加の `sweep.bat` モードで，実際の固定学習点群と CDF の確率質量を比較し，
++続いて RQS bin 数と最適化ステップ数を探索できます．
++
++```bat
++call sweep.bat audit
++call sweep.bat capacity
++call sweep.bat samples
++```
++
++`audit` は `AUDIT_RUN` の元の学習結果を読みます．`capacity` は新しい出力先で
++bin 数 16・32・64・128 を，同じ 262,144 点と 20,000 更新の計画で比較します．
++2,000・6,000・10,000・20,000 更新時点の重みと図を保存して続けるため，短い実験を
++最初からやり直しません．`samples` は完了した容量探索で選んだ bin 数を使い，
++65,536・262,144・1,048,576 点を再比較します．損失は既存の NLL のままです．
++
++[設定・結果の読み方・LUT の規模](docs/CAPACITY_SWEEP.md) を参照してください．
++引数なしの `sweep.bat` は従来の学習率 A → 点数 B の探索を続けて使用できます．
++
+ ### 完了後の 3 種類のマップ
+ 
+ 予定した更新が完了すると，validation で選んだ最良重みから `runs/rainbow_single_gpu/plots/` に
+diff --git a/configs/rainbow_capacity.json b/configs/rainbow_capacity.json
+new file mode 100644
+index 0000000..8022638
+--- /dev/null
++++ b/configs/rainbow_capacity.json
+@@ -0,0 +1,49 @@
++{
++  "schema_version": 2,
++  "family": "rainbow_single_condition",
++  "model": {
++    "num_coupling_layers": 4,
++    "num_bins": 16,
++    "hidden_features": [
++      64,
++      64
++    ],
++    "mirror_symmetry": true,
++    "min_bin_width": 1e-05,
++    "min_bin_height": 1e-05,
++    "min_derivative": 0.0001,
++    "activation": "silu",
++    "spline_dtype": "model",
++    "geometry_dtype": "model"
++  },
++  "training": {
++    "seed": 415,
++    "data_seed": 2026,
++    "device": "cuda",
++    "dtype": "float32",
++    "train_samples": 262144,
++    "validation_samples": 32768,
++    "test_samples": 65536,
++    "proposal_samples": 16384,
++    "batch_size": 1024,
++    "steps": 20000,
++    "learning_rate": 0.003,
++    "eval_every": 100,
++    "checkpoint_every": 100,
++    "eval_batch_size": 4096,
++    "grad_clip_norm": 10.0,
++    "deterministic": true,
++    "cpu_threads": 1,
++    "log_every": 20,
++    "tensorboard": true,
++    "train_monitor_samples": 8192
++  },
++  "visualization": {
++    "enabled": true,
++    "cdf_samples": 32768,
++    "seed": 2027,
++    "eval_batch_size": 4096,
++    "dpi": 160,
++    "write_pdf": false
++  }
++}
+diff --git a/configs/rainbow_capacity_sweep.json b/configs/rainbow_capacity_sweep.json
+new file mode 100644
+index 0000000..45d0eae
+--- /dev/null
++++ b/configs/rainbow_capacity_sweep.json
+@@ -0,0 +1,31 @@
++{
++  "schema_version": 1,
++  "sweep": {
++    "num_bins": [
++      16,
++      32,
++      64,
++      128
++    ],
++    "milestones": [
++      2000,
++      6000,
++      10000,
++      20000
++    ]
++  },
++  "diagnostics": {
++    "enabled": true,
++    "theta_band_degrees": [
++      120.0,
++      150.0
++    ],
++    "source_phi_degrees": [
++      -90.0,
++      0.0,
++      90.0
++    ],
++    "eval_batch_size": 4096,
++    "dpi": 140
++  }
++}
+diff --git a/docs/CAPACITY_SWEEP.md b/docs/CAPACITY_SWEEP.md
+new file mode 100644
+index 0000000..e62409d
+--- /dev/null
++++ b/docs/CAPACITY_SWEEP.md
+@@ -0,0 +1,223 @@
++# 単一 CDF：サンプラの確認，bin 数と最適化ステップ数の比較
++
++この追加実験は，本プロジェクトのための実験計画です．関連論文の実験の再現や，
++実データで検証済みの最適設定を意味しません．CDF，HG，対称性，RQS の構成と
++target-distributed iid 点群を使う等重みの NLL は維持します．
++
++## 実行順序
++
++`sweep.bat` は `environment.bat` が選んだ Python と CUDA を使います．
++既存の引数なしの A/B 探索，`diagnose`，`replot` も引き続き使用できます．
++今回の追加機能は，それぞれ名前を指定して実行します．
++
++```bat
++call execute.bat check
++call sweep.bat audit
++call sweep.bat capacity
++```
++
++点数の再比較は capacity の完了後に実行します．
++
++```bat
++call sweep.bat samples
++```
++
++別の CMD ウィンドウから監視できます．
++
++```bat
++call monitor.bat runs\rainbow_capacity_gpu
++```
++
++`RECORD` は動作確認した CDF レコードに合わせてください．`AUDIT_RUN` は
++`best.pt`，`checkpoint.pt`，`config.json`，`sample_split.json` を持つ元の学習
++ディレクトリです．再描画した図だけを置いた `training_point_plots` ではありません．
++既定値は前回の `OUTPUT\stage_b\n_262144` です．
++
++| バッチの変数 | 用途／既定値 |
++|---|---|
++| `OUTPUT` | 既存 A/B の `runs\rainbow_sweep_gpu` |
++| `AUDIT_OUTPUT` | 追加診断の `runs\rainbow_sampling_audit_n262144` |
++| `CAPACITY_CONFIG` | `configs\rainbow_capacity.json` |
++| `CAPACITY_SWEEP_CONFIG` | `configs\rainbow_capacity_sweep.json` |
++| `CAPACITY_OUTPUT` | 新しい探索の `runs\rainbow_capacity_gpu` |
++| `SAMPLES_OUTPUT` | 点数再比較の `runs\rainbow_capacity_samples_gpu` |
++
++新しい探索に古い A/B の出力先を指定しないでください．設定を変える場合も新しい
++出力先を使います．同じ出力先に複数のプロセスを同時起動しないでください．
++
++## 1．点群は CDF を再現しているか
++
++対数 PDF の色と通常の散布図は，低確率領域を同じ強さで表示しません．
++緯度・経度に似た角度の長方形上では点の面密度に `sin(theta)` も含まれます．
++この違いだけから，サンプラが正しいとも誤っているとも判定できません．
++
++今回のサンプラは保存された非一様な `u_edges` を使います．
++
++$$
++u=(1-\cos\theta)/2,\qquad d\Omega=2\,du\,d\phi.
++$$
++
++周辺 CDF の差分と条件付き CDF の差分の積がセルの確率質量です．
++セルを選んだ後，CDF の残りの累積確率を使って `u` と `phi` のセル内部を
++一様にサンプルします．`theta` に関する一様補間ではありません．
++
++`audit` は保存された学習 pool のハッシュを検証してから，全点を再生成します．
++CDF のセルと検査領域の重なりを `u,phi` で積分して，厳密な保存 CDF の確率と
++実際の点数を比較します．セル中心での PDF 値を積分の代用にはしません．
++
++| 検査領域 | 目的 |
++|---|---|
++| theta 120–150 度，全 phi | 虹付近の広い領域の比較 |
++| theta 149–151 度，全 phi | theta 150 度付近の薄い帯の点数 |
++| theta 85–95 度，phi −5–5 度 | theta,phi = 90,0 付近の領域 |
++| theta 89.5–90.5 度，phi −0.5–0.5 度 | 同じ場所の小領域に期待される点数 |
++
++これらは相談された位置の周辺を検査する固定領域で，ピークの厳密な境界を
++推定したものではありません．各領域について，教師確率，期待点数，観測点数，
++二項分布の標準偏差，観測割合の Wilson 95% 区間を保存します．複数領域をまとめた
++合否検定や，同時信頼区間とは呼びません．
++
++サンプラが生成した FP64 方向での点数と，学習時の精度に変換した後の点数を
++別々に記録します．これにより，逆 CDF の誤りと浮動小数点丸めによるセル境界の
++移動を区別できます．元の checkpoint，評価値，図は書き換えません．
++
++| 出力 | 内容 |
++|---|---|
++| `sampling_audit.json` | 検査領域の確率・点数・区間，点群と入力の識別情報 |
++| `sampling_histogram.npz` | 等立体角の粗いセルの期待・観測質量と点数 |
++| `sampling_histogram.png` | 同じ粗いセルで比較した教師 PDF，経験 PDF，標準化残差 |
++
++ヒストグラムの既定値は `u` 方向 32，phi 方向 64 セルです．これはサンプラの
++大域的な整合性を調べる診断で，元の高解像度 PDF や全学習点の散布図の代わりでは
++ありません．経験 PDF は `点数 / (N * セルの立体角)` です．教師も同じセルで
++積分した質量を立体角で割ります．期待点数の小さいセルを明示します．
++疎な高解像度セルに漸近的な chi-square 検定をそのまま適用しません．
++
++点数が足りるかを考える基準は，画像上の明るさよりも対象領域の確率質量です．
++
++$$
++E[n_R]=NP_R,\qquad
++P(n_R=0)=(1-P_R)^N,\qquad
++\sigma(n_R)=\sqrt{NP_R(1-P_R)}.
++$$
++
++例えば `P_R=1e-5` という仮の領域では，262,144 点でも期待値は約 2.62 点です．
++1,048,576 点なら約 10.49 点になりますが，まだ細かい密度形状が十分分かるとは
++限りません．この数値は実際の干渉縞を測定した結果ではありません．
++
++## 2．bin 数と最適化ステップ数
++
++今回の設定は次のとおりです．前回の N=262,144 が最良だったという意味ではなく，
++容量比較の共通 pool を大きめに取る設計です．
++
++| 項目 | 設定 |
++|---|---|
++| RQS bin 数 | 16，32，64，128 |
++| 比較する最適化ステップ数 | 2,000，6,000，10,000，20,000 |
++| 学習点数 | 262,144，全候補で同じ pool |
++| coupling | 4 層 |
++| hidden features | `[64,64]` |
++| 学習率 | 0.003，一定 |
++| optimizer | 既存の Adam |
++| minibatch | 1,024 点 |
++| 精度 | 重み・HG・RQS・方向は FP32；教師・統計集計は FP64 |
++| seed / data seed | 415 / 2026 |
++| validation / test | 32,768 / 65,536 点，独立な共通 stream |
++| validation 評価 | 100 更新ごと |
++
++モデルの形が違うため，seed が同じでも初期の全パラメータが同じという意味では
++ありません．学習点群，validation，test の比較条件はそろえます．
++
++各 bin 数で 20,000 更新の計画を最初から固定し，途中の 2,000，6,000，10,000 更新で
++checkpoint を保存して続行します．4 本で合計 80,000 更新です．16 通りをすべて
++最初から独立に学習する場合の 152,000 更新に比べ，重複する前半の学習を省きます．
++GPU での経過時間はこれに比例するとは限りません．モデル容量，評価，描画も影響します．
++
++既存 trainer の optimizer，RNG，minibatch RNG と履歴の再開処理をそのまま使います．
++一定の学習率と固定の評価間隔なので，予定した最終更新数に応じて前半の学習率を
++変えることはありません．比較点は全て validation の評価間隔にそろえます．
++各時点の選択対象は，その時点までの validation で評価した重みだけです．
++後の時点で選んだ重みを前の時点の結果として表示しません．
++
++これは前回の 2,000 更新で完了した実験の `steps` を書き換えて再開する機能では
++ありません．新しい探索を始め，その中で計画済みの途中保存を行う仕組みです．
++
++`summary.csv`，`summary.json`，`summary.md`，`summary.png` に，各 bin 数・各時点の
++validation NLL / KL，選択された更新数，現在の validation，処理点数，parameter 数などを
++まとめます．各時点には凍結した重み，履歴，3 種類のマップ，角度断面の診断を残します．
++散布図は各実験の固定 pool の全点です．
++
++最良値を保存する validation の曲線は，定義上増加しません．収束や過学習の判断には
++`latest_validation` と学習履歴も使ってください．途中時点の test は評価せず，
++20,000 更新時点の test は報告だけに使います．bin 数は共通の 20,000 更新時点での
++最小の validation NLL で選び，同値なら小さい bin 数を選びます．
++
++自動選択は大域的な分布の適合であり，干渉縞の再現を自動的に保証しません．
++角度断面図と元の PDF／NF PDF で，問題にしている弱いピークも確認してください．
++大きい bin 数で validation が不安定な場合は，学習率 0.001 の別実験を比較します．
++損失やサンプルの重みを暗黙に変えて補正することはありません．
++
++### 再開と制御された途中停止
++
++同じ設定・入力・コード・実行環境のまま，同じコマンドを再実行します．
++設定や実装が変わった場合は，元の探索への上書きを拒否します．
++Python CLI では，一度の起動で進める途中保存の数を制限できます．
++
++```bat
++call environment.bat
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow sweep-capacity-rainbow ^
++  --record "YOUR_RECORD" ^
++  --config "configs\rainbow_capacity.json" ^
++  --sweep-config "configs\rainbow_capacity_sweep.json" ^
++  --output "runs\rainbow_capacity_gpu" ^
++  --device cuda:0 ^
++  --max-milestones-this-run 1
++```
++
++中断後も，最初に決めた最終ステップ数を保持します．途中まで完了した探索では
++最終的な bin の選択は確定しません．
++
++## 3．選ばれた bin 数で点数を再比較する
++
++`call sweep.bat samples` は，完了した容量探索の選択結果を検証し，
++選ばれた bin 数と同じ 20,000 更新で N=65,536，262,144，1,048,576 を比較します．
++容量探索と同一の N=262,144 の結果は検証して再利用し，新しく学習するのは
++残りの二つです．test ではなく validation で選択します．
++
++これは bin=16 で得た以前の点数比較を，大きい bin 数へそのまま一般化しないための
++追加実験です．全 bin 数・全点数・全ステップ数の総当たりを最初に行う必要はありません．
++
++更新数を T，batch size を B とすると，処理点数は `T*B` です．`T*B/N` は pool の
++平均的な使用回数の目安で，重複なく全点を一巡する通常の epoch とは異なります．
++固定 pool の更新回数を増やしても，新しい点が追加されるわけではありません．
++N を増やすと小領域の独立な学習点は増えますが，同じ iid 損失と B の下で
++その領域に入る minibatch の期待割合は増えません．
++
++## 関連研究と LUT の範囲
++
++NPIS の巨大な emitter tail は，一つの環境画像に対する条件なしの写像です．
++その順写像・逆写像・PDF の二次元の表へのベイクは，今回の全条件を含む
++NF を密な表へ変換することと同じ規模にはなりません．
++
++粒子の形状・大きさを固定し，入射方位角の対称性を使う場合，PDF の LUT の
++独立な軸は波長，入射傾斜角，出射方向の二座標の計四つです．PDF 値や
++サンプル写像の出力座標はチャンネルであり，追加の格子軸ではありません．
++`g` が条件から決まるなら，それも独立な格子軸にはしません．
++
++無圧縮の容量は `条件の波長数 * 入射角数 * 角度セル数 * チャンネル数 * byte数` です．
++例えば角度 1800×900，FP32，PDF 一つなら一条件で約 6.18 MiB，条件が 64×64 なら
++約 24.72 GiB，128×128 なら約 98.88 GiB です．これらは仮定からの計算値で，
++実測値や必要解像度の推定ではありません．当面は条件付き NF を直接評価する方針を
++保ち，モデルの精度と計算量を確認してから native 推論を設計します．
++
++参考：
++
++- Litalien et al.，*Neural Product Importance Sampling via Warp Composition*，
++  [§3.2，§4](https://arxiv.org/html/2409.18974v2)．
++- Sadeghi et al.，*Physically-Based Simulation of Rainbows*，2012，§5．
++  1800×14400 は位相関数の角度評価格子で，NF 用 iid 学習点数ではありません．
++- [Mitsuba 3 の検査の説明](https://mitsuba.readthedocs.io/en/stable/src/developer_guide/testing.html)．
++  PDF を積分した期待度数とサンプラの観測度数を比較する Pearson chi-square 検定を説明しています．
++
++CPU の小さな合成 fixture によるテストはサンプラ・制御処理の検証です．
++実際の Rainbow の収束，Windows，CUDA，OptiX の動作や速度の実測を代用しません．
+diff --git a/src/phaseflow/capacity_sweep.py b/src/phaseflow/capacity_sweep.py
+new file mode 100644
+index 0000000..c8b4785
+--- /dev/null
++++ b/src/phaseflow/capacity_sweep.py
+@@ -0,0 +1,1011 @@
++"""Compare spline bins along exact, predeclared optimization trajectories.
++
++The trainer and its checkpoint/resume contract remain unchanged. Each bin count
++plans the same final number of optimizer updates, pauses at specified evaluation
++boundaries, and archives its validation-selected model before continuing. The
++archives are independent of the mutable continuation directory. They represent
++prefixes of one trajectory, not separately initialized experimental repetitions.
++"""
++
++from __future__ import annotations
++
++import csv
++import io
++import json
++import math
++import os
++import time
++from dataclasses import asdict, dataclass, replace
++from pathlib import Path
++from typing import Any, Callable
++
++import torch
++
++from .monitoring import check_tensorboard, plot_training_history
++from .plotting import RainbowPlotConfig, plot_rainbow_comparison
++from .rainbow import RainbowReference
++from .single_condition import (
++    SingleTrainingConfig,
++    _array_hash,
++    _code_hash,
++    _points,
++    _resolve_device,
++    _runtime,
++    load_single_checkpoint,
++    read_single_checkpoint,
++    train_single_condition,
++)
++from .sphere_model import SingleConditionSphereFlow, SphereFlowConfig
++from .sweep import _atomic_bytes, _check_checkpoint, _file_hash, _manifest_hash, _read_json
++from .training import _setup_runtime
++from .training_scatter import _state_equal
++
++CAPACITY_SCHEMA = "phaseflow.capacity_sweep.v1"
++SAMPLE_SCHEMA = "phaseflow.capacity_sample_sweep.v1"
++_RECEIPT = "milestone_completed.json"
++_CORE_FILES = (
++    "checkpoint.pt", "best.pt", "config.json", "data_summary.json",
++    "sample_split.json", "history.json", "metrics.json",
++)
++DiagnosticCallback = Callable[
++    [SingleConditionSphereFlow, RainbowReference, Path], dict[str, Any]
++]
++
++
++def _atomic_json(path: Path, value: Any) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    contents = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
++    _atomic_bytes(path, contents.encode("utf-8"))
++
++
++@dataclass(frozen=True)
++class CapacitySweepConfig:
++    num_bins: tuple[int, ...] = (16, 32, 64, 128)
++    milestones: tuple[int, ...] = (2000, 6000, 10000, 20000)
++
++    def __post_init__(self) -> None:
++        for name in ("num_bins", "milestones"):
++            values = getattr(self, name)
++            if not isinstance(values, (tuple, list)) or not values:
++                raise ValueError(f"{name} must be a nonempty list or tuple")
++            if any(type(value) is not int or value < 1 for value in values):
++                raise ValueError(f"{name} must contain positive integers")
++            if len(set(values)) != len(values):
++                raise ValueError(f"{name} must be unique")
++            if list(values) != sorted(values):
++                raise ValueError(f"{name} must be in increasing order")
++            object.__setattr__(self, name, tuple(values))
++
++    def to_dict(self) -> dict[str, Any]:
++        return {name: list(value) for name, value in asdict(self).items()}
++
++    @classmethod
++    def from_dict(cls, values: dict[str, Any]) -> CapacitySweepConfig:
++        if not isinstance(values, dict):
++            raise ValueError("capacity sweep configuration must be an object")
++        try:
++            return cls(**values)
++        except TypeError as error:
++            raise ValueError(f"Invalid capacity sweep configuration: {error}") from error
++
++
++def _implementation() -> dict[str, str]:
++    root = Path(__file__).parent
++    return {name: _file_hash(root / name) for name in (
++        "capacity_sweep.py", "sweep.py", "plotting.py", "training_scatter.py",
++    )}
++
++
++def _prepare_runtime(cfg: SingleTrainingConfig) -> torch.device:
++    if cfg.tensorboard:
++        check_tensorboard()
++    if torch.device(cfg.device).type == "cuda" and cfg.deterministic:
++        workspace = os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
++        if workspace not in (":4096:8", ":16:8"):
++            raise ValueError("deterministic CUDA requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8")
++    device = _resolve_device(cfg.device)
++    _setup_runtime(cfg)
++    return device
++
++
++def _streams(reference: RainbowReference, cfg: SingleTrainingConfig,
++             counts: tuple[int, ...] | None = None) -> dict[str, Any]:
++    seed = cfg.seed if cfg.data_seed is None else cfg.data_seed
++    sizes = sorted(set(counts or (cfg.train_samples,)))
++    largest = _points(reference, sizes[-1], seed, "train")
++    prefixes = {str(n): _array_hash(*(array[:n] for array in largest)) for n in sizes}
++    del largest
++    return {
++        "data_seed": seed,
++        "training_prefix_sha256": prefixes,
++        "validation_points_sha256": _array_hash(
++            *_points(reference, cfg.validation_samples, seed, "validation")
++        ),
++        "test_points_sha256": _array_hash(
++            *_points(reference, cfg.test_samples, seed, "test")
++        ),
++        "nesting": "training pools are prefixes of the same deterministic CDF stream",
++    }
++
++
++def _safe_tree(root: Path) -> None:
++    # Generated paths never need symlinks. Check ancestors too: an otherwise
++    # ordinary output path can point into an existing result through a link.
++    for path in (root, *root.parents):
++        if path.is_symlink():
++            raise ValueError(f"sweep output paths must not use symbolic links: {path}")
++    if root.exists():
++        for path in root.rglob("*"):
++            if path.is_symlink():
++                raise ValueError(f"sweep output must not contain symbolic links: {path}")
++
++
++def _open_output(output: Path, manifest: dict[str, Any]) -> None:
++    _safe_tree(output)
++    path = output / "manifest.json"
++    if path.exists():
++        if _read_json(path) != manifest:
++            raise ValueError("sweep data/configuration/code/runtime changed; use a new output directory")
++    else:
++        if output.exists() and any(output.iterdir()):
++            raise FileExistsError("sweep output is not empty and has no manifest; choose a new folder")
++        output.mkdir(parents=True, exist_ok=True)
++        _atomic_json(path, manifest)
++
++
++def _trial_manifest(manifest: dict[str, Any], bins: int) -> dict[str, Any]:
++    return {**manifest, "model": manifest["models"][str(bins)]}
++
++
++def _rows(manifest: dict[str, Any]) -> list[dict[str, Any]]:
++    cfg = SingleTrainingConfig.from_dict(manifest["base_training"])
++    plan = CapacitySweepConfig.from_dict(manifest["sweep"])
++    return [{
++        "trial_id": f"bins_{bins}",
++        "num_bins": bins,
++        "milestone_step": step,
++        "planned_steps": cfg.steps,
++        "learning_rate": cfg.learning_rate,
++        "train_samples": cfg.train_samples,
++        "batch_size": cfg.batch_size,
++        "run_directory": f"bins/k_{bins}/milestones/updates_{step}",
++        "training_directory": f"bins/k_{bins}/training",
++        "status": "pending",
++    } for bins in plan.num_bins for step in plan.milestones]
++
++
++def _snapshot_fields(path: Path, row: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
++    cfg = SingleTrainingConfig.from_dict(manifest["base_training"])
++    checkpoint = read_single_checkpoint(path / "checkpoint.pt")
++    _check_checkpoint(checkpoint, cfg, _trial_manifest(manifest, row["num_bins"]))
++    step = row["milestone_step"]
++    if checkpoint["global_step"] != step:
++        raise ValueError("milestone checkpoint does not end at the recorded update")
++    if type(checkpoint["best_step"]) is not int or not 0 <= checkpoint["best_step"] <= step:
++        raise ValueError("selected checkpoint step must be within the archived training prefix")
++    metrics, best = _read_json(path / "metrics.json"), read_single_checkpoint(path / "best.pt")
++    complete = step == cfg.steps
++    if (
++        metrics.get("complete") is not complete
++        or metrics.get("global_step") != step
++        or metrics.get("selected_step") != checkpoint["best_step"]
++        or metrics.get("best_validation") != checkpoint["best_validation"]
++        or metrics.get("dataset_fingerprint") != manifest["dataset_fingerprint"]
++    ):
++        raise ValueError("milestone metrics and training checkpoint disagree")
++    validation = checkpoint["best_validation"]
++    latest = checkpoint["latest_validation"]
++    if not math.isfinite(validation["nll"]) or not math.isfinite(latest["nll"]):
++        raise ValueError("milestone has no finite validation result")
++    if (
++        best["kind"] != "inference"
++        or best["global_step"] != checkpoint["best_step"]
++        or best.get("validation") != validation
++        or any(best.get(key) != checkpoint.get(key) for key in (
++            "model_config", "physics", "dtype", "dataset_fingerprint", "code_fingerprint",
++            "runtime",
++        ))
++        or not _state_equal(best["model_state"], checkpoint["best_state"])
++    ):
++        raise ValueError("milestone best.pt differs from the validation-selected checkpoint")
++    expected_config = {
++        "schema_version": 2, "family": checkpoint["family"],
++        "model": manifest["models"][str(row["num_bins"])], "training": cfg.to_dict(),
++        "visualization": {"enabled": False, **manifest["plot_configuration"]},
++    }
++    if _read_json(path / "config.json") != expected_config:
++        raise ValueError("milestone saved configuration differs from the sweep")
++    if _read_json(path / "sample_split.json") != checkpoint["sample_split"]:
++        raise ValueError("milestone sample split differs from its checkpoint")
++    history = _read_json(path / "history.json")
++    if history != checkpoint["history"]:
++        raise ValueError("milestone history differs from its checkpoint")
++    if (
++        len(history) != step + 1
++        or any(type(entry.get("global_step")) is not int for entry in history)
++        or [entry["global_step"] for entry in history] != list(range(step + 1))
++    ):
++        raise ValueError("milestone history must contain exactly one ordered entry per update")
++    evaluated = [entry for entry in history if "validation" in entry]
++    if [entry["global_step"] for entry in evaluated] != list(range(0, step + 1, cfg.eval_every)):
++        raise ValueError("milestone history does not match the scheduled validation evaluations")
++    if any(not math.isfinite(entry["validation"]["nll"]) for entry in evaluated):
++        raise ValueError("milestone history contains a nonfinite validation NLL")
++    first_minimum = min(evaluated, key=lambda entry: entry["validation"]["nll"])
++    if first_minimum["global_step"] != checkpoint["best_step"] or (
++        first_minimum["validation"] != validation
++    ):
++        raise ValueError("selected checkpoint is not the first minimum validation NLL in its prefix")
++    if not history or history[-1]["global_step"] != step or (
++        history[-1].get("validation") != latest
++    ):
++        raise ValueError("milestone must coincide with a scheduled validation evaluation")
++    selected_history = next(
++        (entry for entry in history if entry["global_step"] == checkpoint["best_step"]), None
++    )
++    if selected_history is None or selected_history.get("validation") != validation:
++        raise ValueError("selected validation checkpoint is absent from milestone history")
++    test = metrics.get("test")
++    if complete:
++        if not isinstance(test, dict) or test.get("seed") != manifest["fixed_streams"]["data_seed"] or (
++            test.get("sample_count") != cfg.test_samples
++        ):
++            raise ValueError("final milestone must report the common independent test stream")
++    elif test is not None:
++        raise ValueError("an intermediate milestone must not evaluate final test data")
++    parameter_count = sum(
++        value.numel() for name, value in best["model_state"].items()
++        if name.endswith("weight") or name.endswith("bias")
++    )
++    monitor = selected_history.get("train_monitor")
++    results = {
++        "global_step": step,
++        "complete_training_plan": complete,
++        "selected_step": checkpoint["best_step"],
++        "processed_examples": step * cfg.batch_size,
++        "effective_passes": step * cfg.batch_size / cfg.train_samples,
++        "validation_nll": validation["nll"],
++        "validation_kl": validation["forward_kl_estimate"],
++        "validation_kl_standard_error": validation["forward_kl_standard_error"],
++        "validation_hg_kl": validation["hg_forward_kl_estimate"],
++        "latest_validation_nll": latest["nll"],
++        "latest_validation_kl": latest["forward_kl_estimate"],
++        "latest_validation_kl_standard_error": latest["forward_kl_standard_error"],
++        "train_monitor_nll_at_selected_step": None if monitor is None else monitor["nll"],
++        "test_nll": None if test is None else test["nll"],
++        "test_kl": None if test is None else test["forward_kl_estimate"],
++        "test_kl_standard_error": None if test is None else test["forward_kl_standard_error"],
++        "test_relative_ess": None if test is None else (test.get("proposal") or {}).get("relative_ess"),
++        "parameter_count": parameter_count,
++        "parameter_bytes": parameter_count * (4 if cfg.dtype == "float32" else 8),
++        "checkpoint_bytes": (path / "best.pt").stat().st_size,
++        "sample_split": checkpoint["sample_split"],
++    }
++    if manifest["diagnostics"] is not None:
++        results["diagnostics"] = _read_json(path / "diagnostics.json")
++    return results
++
++
++def _snapshot_identity(row: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
++    return {
++        "schema": CAPACITY_SCHEMA,
++        "manifest_sha256": _manifest_hash(manifest),
++        "num_bins": row["num_bins"],
++        "milestone_step": row["milestone_step"],
++        "planned_steps": row["planned_steps"],
++        "scope": "validation-selected prefix of one predeclared optimization trajectory",
++    }
++
++
++def _verify_snapshot(path: Path, row: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
++    receipt = _read_json(path / _RECEIPT)
++    if receipt.get("identity") != _snapshot_identity(row, manifest):
++        raise ValueError("milestone receipt belongs to another experiment or update")
++    hashes = receipt.get("files_sha256", {})
++    required = {*_CORE_FILES, "snapshot.json"}
++    if manifest["visualization_enabled"]:
++        required.update((
++            "learning_curves.png", "plots/plots.json", "plots/reference_pdf.png",
++            "plots/cdf_samples.png", "plots/nf_pdf.png", "plots/comparison.png",
++            "plots/training_scatter.npz",
++        ))
++    if manifest["diagnostics"] is not None:
++        required.add("diagnostics.json")
++    if not isinstance(hashes, dict) or not required <= hashes.keys():
++        raise ValueError("milestone receipt is missing required artifact hashes")
++    actual = {item.relative_to(path).as_posix() for item in path.rglob("*")
++              if item.is_file() and item.name != _RECEIPT}
++    if actual != set(hashes):
++        raise ValueError("milestone artifact set changed after completion")
++    for relative, expected in hashes.items():
++        target = path / relative
++        if not target.resolve().is_relative_to(path.resolve()) or target.is_symlink():
++            raise ValueError("invalid path in milestone receipt")
++        if not target.is_file() or _file_hash(target) != expected:
++            raise ValueError(f"milestone file changed or missing: {target}")
++    metadata = _read_json(path / "snapshot.json")
++    if metadata.get("identity") != receipt["identity"] or (
++        metadata.get("source_files_sha256") != {name: hashes[name] for name in _CORE_FILES}
++    ):
++        raise ValueError("milestone source identity differs from archived files")
++    fields = _snapshot_fields(path, row, manifest)
++    if fields != receipt.get("results"):
++        raise ValueError("milestone results differ from their completion receipt")
++    return {**fields, "elapsed_seconds": receipt["elapsed_seconds"]}
++
++
++def _archive_milestone(
++    source: Path, destination: Path, row: dict[str, Any], manifest: dict[str, Any],
++    model: SingleConditionSphereFlow, reference: RainbowReference,
++    plotting: RainbowPlotConfig, diagnostic_callback: DiagnosticCallback | None,
++) -> dict[str, Any]:
++    source_hashes = {name: _file_hash(source / name) for name in _CORE_FILES}
++    metadata = {
++        "identity": _snapshot_identity(row, manifest),
++        "source_directory": row["training_directory"],
++        "source_files_sha256": source_hashes,
++        "checkpoint_plan": "training_config.steps remains the common final milestone",
++        "selection": "minimum validation NLL among scheduled evaluations up to this milestone",
++    }
++    metadata_path = destination / "snapshot.json"
++    if metadata_path.exists():
++        if _read_json(metadata_path) != metadata:
++            raise ValueError("unfinished milestone snapshot differs from the saved continuation state")
++    else:
++        if destination.exists() and any(destination.iterdir()):
++            raise FileExistsError("nonempty milestone directory has no snapshot identity")
++        destination.mkdir(parents=True, exist_ok=True)
++        _atomic_json(metadata_path, metadata)
++    for name, expected in source_hashes.items():
++        path = destination / name
++        if path.exists():
++            if _file_hash(path) != expected:
++                raise ValueError(f"unfinished milestone source file changed: {path}")
++        else:
++            _atomic_bytes(path, (source / name).read_bytes())
++    if manifest["visualization_enabled"]:
++        plot_training_history(destination / "history.json", destination / "learning_curves.png")
++        plot_rainbow_comparison(
++            model, reference, destination / "plots", config=plotting,
++            checkpoint_path=destination / "best.pt", training_run_directory=destination,
++            title=(f"K = {row['num_bins']}; up to {row['milestone_step']:,} updates; "
++                   f"selected step {_selected_step(destination)}"),
++            selected_step=_selected_step(destination), scatter_mode="training",
++        )
++    if diagnostic_callback is not None:
++        diagnostics = diagnostic_callback(model, reference, destination)
++        if not isinstance(diagnostics, dict):
++            raise ValueError("diagnostic callback must return a JSON object")
++        _atomic_json(destination / "diagnostics.json", diagnostics)
++    # Check the copied scientific state independently before making it reusable.
++    return _snapshot_fields(destination, row, manifest)
++
++
++def _selected_step(directory: Path) -> int:
++    return read_single_checkpoint(directory / "best.pt")["global_step"]
++
++
++def _complete_snapshot(path: Path, row: dict[str, Any], manifest: dict[str, Any],
++                       results: dict[str, Any], elapsed: float) -> dict[str, Any]:
++    receipt = {
++        "identity": _snapshot_identity(row, manifest),
++        "files_sha256": {
++            item.relative_to(path).as_posix(): _file_hash(item)
++            for item in sorted(path.rglob("*")) if item.is_file() and item.name != _RECEIPT
++        },
++        "results": results,
++        "elapsed_seconds": elapsed,
++        "timing_scope": "cumulative recorded attempts including CDF loading/evaluation/plots; not GPU kernel time",
++    }
++    _atomic_json(path / _RECEIPT, receipt)
++    return {**results, "elapsed_seconds": elapsed}
++
++
++_COLUMNS = (
++    "trial_id", "num_bins", "train_samples", "learning_rate", "batch_size", "status",
++    "milestone_step", "planned_steps", "global_step", "selected_step",
++    "processed_examples", "effective_passes", "validation_nll", "validation_kl",
++    "validation_kl_standard_error", "latest_validation_nll", "latest_validation_kl",
++    "latest_validation_kl_standard_error", "validation_hg_kl", "test_nll", "test_kl",
++    "test_kl_standard_error", "test_relative_ess", "elapsed_seconds", "parameter_count",
++    "parameter_bytes", "checkpoint_bytes", "run_directory", "training_directory", "reuse_of",
++)
++
++
++def _summary_plot(output: Path, summary: dict[str, Any]) -> None:
++    from matplotlib.backends.backend_agg import FigureCanvasAgg
++    from matplotlib.figure import Figure
++    from matplotlib.ticker import MaxNLocator
++
++    figure = Figure(figsize=(12, 4.8), layout="constrained")
++    FigureCanvasAgg(figure)
++    axes = figure.subplots(1, 2)
++    rows = [row for row in summary["trials"] if row["status"] == "complete"]
++    for bins in sorted({row["num_bins"] for row in rows}):
++        group = sorted((row for row in rows if row["num_bins"] == bins),
++                       key=lambda row: row["milestone_step"])
++        for axis, metric, title in zip(axes, ("validation_kl", "latest_validation_kl"), (
++            "Best validation checkpoint up to each update", "Last iterate at each update",
++        ), strict=True):
++            axis.errorbar(
++                [row["milestone_step"] for row in group], [row[metric] for row in group],
++                yerr=[1.96 * row[metric + "_standard_error"] for row in group],
++                marker="o", capsize=3, label=f"K = {bins}",
++            )
++            axis.set_title(title)
++    for axis in axes:
++        axis.set_xlabel("Optimizer updates")
++        axis.set_ylabel("Validation forward KL [nats]")
++        axis.xaxis.set_major_locator(MaxNLocator(integer=True))
++        axis.grid(alpha=0.25)
++        if rows:
++            axis.axhline(rows[0]["validation_hg_kl"], color="0.5", ls="--", label="HG")
++            axis.legend(fontsize=8)
++        else:
++            axis.text(0.5, 0.5, "No completed milestones yet", ha="center", transform=axis.transAxes)
++    figure.suptitle("One training trajectory per K; shared fixed points\n"
++                    "Bars: ±1.96 Monte Carlo SE, excluding seed and selection uncertainty", fontsize=10)
++    buffer = io.BytesIO()
++    figure.savefig(buffer, format="png", dpi=140)
++    _atomic_bytes(output / "summary.png", buffer.getvalue())
++    figure.clear()
++
++
++def _write_table(output: Path, summary: dict[str, Any]) -> None:
++    _atomic_json(output / "summary.json", summary)
++    diagnostic_keys = sorted({
++        key for row in summary["trials"] for key, value in row.get("diagnostics", {}).items()
++        if value is None or type(value) in (bool, int, float, str)
++    })
++    buffer = io.StringIO(newline="")
++    writer = csv.DictWriter(
++        buffer, fieldnames=[*_COLUMNS, *(f"diag_{key}" for key in diagnostic_keys)],
++        extrasaction="ignore", lineterminator="\n",
++    )
++    writer.writeheader()
++    writer.writerows({**row, **{
++        f"diag_{key}": row.get("diagnostics", {}).get(key) for key in diagnostic_keys
++    }} for row in summary["trials"])
++    _atomic_bytes(output / "summary.csv", buffer.getvalue().encode("utf-8-sig"))
++
++
++def _write_summary(output: Path, summary: dict[str, Any]) -> None:
++    _write_table(output, summary)
++
++    def number(value: Any) -> str:
++        return "-" if value is None else f"{value:.6g}"
++
++    lines = [
++        "# Spline bins and optimizer updates", "", f"Status: **{summary['status']}**.", "",
++        "Each K follows one trajectory to the predeclared common final update.",
++        "Milestones archive best-so-far validation checkpoints; prefixes are not retrained.",
++        "Bin selection uses only the final milestone's best validation NLL; exact ties use smaller K.",
++        "Intermediate milestones have no final test evaluation. Final test is reporting only.", "",
++        "| K | Updates | Best step | N | Status | Best validation KL | Latest validation KL | Test KL |",
++        "|---:|---:|---:|---:|---|---:|---:|---:|",
++    ]
++    for row in summary["trials"]:
++        link = f"[{row['milestone_step']}]({row['run_directory']}/metrics.json)"
++        lines.append(
++            f"| {row['num_bins']} | {link} | {row.get('selected_step', '-')} | "
++            f"{row['train_samples']} | {row['status']} | {number(row.get('validation_kl'))} | "
++            f"{number(row.get('latest_validation_kl'))} | {number(row.get('test_kl'))} |"
++        )
++    if summary.get("selection"):
++        lines.extend(["", f"Selected bins: **{summary['selection']['selected_num_bins']}**."])
++    lines.extend([
++        "", "![Validation results](summary.png)", "",
++        "Best-so-far validation loss cannot increase along a trajectory by construction;",
++        "the latest-iterate column and complete learning histories show optimization behavior.",
++        "Error bars describe Monte Carlo uncertainty for each model, not differences between",
++        "models, repeated-seed uncertainty, or the uncertainty introduced by selection.",
++        "The same seeds and fixed point pools are used. Different model shapes do not imply",
++        "identical parameter initializations. Every enabled scatter shows its full training pool.",
++        "Checkpoint training_config.steps stays at the common final update in every archive.",
++        "Archives are not modified when optimization continues in the training directory.",
++        "No loss weighting, smoothing, target modification, precision change, or CPU fallback is used.",
++    ])
++    if summary.get("error"):
++        lines.extend(["", "## Stopped milestone", "", summary["error"]])
++    _atomic_bytes(output / "summary.md", ("\n".join(lines) + "\n").encode("utf-8"))
++    _summary_plot(output, summary)
++
++
++def _selection(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, Any]:
++    final = manifest["base_training"]["steps"]
++    candidates = [row for row in rows if row["milestone_step"] == final]
++    if not candidates or any(row["status"] != "complete" for row in candidates):
++        raise ValueError("capacity selection requires all candidates at the common final update")
++    winner = min(candidates, key=lambda row: (row["validation_nll"], row["num_bins"]))
++    return {
++        "schema": CAPACITY_SCHEMA,
++        "manifest_sha256": _manifest_hash(manifest),
++        "selected_num_bins": winner["num_bins"],
++        "selected_trial_id": winner["trial_id"],
++        "selected_run_directory": winner["run_directory"],
++        "selected_validation_nll": winner["validation_nll"],
++        "selected_step": winner["selected_step"],
++        "common_final_update": final,
++        "rule": manifest["selection"],
++        "test_used": False,
++        "candidates": [{key: row[key] for key in (
++            "trial_id", "num_bins", "validation_nll", "validation_kl", "selected_step",
++            "milestone_step", "run_directory",
++        )} for row in candidates],
++    }
++
++
++def run_capacity_sweep(
++    reference: RainbowReference,
++    model_config: SphereFlowConfig,
++    training_config: SingleTrainingConfig,
++    output_directory: str | Path,
++    *,
++    sweep_config: CapacitySweepConfig | None = None,
++    make_plots: bool = True,
++    plot_config: RainbowPlotConfig | None = None,
++    callback: Callable[[dict[str, Any]], None] | None = None,
++    max_milestones_this_run: int | None = None,
++    diagnostic_callback: DiagnosticCallback | None = None,
++    diagnostic_config: dict[str, Any] | None = None,
++) -> dict[str, Any]:
++    """Run or exactly resume a GPU-default bins/updates experiment.
++
++    ``training_config.steps`` must already equal the final planned milestone;
++    neither that field nor the optimizer/RNG/source/runtime resume checks change.
++    ``max_milestones_this_run`` stops after that many newly archived milestones.
++    A process interrupted after optimization but before archival recovers the
++    same update by a zero-update trainer resume, then completes its snapshot.
++    All callbacks for angular diagnostics are reporting-only.
++    """
++    cfg = training_config
++    plan = CapacitySweepConfig() if sweep_config is None else sweep_config
++    plotting = RainbowPlotConfig() if plot_config is None else plot_config
++    if not isinstance(plan, CapacitySweepConfig) or not isinstance(plotting, RainbowPlotConfig):
++        raise ValueError("invalid capacity or plotting configuration")
++    if cfg.steps != plan.milestones[-1]:
++        raise ValueError("training.steps must equal the final capacity milestone from the start")
++    if any(step % cfg.eval_every for step in plan.milestones):
++        raise ValueError("each milestone must be a multiple of training.eval_every")
++    if type(make_plots) is not bool:
++        raise ValueError("make_plots must be boolean")
++    if max_milestones_this_run is not None and (
++        type(max_milestones_this_run) is not int or max_milestones_this_run < 0
++    ):
++        raise ValueError("max_milestones_this_run must be a nonnegative integer")
++    if (diagnostic_callback is None) != (diagnostic_config is None):
++        raise ValueError("diagnostic_callback and diagnostic_config must be supplied together")
++    if diagnostic_config is not None and not isinstance(diagnostic_config, dict):
++        raise ValueError("diagnostic_config must be a JSON object")
++    diagnostics = json.loads(json.dumps(diagnostic_config, allow_nan=False))
++    models = {str(bins): replace(model_config, num_bins=bins).to_dict() for bins in plan.num_bins}
++    device = _prepare_runtime(cfg)
++    manifest = {
++        "schema": CAPACITY_SCHEMA,
++        "base_model": model_config.to_dict(), "models": models,
++        "base_training": cfg.to_dict(), "sweep": plan.to_dict(),
++        "visualization_enabled": make_plots, "plot_configuration": plotting.to_dict(),
++        "trainer_automatic_plots": False,
++        "diagnostics": diagnostics,
++        "dataset_fingerprint": reference.fingerprint(), "data_summary": reference.summary(),
++        "training_code_fingerprint": _code_hash(), "implementation_sha256": _implementation(),
++        "runtime": _runtime(device, cfg.dtype), "fixed_streams": _streams(reference, cfg),
++        "selection": "minimum best validation NLL at common final update; exact ties use smaller bins",
++        "test_policy": "only the final milestone evaluates test; never used for selection or stopping",
++        "initialization": "common seeds, not identical parameter tensors across different shapes",
++    }
++    output = Path(output_directory)
++    _open_output(output, manifest)
++    rows = _rows(manifest)
++    summary = {
++        "schema": CAPACITY_SCHEMA, "manifest_sha256": _manifest_hash(manifest),
++        "status": "running", "trials": rows, "selection": None,
++        "selection_metric": "validation_nll_at_common_final_update",
++        "test_used_for_selection": False,
++        "scope": "one condition and one seed; milestone rows share their training trajectory",
++    }
++    executed = 0
++
++    def notify(event: dict[str, Any]) -> None:
++        if callback is not None:
++            callback(event)
++
++    # Verify every existing immutable archive before changing any summary or
++    # continuation state. An edited later archive must not be noticed only after
++    # retraining an earlier missing one.
++    for row in rows:
++        archive = output / row["run_directory"]
++        if (archive / _RECEIPT).exists():
++            row.update(_verify_snapshot(archive, row, manifest), status="complete")
++
++    try:
++        for row in rows:
++            if row["status"] == "complete":
++                notify({"event": "milestone_reused", "trial_id": row["trial_id"],
++                        "num_bins": row["num_bins"], "milestone_step": row["milestone_step"]})
++                continue
++            if max_milestones_this_run is not None and executed >= max_milestones_this_run:
++                summary["status"] = "paused"
++                _write_summary(output, summary)
++                return summary
++            live, archive = output / row["training_directory"], output / row["run_directory"]
++            checkpoint = live / "checkpoint.pt"
++            current_step = 0
++            resume = None
++            if checkpoint.exists():
++                saved = read_single_checkpoint(checkpoint)
++                _check_checkpoint(saved, cfg, _trial_manifest(manifest, row["num_bins"]))
++                current_step = saved["global_step"]
++                resume = checkpoint
++                del saved
++            elif live.exists() and any(live.iterdir()):
++                raise FileExistsError(f"continuation directory has no resumable checkpoint: {live}")
++            if current_step > row["milestone_step"]:
++                raise ValueError("continuation passed an unarchived milestone; its selected weights cannot be recovered")
++            row["status"] = "running"
++            _write_summary(output, summary)
++            notify({"event": "milestone_started", "trial_id": row["trial_id"],
++                    "num_bins": row["num_bins"], "milestone_step": row["milestone_step"],
++                    "from_step": current_step, "train_samples": cfg.train_samples,
++                    "learning_rate": cfg.learning_rate, "resumed": resume is not None})
++            attempt_path = output / "attempts" / f"{row['trial_id']}.json"
++            attempts = _read_json(attempt_path) if attempt_path.exists() else []
++            started = time.perf_counter()
++            succeeded = False
++            executed += 1
++            result = selected_model = None
++            try:
++                # A completed trainer return already has a consistent metrics
++                # file. Keep those exact bytes when recovering an unfinished
++                # archive; even a zero-update save can reserialize a checkpoint.
++                source_metrics = live / "metrics.json"
++                recovered = (
++                    resume is not None and current_step == row["milestone_step"]
++                    and source_metrics.is_file()
++                    and _read_json(source_metrics).get("global_step") == current_step
++                )
++                if recovered:
++                    _snapshot_fields(live, row, {**manifest, "diagnostics": None})
++                    selected_model, _ = load_single_checkpoint(live / "best.pt", device=device)
++                else:
++                    result = train_single_condition(
++                        reference, SphereFlowConfig.from_dict(models[str(row["num_bins"])]),
++                        cfg, live, resume=resume,
++                        max_steps_this_run=row["milestone_step"] - current_step,
++                        make_plots=False, plot_config=plotting,
++                        callback=lambda entry: notify({
++                            **entry, "trial_id": row["trial_id"], "num_bins": row["num_bins"],
++                            "milestone_step": row["milestone_step"],
++                        }),
++                    )
++                    if result.global_step != row["milestone_step"]:
++                        raise ValueError("trainer did not reach the requested milestone")
++                    selected_model = result.model
++                fields = _archive_milestone(
++                    live, archive, row, manifest, selected_model, reference, plotting,
++                    diagnostic_callback,
++                )
++                elapsed = time.perf_counter() - started
++                row.update(_complete_snapshot(
++                    archive, row, manifest, fields,
++                    sum(attempt["elapsed_seconds"] for attempt in attempts) + elapsed,
++                ), status="complete")
++                succeeded = True
++            finally:
++                attempts.append({
++                    "from_step": current_step, "milestone_step": row["milestone_step"],
++                    "elapsed_seconds": time.perf_counter() - started,
++                    "snapshot_completed": succeeded, "resumed": resume is not None,
++                })
++                _atomic_json(attempt_path, attempts)
++                del result, selected_model
++            notify({"event": "milestone_completed", "trial_id": row["trial_id"],
++                    "num_bins": row["num_bins"], "milestone_step": row["milestone_step"],
++                    "selected_step": row["selected_step"], "validation_kl": row["validation_kl"],
++                    "latest_validation_kl": row["latest_validation_kl"]})
++            _write_summary(output, summary)
++        selection = _selection(rows, manifest)
++        selection_path = output / "selection.json"
++        if selection_path.exists() and _read_json(selection_path) != selection:
++            raise ValueError("saved capacity selection differs from verified validation results")
++        _atomic_json(selection_path, selection)
++        summary.update(status="complete", selection=selection)
++        _write_summary(output, summary)
++        notify({"event": "capacity_sweep_completed", **selection})
++        return summary
++    except BaseException as error:
++        for row in rows:
++            if row["status"] == "running":
++                row["status"] = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
++        summary.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
++                       error=f"{type(error).__name__}: {error}")
++        _write_summary(output, summary)
++        raise
++
++
++def _verified_completed_capacity(reference: RainbowReference, directory: Path):
++    """Read a complete recorded experiment, without rewriting its artifacts."""
++    _safe_tree(directory)
++    manifest = _read_json(directory / "manifest.json")
++    if manifest.get("schema") != CAPACITY_SCHEMA:
++        raise ValueError("source must be a completed capacity sweep")
++    if manifest.get("dataset_fingerprint") != reference.fingerprint():
++        raise ValueError("capacity source uses a different Rainbow record")
++    summary = _read_json(directory / "summary.json")
++    if summary.get("status") != "complete" or summary.get("manifest_sha256") != _manifest_hash(manifest):
++        raise ValueError("capacity source must have a complete, consistent summary")
++    rows = _rows(manifest)
++    if len(rows) != len(summary.get("trials", [])):
++        raise ValueError("capacity source has an unexpected milestone count")
++    for row, recorded in zip(rows, summary["trials"], strict=True):
++        row.update(_verify_snapshot(directory / row["run_directory"], row, manifest), status="complete")
++        if row != recorded:
++            raise ValueError("capacity source summary differs from verified milestone receipts")
++    selection = _selection(rows, manifest)
++    if summary.get("selection") != selection or _read_json(directory / "selection.json") != selection:
++        raise ValueError("capacity source selection differs from verified validation results")
++    selected = next(row for row in rows if row["run_directory"] == selection["selected_run_directory"])
++    return manifest, summary, selected
++
++
++def _sample_summary(output: Path, summary: dict[str, Any]) -> None:
++    _write_table(output, summary)
++    lines = [
++        "# Fixed training pool after bin selection", "", f"Status: **{summary['status']}**.", "",
++        "The completed capacity experiment selects K using validation at the common final update.",
++        "Its original training-pool result is reused without retraining or changing that experiment.",
++        "Other N values start independent optimization runs with the same K, seeds, update count,",
++        "batch size, learning rate, model, precision, and validation/test point streams.",
++        "Training pools are nested prefixes. Changing N changes minibatch indices and repeats.",
++        "Selection uses validation NLL only; exact ties use smaller N. Test is reporting only.", "",
++        "| N | K | Status | Best validation KL | Test KL | Selected step | Source |",
++        "|---:|---:|---|---:|---:|---:|---|",
++    ]
++    for row in summary["trials"]:
++        validation = "-" if row.get("validation_kl") is None else f"{row['validation_kl']:.6g}"
++        test = "-" if row.get("test_kl") is None else f"{row['test_kl']:.6g}"
++        source = "reused capacity result" if row.get("reuse_of") else "new fixed-pool run"
++        lines.append(
++            f"| {row['train_samples']} | {row['num_bins']} | {row['status']} | {validation} | "
++            f"{test} | {row.get('selected_step', '-')} | {source} |"
++        )
++    if summary.get("selection"):
++        lines.extend(["", f"Selected pool size: **{summary['selection']['selected_train_samples']}**."])
++    lines.extend([
++        "", "![Validation versus training pool](summary.png)", "",
++        "CSV/JSON include exact source paths and reuse provenance. Reused elapsed time belongs",
++        "to the original capacity trajectory and is not an additional optimization cost.",
++        "The fixed update comparison does not establish convergence or equal wall-clock cost.",
++        "Each enabled scatter shows all entries in its actual fixed training pool once.",
++    ])
++    if summary.get("error"):
++        lines.extend(["", "## Stopped trial", "", summary["error"]])
++    _atomic_bytes(output / "summary.md", ("\n".join(lines) + "\n").encode("utf-8"))
++
++    from matplotlib.backends.backend_agg import FigureCanvasAgg
++    from matplotlib.figure import Figure
++    from matplotlib.ticker import NullLocator
++
++    figure = Figure(figsize=(7, 4.5), layout="constrained")
++    FigureCanvasAgg(figure)
++    axis = figure.subplots()
++    completed = [row for row in summary["trials"] if row["status"] == "complete"]
++    if completed:
++        axis.errorbar(
++            [row["train_samples"] for row in completed],
++            [row["validation_kl"] for row in completed],
++            yerr=[1.96 * row["validation_kl_standard_error"] for row in completed],
++            marker="o", capsize=4, label="Validation KL (±1.96 MC SE)",
++        )
++        axis.axhline(completed[0]["validation_hg_kl"], ls="--", color="0.5", label="HG")
++        axis.set_xscale("log")
++        axis.set_xticks([row["train_samples"] for row in completed],
++                       [f"{row['train_samples']:,}" for row in completed])
++        axis.xaxis.set_minor_locator(NullLocator())
++        axis.legend(fontsize=8)
++    axis.set_xlabel("Fixed training pool size")
++    axis.set_ylabel("Validation forward KL [nats]")
++    axis.set_title(f"K = {summary['selected_num_bins']}; fixed optimizer updates")
++    axis.grid(alpha=0.25)
++    buffer = io.BytesIO()
++    figure.savefig(buffer, format="png", dpi=140)
++    _atomic_bytes(output / "summary.png", buffer.getvalue())
++    figure.clear()
++
++
++def run_capacity_sample_sweep(
++    reference: RainbowReference,
++    capacity_directory: str | Path,
++    output_directory: str | Path,
++    *,
++    train_samples: tuple[int, ...] = (65536, 262144, 1048576),
++    device: str | None = None,
++    make_plots: bool | None = None,
++    plot_config: RainbowPlotConfig | None = None,
++    callback: Callable[[dict[str, Any]], None] | None = None,
++    max_trials_this_run: int | None = None,
++    diagnostic_callback: DiagnosticCallback | None = None,
++    diagnostic_config: dict[str, Any] | None = None,
++) -> dict[str, Any]:
++    """Compare fixed-pool sizes after a verified, completed bins experiment.
++
++    The exact selected capacity baseline is reused. Every other N is a singleton
++    capacity experiment at the same final update, preserving all existing trainer
++    and archive gates. Source and destination trees must be separate. No source
++    capacity file is modified. Only validation chooses the reported pool size.
++    """
++    source, output = Path(capacity_directory), Path(output_directory)
++    source_root, output_root = source.resolve(), output.resolve()
++    if output_root.is_relative_to(source_root) or source_root.is_relative_to(output_root):
++        raise ValueError("sample sweep output and source capacity trees must be disjoint")
++    parent, parent_summary, baseline = _verified_completed_capacity(reference, source)
++    cfg = SingleTrainingConfig.from_dict(parent["base_training"])
++    if device is not None:
++        cfg = replace(cfg, device=device)
++    selected_device = _prepare_runtime(cfg)
++    if parent["runtime"] != _runtime(selected_device, cfg.dtype) or (
++        parent["training_code_fingerprint"] != _code_hash()
++        or parent["implementation_sha256"] != _implementation()
++    ):
++        raise ValueError("sample comparison requires the capacity experiment's training implementation and runtime")
++    if not isinstance(train_samples, (list, tuple)) or not train_samples or any(
++        type(n) is not int or n < 1 for n in train_samples
++    ) or list(train_samples) != sorted(set(train_samples)):
++        raise ValueError("train_samples must contain unique positive integers in increasing order")
++    counts = tuple(train_samples)
++    if cfg.train_samples not in counts:
++        raise ValueError("train_samples must include the original capacity training-pool size")
++    if max_trials_this_run is not None and (
++        type(max_trials_this_run) is not int or max_trials_this_run < 0
++    ):
++        raise ValueError("max_trials_this_run must be a nonnegative integer")
++    plots = parent["visualization_enabled"] if make_plots is None else make_plots
++    plotting = (RainbowPlotConfig.from_dict(parent["plot_configuration"])
++                if plot_config is None else plot_config)
++    if type(plots) is not bool or not isinstance(plotting, RainbowPlotConfig):
++        raise ValueError("invalid sample-sweep plotting configuration")
++    if (diagnostic_callback is None) != (diagnostic_config is None):
++        raise ValueError("diagnostic_callback and diagnostic_config must be supplied together")
++    if diagnostic_config is not None and not isinstance(diagnostic_config, dict):
++        raise ValueError("diagnostic_config must be a JSON object")
++    diagnostics = json.loads(json.dumps(diagnostic_config, allow_nan=False))
++    fixed_streams = _streams(reference, cfg, counts)
++    for key in ("validation_points_sha256", "test_points_sha256"):
++        if fixed_streams[key] != parent["fixed_streams"][key]:
++            raise ValueError("sample comparison evaluation stream differs from its capacity source")
++    original_count = str(cfg.train_samples)
++    if fixed_streams["training_prefix_sha256"][original_count] != (
++        parent["fixed_streams"]["training_prefix_sha256"][original_count]
++    ):
++        raise ValueError("regenerated baseline pool differs from the capacity source")
++    selected_bins = parent_summary["selection"]["selected_num_bins"]
++    model = SphereFlowConfig.from_dict(parent["models"][str(selected_bins)])
++    manifest = {
++        "schema": SAMPLE_SCHEMA, "capacity_directory": str(source_root),
++        "capacity_manifest_sha256": _file_hash(source / "manifest.json"),
++        "capacity_selection_sha256": _file_hash(source / "selection.json"),
++        "capacity_selection": parent_summary["selection"],
++        "baseline_receipt_sha256": _file_hash(source / baseline["run_directory"] / _RECEIPT),
++        "base_training": cfg.to_dict(), "model": model.to_dict(), "train_samples": list(counts),
++        "fixed_streams": fixed_streams, "dataset_fingerprint": reference.fingerprint(),
++        "training_code_fingerprint": _code_hash(), "implementation_sha256": _implementation(),
++        "runtime": _runtime(selected_device, cfg.dtype),
++        "visualization_enabled": plots, "plot_configuration": plotting.to_dict(),
++        "diagnostics": diagnostics,
++        "selection": "minimum best validation NLL at the common final update; exact ties use smaller N",
++        "test_policy": "reported after each completed plan; never used for selection or stopping",
++    }
++    _open_output(output, manifest)
++    rows = []
++    for n in counts:
++        row = {
++            "trial_id": f"n_{n}", "num_bins": selected_bins, "train_samples": n,
++            "learning_rate": cfg.learning_rate, "batch_size": cfg.batch_size,
++            "milestone_step": cfg.steps, "planned_steps": cfg.steps, "status": "pending",
++            "reuse_of": None,
++            "run_directory": f"n_{n}/bins/k_{selected_bins}/milestones/updates_{cfg.steps}",
++            "training_directory": f"n_{n}/bins/k_{selected_bins}/training",
++        }
++        if n == cfg.train_samples:
++            row.update(baseline)
++            row.update(
++                trial_id=f"n_{n}", reuse_of=f"capacity:{baseline['trial_id']}",
++                run_directory=str((source_root / baseline["run_directory"]).resolve()),
++                training_directory=str((source_root / baseline["training_directory"]).resolve()),
++            )
++        rows.append(row)
++    summary = {
++        "schema": SAMPLE_SCHEMA, "manifest_sha256": _manifest_hash(manifest),
++        "status": "running", "trials": rows, "selection": None,
++        "selected_num_bins": selected_bins, "capacity_selection": parent_summary["selection"],
++        "test_used_for_selection": False,
++        "scope": "fixed-update, same-condition sample-count comparison after capacity selection",
++    }
++    executed = 0
++
++    def notify(event: dict[str, Any]) -> None:
++        if callback is not None:
++            callback(event)
++
++    try:
++        for row in rows:
++            if row["reuse_of"]:
++                notify({"event": "sample_baseline_reused", "train_samples": row["train_samples"],
++                        "run_directory": row["run_directory"]})
++                continue
++            child = output / f"n_{row['train_samples']}"
++            child_cfg = replace(cfg, train_samples=row["train_samples"])
++            child_summary_path = child / "summary.json"
++            if child_summary_path.exists() and _read_json(child_summary_path).get("status") == "complete":
++                child_manifest, child_report, child_row = _verified_completed_capacity(reference, child)
++                if child_manifest["base_training"] != child_cfg.to_dict() or (
++                    child_manifest["base_model"] != model.to_dict()
++                    or child_manifest["sweep"] != {
++                        "num_bins": [selected_bins], "milestones": [cfg.steps],
++                    }
++                    or child_manifest["training_code_fingerprint"] != manifest["training_code_fingerprint"]
++                    or child_manifest["implementation_sha256"] != manifest["implementation_sha256"]
++                    or child_manifest["runtime"] != manifest["runtime"]
++                    or child_manifest["diagnostics"] != diagnostics
++                    or child_manifest["visualization_enabled"] != plots
++                    or child_manifest["plot_configuration"] != plotting.to_dict()
++                ):
++                    raise ValueError("completed sample trial differs from its recorded experiment")
++            else:
++                if max_trials_this_run is not None and executed >= max_trials_this_run:
++                    summary["status"] = "paused"
++                    _sample_summary(output, summary)
++                    return summary
++                row["status"] = "running"
++                _sample_summary(output, summary)
++                executed += 1
++                child_report = run_capacity_sweep(
++                    reference, model, child_cfg, child,
++                    sweep_config=CapacitySweepConfig(num_bins=(selected_bins,), milestones=(cfg.steps,)),
++                    make_plots=plots, plot_config=plotting,
++                    callback=lambda event: notify({**event, "sample_trial_id": row["trial_id"],
++                                                    "train_samples": row["train_samples"]}),
++                    diagnostic_callback=diagnostic_callback, diagnostic_config=diagnostics,
++                )
++                child_row = child_report["trials"][0]
++            row.update({key: value for key, value in child_row.items() if key not in (
++                "trial_id", "run_directory", "training_directory", "reuse_of",
++            )})
++            if row["sample_split"]["training_points_sha256"] != (
++                fixed_streams["training_prefix_sha256"][str(row["train_samples"])]
++            ) or row["sample_split"]["validation_points_sha256"] != (
++                fixed_streams["validation_points_sha256"]
++            ):
++                raise ValueError("sample trial point streams differ from the common nested pools")
++            _sample_summary(output, summary)
++        # Parent data and selected archives remain authoritative throughout the
++        # separate sample-count comparison. Reading them never changes the parent.
++        _verified_completed_capacity(reference, source)
++        winner = min(rows, key=lambda row: (row["validation_nll"], row["train_samples"]))
++        selection = {
++            "schema": SAMPLE_SCHEMA, "manifest_sha256": _manifest_hash(manifest),
++            "selected_num_bins": selected_bins,
++            "selected_train_samples": winner["train_samples"],
++            "selected_trial_id": winner["trial_id"], "selected_run_directory": winner["run_directory"],
++            "selected_validation_nll": winner["validation_nll"], "selected_step": winner["selected_step"],
++            "rule": manifest["selection"], "test_used": False,
++            "candidates": [{key: row[key] for key in (
++                "trial_id", "train_samples", "validation_nll", "validation_kl", "selected_step", "reuse_of",
++            )} for row in rows],
++        }
++        path = output / "selection.json"
++        if path.exists() and _read_json(path) != selection:
++            raise ValueError("saved sample selection differs from verified validation results")
++        _atomic_json(path, selection)
++        summary.update(status="complete", selection=selection)
++        _sample_summary(output, summary)
++        notify({"event": "sample_sweep_completed", **selection})
++        return summary
++    except BaseException as error:
++        for row in rows:
++            if row["status"] == "running":
++                row["status"] = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
++        summary.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
++                       error=f"{type(error).__name__}: {error}")
++        _sample_summary(output, summary)
++        raise
+diff --git a/src/phaseflow/cli.py b/src/phaseflow/cli.py
+index 9a2560c..4da5d7b 100644
+--- a/src/phaseflow/cli.py
++++ b/src/phaseflow/cli.py
+@@ -78,6 +78,39 @@ def _parser() -> argparse.ArgumentParser:
+     rainbow_sweep.add_argument("--max-trials-this-run", type=int)
+     rainbow_sweep.add_argument("--no-plots", action="store_true")
+     rainbow_sweep.add_argument("--quiet", action="store_true")
++    capacity_sweep = commands.add_parser(
++        "sweep-capacity-rainbow", help="compare spline bins along shared optimization milestones"
++    )
++    capacity_sweep.add_argument("--record", required=True, type=Path)
++    capacity_sweep.add_argument("--config", required=True, type=Path)
++    capacity_sweep.add_argument("--sweep-config", required=True, type=Path)
++    capacity_sweep.add_argument("--output", required=True, type=Path)
++    capacity_sweep.add_argument("--device")
++    capacity_sweep.add_argument("--max-milestones-this-run", type=int)
++    capacity_sweep.add_argument("--no-plots", action="store_true")
++    capacity_sweep.add_argument("--quiet", action="store_true")
++    sample_sweep = commands.add_parser(
++        "sweep-samples-rainbow", help="recheck training pool sizes for a completed capacity winner"
++    )
++    sample_sweep.add_argument("--record", required=True, type=Path)
++    sample_sweep.add_argument("--capacity", required=True, type=Path)
++    sample_sweep.add_argument("--output", required=True, type=Path)
++    sample_sweep.add_argument("--device")
++    sample_sweep.add_argument("--train-samples", nargs="+", type=int,
++                              default=[65536, 262144, 1048576])
++    sample_sweep.add_argument("--max-trials-this-run", type=int)
++    sample_sweep.add_argument("--quiet", action="store_true")
++    sampling_audit = commands.add_parser(
++        "audit-sampling-rainbow", help="compare a verified training pool to exact CDF region masses"
++    )
++    sampling_audit.add_argument("--record", required=True, type=Path)
++    sampling_audit.add_argument("--run", required=True, type=Path)
++    sampling_audit.add_argument("--output", required=True, type=Path)
++    sampling_audit.add_argument("--device", default="cuda")
++    sampling_audit.add_argument("--cpu-threads", type=int, default=1)
++    sampling_audit.add_argument("--u-bins", type=int, default=32)
++    sampling_audit.add_argument("--phi-bins", type=int, default=64)
++    sampling_audit.add_argument("--no-plots", action="store_true")
+     rainbow_replot = commands.add_parser(
+         "replot-sweep-rainbow", help="redraw completed sweep maps with every verified training point"
+     )
+@@ -207,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
+     if arguments.command in (
+         "inspect-rainbow", "train-rainbow", "evaluate-rainbow", "plot-rainbow", "precision-rainbow",
+         "sweep-rainbow", "diagnose-rainbow", "replot-sweep-rainbow",
++        "sweep-capacity-rainbow", "sweep-samples-rainbow", "audit-sampling-rainbow",
+     ):
+         return _rainbow_main(arguments)
+     if arguments.command == "plot-history":
+@@ -356,6 +390,27 @@ def _read_sweep_config(path: Path):
+     return sweep_config, enabled, diagnostic_config
+ 
+ 
++def _read_capacity_config(path: Path):
++    from .angular_diagnostics import AngularDiagnosticConfig
++    from .capacity_sweep import CapacitySweepConfig
++
++    with path.open(encoding="utf-8") as handle:
++        config = json.load(handle)
++    if (
++        not isinstance(config, dict)
++        or config.get("schema_version") != 1
++        or set(config) != {"schema_version", "sweep", "diagnostics"}
++        or not isinstance(config["diagnostics"], dict)
++    ):
++        raise ValueError("capacity config requires schema_version=1, sweep and diagnostics")
++    sweep_config = CapacitySweepConfig.from_dict(config["sweep"])
++    diagnostics = config["diagnostics"].copy()
++    enabled = diagnostics.pop("enabled", True)
++    if type(enabled) is not bool:
++        raise ValueError("diagnostics.enabled must be boolean")
++    return sweep_config, enabled, AngularDiagnosticConfig.from_dict(diagnostics)
++
++
+ def _rainbow_main(arguments: argparse.Namespace) -> int:
+     from .rainbow import RainbowReference
+     from .single_condition import (
+@@ -379,6 +434,126 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+         if arguments.command == "inspect-rainbow":
+             _print_json(reference.summary())
+             return 0
++        if arguments.command == "audit-sampling-rainbow":
++            import torch
++
++            from .sampling_audit import audit_training_sampling
++
++            if arguments.cpu_threads < 1:
++                raise ValueError("cpu-threads must be positive")
++            torch.set_num_threads(arguments.cpu_threads)
++            _print_json(audit_training_sampling(
++                reference, arguments.run, arguments.output,
++                device=arguments.device, u_bins=arguments.u_bins, phi_bins=arguments.phi_bins,
++                plot=not arguments.no_plots,
++            ))
++            return 0
++        if arguments.command == "sweep-samples-rainbow":
++            from . import angular_diagnostics
++            from .capacity_sweep import CAPACITY_SCHEMA, run_capacity_sample_sweep
++
++            with (arguments.capacity / "manifest.json").open(encoding="utf-8") as handle:
++                parent = json.load(handle)
++            if not isinstance(parent, dict) or parent.get("schema") != CAPACITY_SCHEMA:
++                raise ValueError("--capacity must identify a completed bin/step sweep")
++            recorded_diagnostics = parent.get("diagnostics")
++            diagnostic_config = diagnostic_identity = None
++            if recorded_diagnostics is not None:
++                if (
++                    not isinstance(recorded_diagnostics, dict)
++                    or recorded_diagnostics.get("id") != "phaseflow.angular_diagnostics.v1"
++                ):
++                    raise ValueError("unsupported saved angular diagnostic configuration")
++                diagnostic_config = angular_diagnostics.AngularDiagnosticConfig.from_dict(
++                    recorded_diagnostics["configuration"],
++                )
++                diagnostic_identity = {
++                    "id": "phaseflow.angular_diagnostics.v1",
++                    "configuration": diagnostic_config.to_dict(),
++                    "implementation_sha256": hashlib.sha256(
++                        Path(angular_diagnostics.__file__).read_bytes()
++                    ).hexdigest(),
++                }
++
++            def sample_diagnostics(model, source, trial_directory):
++                _, trial_config, _, _ = _read_rainbow_config(trial_directory / "config.json")
++                return angular_diagnostics.evaluate_angular_diagnostics(
++                    model, source, trial_directory / "diagnostics",
++                    train_samples=trial_config.train_samples,
++                    batch_size=trial_config.batch_size,
++                    config=diagnostic_config,
++                    checkpoint_path=trial_directory / "best.pt",
++                )
++
++            def sample_progress(entry):
++                print(json.dumps(entry, sort_keys=True, allow_nan=False), flush=True)
++
++            report = run_capacity_sample_sweep(
++                reference, arguments.capacity, arguments.output,
++                train_samples=tuple(arguments.train_samples), device=arguments.device,
++                callback=None if arguments.quiet else sample_progress,
++                max_trials_this_run=arguments.max_trials_this_run,
++                diagnostic_callback=sample_diagnostics if diagnostic_config is not None else None,
++                diagnostic_config=diagnostic_identity,
++            )
++            _print_json({
++                "complete": report["status"] == "complete", "status": report["status"],
++                "output_directory": str(arguments.output.resolve()),
++                "summary": str((arguments.output / "summary.json").resolve()),
++                "table": str((arguments.output / "summary.csv").resolve()),
++                "report": str((arguments.output / "summary.md").resolve()),
++            })
++            return 0
++        if arguments.command == "sweep-capacity-rainbow":
++            from . import angular_diagnostics
++            from .capacity_sweep import run_capacity_sweep
++
++            model_config, training_config, enabled, plot_config = _read_rainbow_config(
++                arguments.config, arguments.device,
++            )
++            sweep_config, diagnose, diagnostic_config = _read_capacity_config(
++                arguments.sweep_config,
++            )
++
++            def capacity_diagnostics(model, source, trial_directory):
++                _, trial_config, _, _ = _read_rainbow_config(trial_directory / "config.json")
++                return angular_diagnostics.evaluate_angular_diagnostics(
++                    model, source, trial_directory / "diagnostics",
++                    train_samples=trial_config.train_samples,
++                    batch_size=trial_config.batch_size,
++                    config=diagnostic_config,
++                    checkpoint_path=trial_directory / "best.pt",
++                )
++
++            def capacity_progress(entry):
++                print(json.dumps(entry, sort_keys=True, allow_nan=False), flush=True)
++
++            report = run_capacity_sweep(
++                reference, model_config, training_config, arguments.output,
++                sweep_config=sweep_config, make_plots=enabled and not arguments.no_plots,
++                plot_config=plot_config,
++                callback=None if arguments.quiet else capacity_progress,
++                max_milestones_this_run=arguments.max_milestones_this_run,
++                diagnostic_callback=capacity_diagnostics if diagnose else None,
++                diagnostic_config=(
++                    {
++                        "id": "phaseflow.angular_diagnostics.v1",
++                        "configuration": diagnostic_config.to_dict(),
++                        "implementation_sha256": hashlib.sha256(
++                            Path(angular_diagnostics.__file__).read_bytes()
++                        ).hexdigest(),
++                    } if diagnose else None
++                ),
++            )
++            _print_json({
++                "complete": report["status"] == "complete", "status": report["status"],
++                "output_directory": str(arguments.output.resolve()),
++                "summary": str((arguments.output / "summary.json").resolve()),
++                "table": str((arguments.output / "summary.csv").resolve()),
++                "report": str((arguments.output / "summary.md").resolve()),
++                "plot": str((arguments.output / "summary.png").resolve()),
++            })
++            return 0
+         if arguments.command == "replot-sweep-rainbow":
+             import torch
+ 
+diff --git a/src/phaseflow/sampling_audit.py b/src/phaseflow/sampling_audit.py
+new file mode 100644
+index 0000000..15a4900
+--- /dev/null
++++ b/src/phaseflow/sampling_audit.py
+@@ -0,0 +1,288 @@
++"""Read-only, finite-sample checks against the stored spherical-cell teacher.
++
++Histograms aggregate exact cell masses; they do not smooth or change the teacher
++used for training. Confidence intervals are per-region descriptive intervals,
++not simultaneous coverage, a global goodness-of-fit test, or model selection.
++"""
++
++from __future__ import annotations
++
++import json
++import math
++import tempfile
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++
++from .rainbow import RainbowReference
++from .single_condition import _array_hash, _points, load_single_checkpoint
++from .training_scatter import resolve_training_scatter
++
++SCHEMA = "phaseflow.training_sampling_audit.v1"
++_REGIONS = (
++    ("rainbow_band", (120.0, 150.0), (-180.0, 180.0)),
++    ("theta_150_neighborhood", (149.0, 151.0), (-180.0, 180.0)),
++    ("theta_90_phi_0_neighborhood", (85.0, 95.0), (-5.0, 5.0)),
++    ("theta_90_phi_0_one_degree", (89.5, 90.5), (-0.5, 0.5)),
++)
++_HYPOTHETICAL_COUNTS = (65536, 262144, 1048576)
++
++
++def _overlap_fractions(old_edges: np.ndarray, new_edges: np.ndarray) -> np.ndarray:
++    lower = np.maximum(new_edges[:-1, None], old_edges[None, :-1])
++    upper = np.minimum(new_edges[1:, None], old_edges[None, 1:])
++    return np.maximum(upper - lower, 0.0) / np.diff(old_edges)[None, :]
++
++
++def integrated_histogram(
++    reference: RainbowReference, u_edges: np.ndarray, phi_edges_degrees: np.ndarray,
++) -> np.ndarray:
++    """Integrate rectangular bins by saved-cell overlap, not PDF quadrature.
++
++Returns probability masses indexed [u_bin, phi_bin]. Angular edges are in the
++recorded source frame. Phi intervals must be within [-180,180]; split any
++seam-crossing interval explicitly. Source u edges may be nonuniform.
++    """
++    reference._require_open()
++    u_edges, phi_edges = np.asarray(u_edges), np.asarray(phi_edges_degrees)
++    for edges, low, high in ((u_edges, 0, 1), (phi_edges, -180, 180)):
++        if (edges.ndim != 1 or len(edges) < 2 or not np.isfinite(edges).all()
++                or np.any(np.diff(edges) <= 0) or edges[0] < low or edges[-1] > high):
++            raise ValueError("Histogram edges must be finite, increasing, and inside the domain")
++    u_fraction = _overlap_fractions(reference.u_edges, u_edges)
++    phi_fraction = _overlap_fractions(
++        np.linspace(-180.0, 180.0, reference.n_phi + 1), phi_edges,
++    )
++    result = np.zeros((len(phi_edges) - 1, len(u_edges) - 1), dtype=np.float64)
++    marginal = np.diff(reference.phi_cdf)
++    # Bounded source-table temporaries, including for large producer grids.
++    for start in range(0, reference.n_phi, 128):
++        stop = min(start + 128, reference.n_phi)
++        mass = marginal[start:stop, None] * np.diff(reference.theta_cdf[start:stop], axis=1)
++        result += phi_fraction[:, start:stop] @ (mass @ u_fraction.T)
++    return result.T
++
++
++def _coordinates(directions: np.ndarray, reference: RainbowReference):
++    source = directions.astype(np.float64) @ reference.source_to_nf
++    radial = np.hypot(source[:, 0], source[:, 1])
++    theta = np.arctan2(radial, source[:, 2])
++    phi = (np.rad2deg(np.arctan2(source[:, 1], source[:, 0])) + 180) % 360 - 180
++    return np.rad2deg(theta), phi, np.sin(theta / 2) ** 2
++
++
++def _wilson_interval(count: int, total: int) -> list[float]:
++    z = 1.959963984540054
++    estimate, correction = count / total, z * z / total
++    center = (estimate + correction / 2) / (1 + correction)
++    half = z * math.sqrt(estimate * (1 - estimate) / total + z * z / (4 * total**2))
++    half /= 1 + correction
++    return [0.0 if count == 0 else center - half, 1.0 if count == total else center + half]
++
++
++def _region_statistics(probability: float, count: int, total: int) -> dict[str, Any]:
++    expected = total * probability
++    sigma = math.sqrt(total * probability * (1 - probability))
++    return {
++        "observed_count": count,
++        "observed_fraction": count / total,
++        "expected_count": expected,
++        "binomial_count_standard_deviation": sigma,
++        "standardized_count_residual": (count - expected) / sigma if sigma > 0 else None,
++        "wilson_95_percent_interval": _wilson_interval(count, total),
++    }
++
++
++def _atomic_write(path: Path, writer) -> None:
++    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".audit-", delete=False) as stream:
++        temporary = Path(stream.name)
++    try:
++        with temporary.open("wb") as stream:
++            writer(stream)
++        temporary.replace(path)
++    finally:
++        temporary.unlink(missing_ok=True)
++
++
++def _plot_histogram(path: Path, u_edges, phi_edges, mass, observed, total, source_kind) -> None:
++    from matplotlib import colormaps
++    from matplotlib.colors import LogNorm
++    from matplotlib.figure import Figure
++
++    from .plotting import _save_figure
++
++    solid_angles = 2 * np.diff(u_edges)[:, None] * np.deg2rad(np.diff(phi_edges))[None, :]
++    densities = (mass / solid_angles, observed / (total * solid_angles))
++    positive = np.concatenate([value[value > 0] for value in densities])
++    low, high = float(positive.min()), float(positive.max())
++    if low == high:
++        low, high = low / 2, high * 2
++    figure = Figure(figsize=(16, 5), constrained_layout=True)
++    axes = figure.subplots(1, 3)
++    cmap = colormaps["viridis"].with_extremes(bad="#d2d6dc")
++    for axis, values, title in zip(axes[:2], densities, (
++        "Exact teacher mass / solid angle", f"Fixed-pool histogram (N = {total:,})",
++    ), strict=True):
++        image = axis.pcolormesh(phi_edges, u_edges, np.ma.masked_equal(values, 0),
++                               cmap=cmap, norm=LogNorm(low, high), shading="flat")
++        axis.set_title(title)
++    figure.colorbar(image, ax=list(axes[:2]), location="bottom", label="PDF [sr^-1], log scale")
++    expected, variance = total * mass, total * mass * (1 - mass)
++    supported = (expected >= 5) & (total - expected >= 5)
++    residual = np.divide(observed - expected, np.sqrt(variance),
++                         out=np.zeros_like(mass), where=variance > 0)
++    limit = max(1.0, float(np.max(np.abs(residual[supported]), initial=0)))
++    image = axes[2].pcolormesh(
++        phi_edges, u_edges, np.ma.masked_where(~supported, residual), shading="flat",
++        cmap=colormaps["coolwarm"].with_extremes(bad="#d2d6dc"), vmin=-limit, vmax=limit,
++    )
++    axes[2].set_title("Per-bin standardized count residual")
++    figure.colorbar(image, ax=axes[2], location="bottom", label="(K - N p) / sqrt(N p (1-p))")
++    for axis in axes:
++        axis.set(xlabel="Source azimuth phi [degrees]", ylabel="u = (1 - cos(theta)) / 2",
++                 xlim=(-180, 180), ylim=(1, 0))
++    figure.suptitle(
++        f"{source_kind} | Equal-solid-angle bins; FP64 counts before the training cast\n"
++        "Gray PDF bins: zero density/count. Gray residuals: expected count or complement < 5.\n"
++        "Coarse counts are a sampler diagnostic; no smoothing or global pass/fail test."
++    )
++    _save_figure(figure, path, dpi=140, write_pdf=False)
++
++
++def audit_training_sampling(
++    reference: RainbowReference, run_directory: str | Path, output_directory: str | Path,
++    *, device: str = "cuda", u_bins: int = 32, phi_bins: int = 64, plot: bool = True,
++) -> dict[str, Any]:
++    """Audit every entry of the verified pool without altering the saved run.
++
++Default ROIs are descriptive neighborhoods, not extracted physical feature
++boundaries. Binomial statistics refer to the pre-cast sampler; post-cast counts
++are reported separately because rounding can move points across boundaries.
++Existing output may be replaced only when its recorded audit identity matches.
++A running identity record is saved before artifacts, allowing an interrupted
++audit to retry without treating incomplete output as a completed measurement.
++    """
++    for name, value in (("u_bins", u_bins), ("phi_bins", phi_bins)):
++        if type(value) is not int or value < 1:
++            raise ValueError(f"{name} must be a positive integer")
++    if type(plot) is not bool:
++        raise ValueError("plot must be boolean")
++    run, output = Path(run_directory).resolve(), Path(output_directory).resolve()
++    if output == run or run.is_relative_to(output) or output.is_relative_to(run):
++        raise ValueError("Audit output must be a separate directory with a disjoint tree from the run")
++    model, _ = load_single_checkpoint(run / "best.pt", device=device)
++    pool = resolve_training_scatter(model, reference, run / "best.pt", run_directory=run)
++    count, data_seed = pool.provenance["sample_count"], pool.provenance["data_seed"]
++    points = _points(reference, count, data_seed, "train")
++    if _array_hash(*points) != pool.provenance["training_points_sha256"]:
++        raise ValueError("Pre-cast training pool does not match its saved hash")
++    before = _coordinates(points[0], reference)
++    after = _coordinates(pool.directions_nf, reference)
++    identity = {
++        "schema": SCHEMA, "dataset_fingerprint": reference.fingerprint(),
++        "training_points_sha256": pool.provenance["training_points_sha256"],
++        "checkpoint_sha256": pool.provenance["plotted_checkpoint"]["sha256"],
++        "geometry_dtype": pool.provenance["geometry_dtype"],
++        "u_bins": u_bins, "phi_bins": phi_bins, "plot": plot,
++    }
++    report_path = output / "sampling_audit.json"
++    artifact_names = {"sampling_audit.json", "sampling_histogram.npz", "sampling_histogram.png"}
++    if output.exists() and any(output.iterdir()):
++        if not report_path.is_file():
++            raise ValueError("Nonempty audit output must contain a matching sampling_audit.json")
++        previous = json.loads(report_path.read_text(encoding="utf-8"))
++        if previous.get("identity") != identity:
++            raise ValueError("Existing audit output belongs to a different run or configuration")
++        entries = list(output.iterdir())
++        if any(path.is_symlink() for path in entries):
++            raise ValueError("Audit artifacts must not be symbolic links")
++        orphans = [path for path in entries if path.name not in artifact_names]
++        if any(not (previous.get("status") == "running" and path.is_file() and (
++            path.name.startswith(".audit-")
++            or (path.name.startswith(".sampling_histogram.png.") and path.suffix == ".tmp")
++        )) for path in orphans):
++            raise ValueError("Audit output contains unrelated files; refusing to overwrite it")
++        # Only the matching unfinished audit owns these temporary files. This
++        # also recovers a process interruption that bypassed finally cleanup.
++        for path in orphans:
++            path.unlink()
++
++    regions = []
++    for name, theta_bounds, phi_bounds in _REGIONS:
++        u_bounds = np.sin(np.deg2rad(theta_bounds) / 2) ** 2
++        probability = float(integrated_histogram(reference, u_bounds, np.array(phi_bounds))[0, 0])
++        if not 0 <= probability <= 1:
++            raise FloatingPointError("Integrated ROI probability is outside [0,1]")
++        counts = [int(np.count_nonzero(
++            (theta >= theta_bounds[0]) & (theta < theta_bounds[1])
++            & (phi >= phi_bounds[0]) & (phi < phi_bounds[1])
++        )) for theta, phi, _ in (before, after)]
++        regions.append({
++            "name": name, "theta_degrees": list(theta_bounds), "phi_degrees": list(phi_bounds),
++            "reference_probability": probability,
++            "precast_fp64": _region_statistics(probability, counts[0], count),
++            "training_cast": {"observed_count": counts[1], "observed_fraction": counts[1] / count,
++                              "count_change_from_precast": counts[1] - counts[0]},
++            "hypothetical_pool_sizes": [{
++                "sample_count": n, "expected_count": n * probability,
++                "probability_of_no_points": (
++                    0.0 if probability == 1 else math.exp(n * math.log1p(-probability))
++                ),
++            } for n in _HYPOTHETICAL_COUNTS],
++        })
++    u_edges, phi_edges = np.linspace(0, 1, u_bins + 1), np.linspace(-180, 180, phi_bins + 1)
++    mass = integrated_histogram(reference, u_edges, phi_edges)
++    histograms = [np.histogram2d(u, phi, bins=(u_edges, phi_edges))[0].astype(np.int64)
++                  for _, phi, u in (before, after)]
++    if any(int(hist.sum()) != count for hist in histograms):
++        raise FloatingPointError("Histogram failed to account for every training-pool entry")
++    expected = count * mass
++    metadata = reference.metadata
++    synthetic = metadata.get("synthetic") is True or any(
++        "synthetic" in str(metadata.get(key, "")).lower() for key in ("purpose", "source_commit")
++    )
++    source_kind = "Synthetic CDF arithmetic fixture" if synthetic else "Stored Rainbow CDF"
++    report = {
++        "schema": SCHEMA, "identity": identity, "status": "complete",
++        "source_kind": "synthetic_fixture" if synthetic else "rainbow_solver_record",
++        "scope": "read_only_actual_training_pool_sampler_diagnostic; no_model_selection",
++        "reference_integration": "stored_cell_overlap_fractions_in_u_and_source_phi; no_PDF_quadrature",
++        "statistical_scope": (
++            "Per-ROI Wilson 95% intervals and binomial residuals for FP64 pre-cast counts. "
++            "ROIs overlap; intervals are not simultaneous. No global p-value or pass/fail. "
++            "Coarse agreement does not establish fine-fringe resolution or solver convergence."
++        ),
++        "sample_count": count, "downsampling": False, "pool": pool.provenance,
++        "region_boundary_convention": "lower inclusive, upper exclusive in theta/source phi",
++        "regions": regions,
++        "histogram": {
++            "shape": [u_bins, phi_bins], "axis_order": ["u_bin", "source_phi_bin"],
++            "cell_measure": "equal_solid_angle", "reference_mass_sum": float(mass.sum()),
++            "precast_count_sum": int(histograms[0].sum()),
++            "training_cast_count_sum": int(histograms[1].sum()),
++            "bins_with_expected_count_below_5": int(np.count_nonzero(expected < 5)),
++            "observed_precast_points_in_zero_mass_bins": int(histograms[0][mass == 0].sum()),
++            "observed_training_cast_points_in_zero_mass_bins": int(histograms[1][mass == 0].sum()),
++            "bins_changed_by_training_cast": int(np.count_nonzero(histograms[0] != histograms[1])),
++            "global_p_value": None,
++        },
++        "artifacts": {"arrays": "sampling_histogram.npz", "report": "sampling_audit.json",
++                      "figure": "sampling_histogram.png" if plot else None},
++    }
++    output.mkdir(parents=True, exist_ok=True)
++    running = (json.dumps({"schema": SCHEMA, "identity": identity, "status": "running"},
++                          indent=2, allow_nan=False) + "\n").encode("utf-8")
++    _atomic_write(report_path, lambda stream: stream.write(running))
++    _atomic_write(output / "sampling_histogram.npz", lambda stream: np.savez_compressed(
++        stream, u_edges=u_edges, phi_edges_degrees=phi_edges, reference_probability=mass,
++        expected_count=expected, precast_fp64_counts=histograms[0],
++        training_cast_counts=histograms[1],
++        cell_solid_angles=2 * np.diff(u_edges)[:, None] * np.deg2rad(np.diff(phi_edges))[None, :],
++    ))
++    if plot:
++        _plot_histogram(output / "sampling_histogram.png", u_edges, phi_edges, mass,
++                        histograms[0], count, source_kind)
++    encoded = (json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8")
++    _atomic_write(report_path, lambda stream: stream.write(encoded))
++    return report
+diff --git a/sweep.bat b/sweep.bat
+index deccbc5..3b96fb0 100644
+--- a/sweep.bat
++++ b/sweep.bat
+@@ -4,15 +4,24 @@ setlocal EnableExtensions DisableDelayedExpansion
+ rem Use the same RECORD as your working execute.bat.
+ rem No argument: run A, select the validation winner, then run B and summarize.
+ rem Repeating the same command continues only an exactly matching sweep.
+-rem Usage: sweep.bat [diagnose^|replot]
++rem Usage: sweep.bat [capacity^|samples^|audit^|diagnose^|replot]
+ rem diagnose evaluates EXISTING_RUN\best.pt without training.
+ rem replot redraws all completed OUTPUT trials with every fixed training point.
++rem capacity compares spline bins at saved optimization milestones.
++rem samples rechecks pool size for the completed capacity winner.
++rem audit checks the actual saved training pool without optimization.
+ set "RECORD=..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800"
+ set "CONFIG=configs\rainbow_single.json"
+ set "SWEEP_CONFIG=configs\rainbow_sweep.json"
+ set "OUTPUT=runs\rainbow_sweep_gpu"
+ set "EXISTING_RUN=runs\rainbow_single_gpu"
+ set "DEVICE=cuda:0"
++set "CAPACITY_CONFIG=configs\rainbow_capacity.json"
++set "CAPACITY_SWEEP_CONFIG=configs\rainbow_capacity_sweep.json"
++set "CAPACITY_OUTPUT=runs\rainbow_capacity_gpu"
++set "SAMPLES_OUTPUT=runs\rainbow_capacity_samples_gpu"
++set "AUDIT_RUN=%OUTPUT%\stage_b\n_262144"
++set "AUDIT_OUTPUT=runs\rainbow_sampling_audit_n262144"
+ 
+ pushd "%~dp0"
+ if not "%ERRORLEVEL%"=="0" exit /b 1
+@@ -26,6 +35,9 @@ if "%MODE%"=="" set "MODE=run"
+ if /i "%MODE%"=="run" goto :check
+ if /i "%MODE%"=="diagnose" goto :check
+ if /i "%MODE%"=="replot" goto :check
++if /i "%MODE%"=="capacity" goto :check
++if /i "%MODE%"=="samples" goto :check
++if /i "%MODE%"=="audit" goto :check
+ goto :usage
+ 
+ :check
+@@ -34,6 +46,9 @@ echo Checking the shared Python and CUDA environment...
+ if not "%ERRORLEVEL%"=="0" goto :failed
+ if not exist "%RECORD%\metadata.json" goto :missing_record
+ if /i "%MODE%"=="replot" goto :replot
++if /i "%MODE%"=="capacity" goto :capacity
++if /i "%MODE%"=="samples" goto :samples
++if /i "%MODE%"=="audit" goto :audit
+ if not exist "%SWEEP_CONFIG%" goto :missing_sweep_config
+ if /i "%MODE%"=="diagnose" goto :diagnose
+ if not exist "%CONFIG%" goto :missing_config
+@@ -54,6 +69,58 @@ echo Monitor: call monitor.bat "%OUTPUT%"
+ set "EXIT_CODE=0"
+ goto :finish
+ 
++:capacity
++if not exist "%CAPACITY_CONFIG%" goto :missing_capacity_config
++if not exist "%CAPACITY_SWEEP_CONFIG%" goto :missing_capacity_config
++echo Comparing spline bins at fixed optimization milestones.
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow sweep-capacity-rainbow ^
++    --record "%RECORD%" ^
++    --config "%CAPACITY_CONFIG%" ^
++    --sweep-config "%CAPACITY_SWEEP_CONFIG%" ^
++    --output "%CAPACITY_OUTPUT%" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Capacity summary: "%CAPACITY_OUTPUT%\summary.md"
++echo Table: "%CAPACITY_OUTPUT%\summary.csv"
++echo Plot: "%CAPACITY_OUTPUT%\summary.png"
++echo Monitor: call monitor.bat "%CAPACITY_OUTPUT%"
++set "EXIT_CODE=0"
++goto :finish
++
++:samples
++if not exist "%CAPACITY_OUTPUT%\selection.json" goto :missing_capacity_run
++echo Comparing pool sizes using the validation-selected spline bin count.
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow sweep-samples-rainbow ^
++    --record "%RECORD%" ^
++    --capacity "%CAPACITY_OUTPUT%" ^
++    --output "%SAMPLES_OUTPUT%" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Point-count summary: "%SAMPLES_OUTPUT%\summary.md"
++echo Table: "%SAMPLES_OUTPUT%\summary.csv"
++echo Monitor: call monitor.bat "%SAMPLES_OUTPUT%"
++set "EXIT_CODE=0"
++goto :finish
++
++:audit
++if not exist "%AUDIT_RUN%\best.pt" goto :missing_audit_run
++if not exist "%AUDIT_RUN%\checkpoint.pt" goto :missing_audit_run
++if not exist "%AUDIT_RUN%\config.json" goto :missing_audit_run
++if not exist "%AUDIT_RUN%\sample_split.json" goto :missing_audit_run
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow audit-sampling-rainbow ^
++    --record "%RECORD%" ^
++    --run "%AUDIT_RUN%" ^
++    --output "%AUDIT_OUTPUT%" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Sampling audit: "%AUDIT_OUTPUT%\sampling_audit.json"
++echo Histogram: "%AUDIT_OUTPUT%\sampling_histogram.png"
++set "EXIT_CODE=0"
++goto :finish
++
+ :replot
+ if not exist "%OUTPUT%\manifest.json" goto :missing_sweep_run
+ if not exist "%OUTPUT%\summary.json" goto :missing_sweep_run
+@@ -112,9 +179,27 @@ echo [ERROR] EXISTING_RUN must contain config.json and best.pt from a completed
+ set "EXIT_CODE=1"
+ goto :finish
+ 
++:missing_capacity_config
++echo [ERROR] Missing "%CAPACITY_CONFIG%" or "%CAPACITY_SWEEP_CONFIG%".
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_capacity_run
++echo [ERROR] CAPACITY_OUTPUT must be a completed bin/step sweep with selection.json.
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_audit_run
++echo [ERROR] AUDIT_RUN must be the original training run, not its replot directory.
++echo [ERROR] Required: best.pt, checkpoint.pt, config.json, sample_split.json.
++set "EXIT_CODE=1"
++goto :finish
++
+ :usage
+-echo Usage: sweep.bat [diagnose^|replot]
+-echo No argument runs or continues the A-to-B sweep.
++echo Usage: sweep.bat [capacity^|samples^|audit^|diagnose^|replot]
++echo No argument runs or continues the original A-to-B sweep.
++echo capacity compares bins/steps. samples rechecks N after capacity.
++echo audit compares the saved training pool to exact CDF probabilities.
+ echo diagnose adds profiles to EXISTING_RUN. replot redraws completed OUTPUT trials.
+ set "EXIT_CODE=1"
+ goto :finish
+diff --git a/tests/test_capacity_cli.py b/tests/test_capacity_cli.py
+new file mode 100644
+index 0000000..d116db6
+--- /dev/null
++++ b/tests/test_capacity_cli.py
+@@ -0,0 +1,149 @@
++"""Integration of new batch routes, using explicit tiny CPU arithmetic fixtures."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++from pathlib import Path
++
++import numpy as np
++import pytest
++from test_single_condition import smooth_teacher
++from test_sweep import configuration, model_configuration
++
++from phaseflow.cli import _parser, main
++
++
++def _configs(path):
++    training, sweep = path / "training.json", path / "sweep.json"
++    training.write_text(json.dumps({
++        "schema_version": 2, "family": "rainbow_single_condition",
++        "model": model_configuration().to_dict(),
++        "training": configuration(device="cuda", steps=4, train_samples=32).to_dict(),
++        "visualization": {"enabled": True, "dpi": 50, "eval_batch_size": 128},
++    }), encoding="utf-8")
++    sweep.write_text(json.dumps({
++        "schema_version": 1,
++        "sweep": {"num_bins": [4, 8], "milestones": [2, 4]},
++        "diagnostics": {"enabled": True, "eval_batch_size": 128, "dpi": 50},
++    }), encoding="utf-8")
++    return training, sweep
++
++
++def test_capacity_cli_milestones_actual_diagnostics_and_audit(tmp_path, capsys):
++    record = smooth_teacher(tmp_path / "record")
++    config, plan = _configs(tmp_path)
++    output = tmp_path / "capacity"
++    command = [
++        "sweep-capacity-rainbow", "--record", str(record), "--config", str(config),
++        "--sweep-config", str(plan), "--output", str(output), "--device", "cpu",
++        "--no-plots", "--quiet",
++    ]
++    assert main([*command, "--max-milestones-this-run", "1"]) == 0
++    assert json.loads(capsys.readouterr().out)["status"] == "paused"
++    partial = json.loads((output / "summary.json").read_text())
++    rows = [row for row in partial["trials"] if row["status"] == "complete"]
++    assert len(rows) == 1
++    first = output / rows[0]["run_directory"]
++    assert rows[0]["milestone_step"] == 2 and rows[0]["test_nll"] is None
++    assert json.loads((first / "metrics.json").read_text())["complete"] is False
++    assert (first / "diagnostics/angular_profiles.png").is_file()
++    before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
++              for p in first.rglob("*") if p.is_file()}
++    audit = tmp_path / "audit"
++    assert main([
++        "audit-sampling-rainbow", "--record", str(record), "--run", str(first),
++        "--output", str(audit), "--device", "cpu", "--u-bins", "4", "--phi-bins", "8",
++    ]) == 0
++    report = json.loads(capsys.readouterr().out)
++    assert report["sample_count"] == 32 and report["downsampling"] is False
++    assert report["histogram"]["precast_count_sum"] == 32
++    assert (audit / "sampling_histogram.png").is_file()
++    with np.load(audit / "sampling_histogram.npz", allow_pickle=False) as arrays:
++        assert arrays["precast_fp64_counts"].sum() == 32
++    assert before == {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
++                      for p in first.rglob("*") if p.is_file()}
++    assert main(command) == 0
++    assert json.loads(capsys.readouterr().out)["status"] == "complete"
++    assert before == {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
++                      for p in first.rglob("*") if p.is_file()}
++    summary = json.loads((output / "summary.json").read_text())
++    assert len(summary["trials"]) == 4
++    assert summary["test_used_for_selection"] is False
++    for row in summary["trials"]:
++        snapshot = output / row["run_directory"]
++        saved = json.loads((snapshot / "config.json").read_text())
++        assert saved["training"]["device"] == "cpu"
++        assert saved["training"]["steps"] == 4
++        assert row["selected_step"] <= row["milestone_step"]
++
++    # The next stage uses the verified saved experiment, not mutable launch configs.
++    config.unlink()
++    plan.unlink()
++    parent_before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
++                     for p in output.rglob("*") if p.is_file()}
++    samples = tmp_path / "samples"
++    sample_command = [
++        "sweep-samples-rainbow", "--record", str(record), "--capacity", str(output),
++        "--output", str(samples), "--device", "cpu", "--train-samples", "16", "32", "64",
++        "--quiet",
++    ]
++    assert main([*sample_command, "--max-trials-this-run", "1"]) == 0
++    assert json.loads(capsys.readouterr().out)["status"] == "paused"
++    assert main(sample_command) == 0
++    assert json.loads(capsys.readouterr().out)["status"] == "complete"
++    sample_summary = json.loads((samples / "summary.json").read_text())
++    assert len(sample_summary["trials"]) == 3
++    reused = [row for row in sample_summary["trials"] if row.get("reuse_of")]
++    assert len(reused) == 1 and reused[0]["train_samples"] == 32
++    assert sample_summary["selected_num_bins"] == summary["selection"]["selected_num_bins"]
++    for row in sample_summary["trials"]:
++        snapshot = samples / row["run_directory"]
++        diagnostics = json.loads((snapshot / "diagnostics/angular_diagnostics.json").read_text())
++        assert diagnostics["expected_counts"]["train_samples"] == row["train_samples"]
++    assert parent_before == {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
++                             for p in output.rglob("*") if p.is_file()}
++
++
++def test_new_command_defaults_and_reject_changed_final_schedule(tmp_path):
++    parser = _parser()
++    audit = parser.parse_args([
++        "audit-sampling-rainbow", "--record", "record", "--run", "run", "--output", "audit",
++    ])
++    assert audit.device == "cuda"
++    record = smooth_teacher(tmp_path / "record")
++    config, plan = _configs(tmp_path)
++    value = json.loads(plan.read_text())
++    value["sweep"]["milestones"] = [2, 6]
++    plan.write_text(json.dumps(value))
++    with pytest.raises(ValueError, match="training.steps"):
++        main([
++            "sweep-capacity-rainbow", "--record", str(record), "--config", str(config),
++            "--sweep-config", str(plan), "--output", str(tmp_path / "out"),
++            "--device", "cpu", "--quiet",
++        ])
++    assert not (tmp_path / "out").exists()
++
++
++def test_batch_keeps_shared_python_and_branches_before_old_sweep_configs():
++    # Static portability check only: this does not claim a Windows CMD execution.
++    root = Path(__file__).resolve().parents[1]
++    raw = (root / "sweep.bat").read_bytes()
++    assert raw.replace(b"\r\n", b"").find(b"\n") == -1
++    script = raw.decode("ascii")
++    assert "call environment.bat" in script
++    for mode, command in (
++        ("capacity", "sweep-capacity-rainbow"),
++        ("samples", "sweep-samples-rainbow"),
++        ("audit", "audit-sampling-rainbow"),
++    ):
++        assert script.index(f'if /i "%MODE%"=="{mode}" goto :{mode}') < script.index(
++            'if not exist "%SWEEP_CONFIG%"'
++        )
++        assert f'"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow {command}' in script
++    assert 'if "%MODE%"=="" set "MODE=run"' in script
++    base = json.loads((root / "configs/rainbow_capacity.json").read_text())
++    plan = json.loads((root / "configs/rainbow_capacity_sweep.json").read_text())
++    assert base["training"]["steps"] == max(plan["sweep"]["milestones"])
++    assert base["training"]["device"] == "cuda"
++    assert base["training"]["train_samples"] == 262144
+diff --git a/tests/test_capacity_sweep.py b/tests/test_capacity_sweep.py
+new file mode 100644
+index 0000000..4505794
+--- /dev/null
++++ b/tests/test_capacity_sweep.py
+@@ -0,0 +1,413 @@
++"""Tiny synthetic CPU checks of experiment identity, trajectory and reporting.
++
++These tests do not establish CUDA performance or Rainbow solver accuracy.
++"""
++
++from __future__ import annotations
++
++import json
++from dataclasses import replace
++
++import numpy as np
++import pytest
++from test_single_condition import assert_state_equal, smooth_teacher
++
++import phaseflow.capacity_sweep as capacity
++import phaseflow.single_condition as single
++from phaseflow.capacity_sweep import (
++    CapacitySweepConfig,
++    run_capacity_sample_sweep,
++    run_capacity_sweep,
++)
++from phaseflow.plotting import RainbowPlotConfig
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import SingleTrainingConfig, read_single_checkpoint
++from phaseflow.sphere_model import SphereFlowConfig
++
++
++def configuration(**changes):
++    return replace(SingleTrainingConfig(
++        seed=415, data_seed=2026, device="cpu", dtype="float32", learning_rate=0.003,
++        train_samples=64, validation_samples=128, test_samples=128, proposal_samples=16,
++        batch_size=32, steps=4, eval_every=2, checkpoint_every=2, eval_batch_size=128,
++        tensorboard=False, log_every=1, train_monitor_samples=64,
++    ), **changes)
++
++
++def model_configuration():
++    return SphereFlowConfig(
++        num_coupling_layers=2, num_bins=4, hidden_features=(8, 8),
++        geometry_dtype="model", spline_dtype="model",
++    )
++
++
++def read_json(path):
++    return json.loads(path.read_text(encoding="utf-8"))
++
++
++def fast_summary(monkeypatch):
++    monkeypatch.setattr(capacity, "_summary_plot", lambda *args: None)
++
++
++def test_capacity_seeds_and_validation_selection_not_test_or_intermediate_results(tmp_path, monkeypatch):
++    fast_summary(monkeypatch)
++    original_train, original_evaluate = capacity.train_single_condition, single.evaluate_single_condition
++    active, evaluations, calls = {}, [], []
++
++    def tracked_train(reference, model, cfg, output, **kwargs):
++        active["output"] = output
++        calls.append((model.num_bins, kwargs["max_steps_this_run"], cfg.steps))
++        return original_train(reference, model, cfg, output, **kwargs)
++
++    def inverted_test_ranking(*args, **kwargs):
++        result = original_evaluate(*args, **kwargs)
++        checkpoint = read_single_checkpoint(active["output"] / "checkpoint.pt")
++        evaluations.append(checkpoint["global_step"])
++        # Reporting sentinel intentionally reverses the selection ranking while
++        # leaving actual training and validation computations untouched.
++        result["nll"] = -checkpoint["best_validation"]["nll"]
++        return result
++
++    monkeypatch.setattr(capacity, "train_single_condition", tracked_train)
++    monkeypatch.setattr(single, "evaluate_single_condition", inverted_test_ranking)
++    cfg, output = configuration(), tmp_path / "capacity"
++    plan = CapacitySweepConfig(num_bins=(4, 8), milestones=(2, 4))
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        report = run_capacity_sweep(
++            reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++        )
++    assert report["status"] == "complete"
++    assert calls == [(4, 2, 4), (4, 2, 4), (8, 2, 4), (8, 2, 4)]
++    assert evaluations == [4, 4]
++    rows = report["trials"]
++    final = [row for row in rows if row["milestone_step"] == 4]
++    winner = min(final, key=lambda row: (row["validation_nll"], row["num_bins"]))
++    assert report["selection"]["selected_num_bins"] == winner["num_bins"]
++    assert report["selection"]["test_used"] is False
++    assert min(final, key=lambda row: row["test_nll"])["num_bins"] != winner["num_bins"]
++    manifest = read_json(output / "manifest.json")
++    for row in rows:
++        archive = output / row["run_directory"]
++        checkpoint = read_single_checkpoint(archive / "checkpoint.pt")
++        assert checkpoint["training_config"] == cfg.to_dict()
++        assert checkpoint["global_step"] == row["milestone_step"]
++        assert checkpoint["model_config"]["num_bins"] == row["num_bins"]
++        assert row["selected_step"] <= row["milestone_step"]
++        assert row["processed_examples"] == row["milestone_step"] * cfg.batch_size
++        assert row["sample_split"]["training_points_sha256"] == (
++            manifest["fixed_streams"]["training_prefix_sha256"][str(cfg.train_samples)]
++        )
++        assert row["sample_split"]["validation_points_sha256"] == (
++            manifest["fixed_streams"]["validation_points_sha256"]
++        )
++        assert (row["test_nll"] is None) == (row["milestone_step"] < cfg.steps)
++        assert row["latest_validation_kl"] == checkpoint["latest_validation"]["forward_kl_estimate"]
++        assert row["validation_kl"] == checkpoint["best_validation"]["forward_kl_estimate"]
++        assert (archive / "milestone_completed.json").is_file()
++    assert b"\r" not in (output / "summary.csv").read_bytes()
++    assert (output / "summary.csv").read_bytes().startswith(b"\xef\xbb\xbf")
++
++
++def test_milestone_pause_resume_matches_unsegmented_trajectory_and_freezes_earlier_archive(
++    tmp_path, monkeypatch,
++):
++    fast_summary(monkeypatch)
++    cfg = configuration(steps=6)
++    plan = CapacitySweepConfig(num_bins=(4,), milestones=(2, 4, 6))
++    output = tmp_path / "capacity"
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        full = single.train_single_condition(
++            reference, model_configuration(), cfg, tmp_path / "full", make_plots=False,
++        )
++        paused = run_capacity_sweep(
++            reference, model_configuration(), cfg, output, sweep_config=plan,
++            make_plots=False, max_milestones_this_run=1,
++        )
++        assert paused["status"] == "paused"
++        assert paused["selection"] is None
++        first = output / paused["trials"][0]["run_directory"]
++        original = {path.relative_to(first): path.read_bytes() for path in first.rglob("*")
++                    if path.is_file()}
++        done = run_capacity_sweep(
++            reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++        )
++    assert done["status"] == "complete"
++    assert all((first / name).read_bytes() == content for name, content in original.items())
++    segmented = read_single_checkpoint(output / done["trials"][-1]["run_directory"] / "checkpoint.pt")
++    unsegmented = read_single_checkpoint(full.checkpoint_path)
++    for key in ("model_state", "optimizer_state", "best_state"):
++        assert_state_equal(segmented[key], unsegmented[key])
++    for key in ("history", "best_step", "best_validation", "latest_validation", "sample_split"):
++        assert segmented[key] == unsegmented[key]
++    assert capacity._state_equal(segmented["rng_state"], unsegmented["rng_state"])
++    assert capacity._state_equal(segmented["minibatch_rng_state"], unsegmented["minibatch_rng_state"])
++
++
++def test_full_pool_plots_exist_at_partial_milestone_and_real_summary_png(tmp_path):
++    cfg, output = configuration(), tmp_path / "capacity"
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        report = run_capacity_sweep(
++            reference, model_configuration(), cfg, output,
++            sweep_config=CapacitySweepConfig(num_bins=(4,), milestones=(2, 4)),
++            plot_config=RainbowPlotConfig(dpi=45, cdf_samples=7),
++            max_milestones_this_run=1,
++        )
++    assert report["status"] == "paused"
++    row = report["trials"][0]
++    snapshot = output / row["run_directory"]
++    assert read_json(snapshot / "metrics.json")["test"] is None
++    assert read_json(snapshot / "config.json")["visualization"]["enabled"] is False
++    plots = read_json(snapshot / "plots/plots.json")
++    assert plots["scatter"]["sample_count"] == cfg.train_samples
++    assert plots["scatter"]["displayed_sample_count"] == cfg.train_samples
++    assert plots["scatter"]["hash_verified"] is True
++    with np.load(snapshot / "plots/training_scatter.npz") as points:
++        assert points["directions_nf"].shape == (cfg.train_samples, 3)
++    for name in ("reference_pdf.png", "cdf_samples.png", "nf_pdf.png", "comparison.png"):
++        assert (snapshot / "plots" / name).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
++    assert (output / "summary.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
++    receipt = read_json(snapshot / "milestone_completed.json")
++    assert "plots/training_scatter.npz" in receipt["files_sha256"]
++
++
++def test_completed_sweep_reuses_and_refuses_tampered_archive_before_any_writes(tmp_path, monkeypatch):
++    fast_summary(monkeypatch)
++    cfg, output = configuration(), tmp_path / "capacity"
++    plan = CapacitySweepConfig(num_bins=(4,), milestones=(2, 4))
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        first = run_capacity_sweep(
++            reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++        )
++
++        def forbidden(*args, **kwargs):
++            raise AssertionError("completed milestone must not be trained or archived again")
++
++        monkeypatch.setattr(capacity, "train_single_condition", forbidden)
++        monkeypatch.setattr(capacity, "_archive_milestone", forbidden)
++        again = run_capacity_sweep(
++            reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++        )
++        assert first == again
++        changed = output / first["trials"][-1]["run_directory"] / "history.json"
++        changed.write_text("[]\n", encoding="utf-8")
++        before = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
++        with pytest.raises(ValueError, match="file changed or missing"):
++            run_capacity_sweep(
++                reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++            )
++        assert all(path.read_bytes() == data for path, data in before.items())
++
++
++@pytest.mark.parametrize("when", ("before_archive", "after_copy"))
++def test_archive_interruption_recovers_same_checkpoint_without_retraining(tmp_path, monkeypatch, when):
++    fast_summary(monkeypatch)
++    cfg, output = configuration(steps=2), tmp_path / "capacity"
++    plan = CapacitySweepConfig(num_bins=(4,), milestones=(2,))
++    original = capacity._archive_milestone
++    checkpoint_bytes = {}
++
++    def interrupt(*args, **kwargs):
++        source = args[0]
++        checkpoint_bytes["bytes"] = (source / "checkpoint.pt").read_bytes()
++        if when == "after_copy":
++            original(*args, **kwargs)
++        raise KeyboardInterrupt("simulated interruption between optimization and sealing")
++
++    monkeypatch.setattr(capacity, "_archive_milestone", interrupt)
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        with pytest.raises(KeyboardInterrupt):
++            run_capacity_sweep(
++                reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++            )
++        monkeypatch.setattr(capacity, "_archive_milestone", original)
++
++        def forbidden_training(*args, **kwargs):
++            raise AssertionError("a completed trainer return must not reserialize its checkpoint")
++
++        monkeypatch.setattr(capacity, "train_single_condition", forbidden_training)
++        report = run_capacity_sweep(
++            reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++        )
++    row = report["trials"][0]
++    assert report["status"] == "complete"
++    assert (output / row["run_directory"] / "checkpoint.pt").read_bytes() == checkpoint_bytes["bytes"]
++
++
++@pytest.mark.parametrize("change", ("steps", "seed", "code", "runtime", "record"))
++def test_changed_experiment_is_rejected_without_touching_existing_results(tmp_path, monkeypatch, change):
++    fast_summary(monkeypatch)
++    cfg, output = configuration(), tmp_path / "capacity"
++    plan = CapacitySweepConfig(num_bins=(4,), milestones=(2, 4))
++    record_path = smooth_teacher(tmp_path / "record")
++    with RainbowReference(record_path) as reference:
++        run_capacity_sweep(
++            reference, model_configuration(), cfg, output, sweep_config=plan,
++            make_plots=False, max_milestones_this_run=1,
++        )
++    if change == "steps":
++        cfg, plan = replace(cfg, steps=6), CapacitySweepConfig(num_bins=(4,), milestones=(2, 4, 6))
++    elif change == "seed":
++        cfg = replace(cfg, seed=416)
++    elif change == "code":
++        monkeypatch.setattr(capacity, "_implementation", lambda: {"changed": "implementation"})
++    elif change == "runtime":
++        original_runtime = capacity._runtime
++        monkeypatch.setattr(capacity, "_runtime", lambda *args: {**original_runtime(*args), "changed": 1})
++    else:
++        record_path = smooth_teacher(tmp_path / "other_record", isotropic=True)
++    before = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
++    with RainbowReference(record_path) as reference, pytest.raises(ValueError, match="changed"):
++        run_capacity_sweep(
++            reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++        )
++    assert all(path.read_bytes() == data for path, data in before.items())
++
++
++def test_plan_validation_and_tie_breaking(tmp_path):
++    for values in ({"num_bins": [8, 4]}, {"milestones": [2, 2]}, {"num_bins": [True]},
++                   {"milestones": []}, {"unknown": 1}):
++        with pytest.raises(ValueError):
++            CapacitySweepConfig.from_dict(values)
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        with pytest.raises(ValueError, match="final capacity milestone"):
++            run_capacity_sweep(
++                reference, model_configuration(), configuration(), tmp_path / "wrong_steps",
++                sweep_config=CapacitySweepConfig(num_bins=(4,), milestones=(2,)), make_plots=False,
++            )
++        with pytest.raises(ValueError, match="multiple"):
++            run_capacity_sweep(
++                reference, model_configuration(), configuration(), tmp_path / "wrong_interval",
++                sweep_config=CapacitySweepConfig(num_bins=(4,), milestones=(1, 4)), make_plots=False,
++            )
++    rows = [{"trial_id": f"bins_{k}", "num_bins": k, "milestone_step": 4, "status": "complete",
++             "validation_nll": 1.0, "validation_kl": 0.1, "selected_step": 2,
++             "run_directory": f"k_{k}"} for k in (8, 4)]
++    manifest = {"base_training": {"steps": 4}, "selection": "test rule"}
++    assert capacity._selection(rows, manifest)["selected_num_bins"] == 4
++
++
++@pytest.mark.parametrize("change", ("future_best", "future_history"))
++def test_unsealed_recovery_rejects_selected_or_history_steps_outside_prefix(tmp_path, monkeypatch, change):
++    fast_summary(monkeypatch)
++    cfg, output = configuration(steps=2), tmp_path / "capacity"
++    plan = CapacitySweepConfig(num_bins=(4,), milestones=(2,))
++
++    def interrupt(*args, **kwargs):
++        raise KeyboardInterrupt("stop before sealing")
++
++    original = capacity._archive_milestone
++    monkeypatch.setattr(capacity, "_archive_milestone", interrupt)
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        with pytest.raises(KeyboardInterrupt):
++            run_capacity_sweep(
++                reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++            )
++        live = output / "bins/k_4/training"
++        checkpoint = read_single_checkpoint(live / "checkpoint.pt")
++        if change == "future_best":
++            checkpoint["best_step"] = 3
++            expected = "within the archived training prefix"
++        else:
++            checkpoint["history"][1]["global_step"] = 3
++            (live / "history.json").write_text(json.dumps(checkpoint["history"]), encoding="utf-8")
++            expected = "one ordered entry per update"
++        single._atomic_torch_save(live / "checkpoint.pt", checkpoint)
++        monkeypatch.setattr(capacity, "_archive_milestone", original)
++        before = (live / "checkpoint.pt").read_bytes()
++        with pytest.raises(ValueError, match=expected):
++            run_capacity_sweep(
++                reference, model_configuration(), cfg, output, sweep_config=plan, make_plots=False,
++            )
++        assert (live / "checkpoint.pt").read_bytes() == before
++
++
++def test_sample_sweep_reuses_verified_baseline_and_preserves_parent_and_nested_points(tmp_path, monkeypatch):
++    fast_summary(monkeypatch)
++    cfg = configuration(steps=2)
++    parent, output = tmp_path / "capacity", tmp_path / "samples"
++    original_train, trained = capacity.train_single_condition, []
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        parent_report = run_capacity_sweep(
++            reference, model_configuration(), cfg, parent,
++            sweep_config=CapacitySweepConfig(num_bins=(4, 8), milestones=(2,)), make_plots=False,
++        )
++        parent_bytes = {path: path.read_bytes() for path in parent.rglob("*") if path.is_file()}
++
++        def tracked_train(source, model, training, *args, **kwargs):
++            trained.append((training.train_samples, model.num_bins, training.steps))
++            return original_train(source, model, training, *args, **kwargs)
++
++        monkeypatch.setattr(capacity, "train_single_condition", tracked_train)
++        report = run_capacity_sample_sweep(
++            reference, parent, output, train_samples=(32, 64, 128), make_plots=False,
++        )
++        again = run_capacity_sample_sweep(
++            reference, parent, output, train_samples=(32, 64, 128), make_plots=False,
++        )
++    selected_bins = parent_report["selection"]["selected_num_bins"]
++    assert report == again
++    assert report["status"] == "complete"
++    assert trained == [(32, selected_bins, cfg.steps), (128, selected_bins, cfg.steps)]
++    assert all(path.read_bytes() == value for path, value in parent_bytes.items())
++    manifest = read_json(output / "manifest.json")
++    original_row = next(row for row in report["trials"] if row["train_samples"] == 64)
++    assert original_row["reuse_of"] == f"capacity:bins_{selected_bins}"
++    assert not (output / "n_64").exists()
++    for row in report["trials"]:
++        assert row["num_bins"] == selected_bins
++        assert row["global_step"] == cfg.steps
++        assert row["sample_split"]["training_points_sha256"] == (
++            manifest["fixed_streams"]["training_prefix_sha256"][str(row["train_samples"])]
++        )
++        assert row["sample_split"]["validation_points_sha256"] == (
++            manifest["fixed_streams"]["validation_points_sha256"]
++        )
++    winner = min(report["trials"], key=lambda row: (row["validation_nll"], row["train_samples"]))
++    assert report["selection"]["selected_train_samples"] == winner["train_samples"]
++    assert report["selection"]["test_used"] is False
++    assert (output / "summary.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
++    assert b"\r" not in (output / "summary.csv").read_bytes()
++    assert b"\r" not in (output / "summary.json").read_bytes()
++
++
++def test_sample_sweep_controlled_pause_and_modified_parent_refusal(tmp_path, monkeypatch):
++    fast_summary(monkeypatch)
++    cfg, parent, output = configuration(steps=2), tmp_path / "capacity", tmp_path / "samples"
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        run_capacity_sweep(
++            reference, model_configuration(), cfg, parent,
++            sweep_config=CapacitySweepConfig(num_bins=(4,), milestones=(2,)), make_plots=False,
++        )
++        partial = run_capacity_sample_sweep(
++            reference, parent, output, train_samples=(32, 64, 128), make_plots=False,
++            max_trials_this_run=1,
++        )
++        assert partial["status"] == "paused"
++        assert [row["status"] for row in partial["trials"]] == ["complete", "complete", "pending"]
++        assert partial["selection"] is None
++        done = run_capacity_sample_sweep(
++            reference, parent, output, train_samples=(32, 64, 128), make_plots=False,
++        )
++        assert done["status"] == "complete"
++        before = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
++        (parent / "selection.json").write_text("{}", encoding="utf-8")
++        with pytest.raises(ValueError, match="selection differs"):
++            run_capacity_sample_sweep(
++                reference, parent, output, train_samples=(32, 64, 128), make_plots=False,
++            )
++    assert all(path.read_bytes() == value for path, value in before.items())
++
++
++def test_sample_sweep_requires_complete_parent_and_separate_output(tmp_path, monkeypatch):
++    fast_summary(monkeypatch)
++    cfg, parent = configuration(), tmp_path / "capacity"
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        run_capacity_sweep(
++            reference, model_configuration(), cfg, parent,
++            sweep_config=CapacitySweepConfig(num_bins=(4,), milestones=(2, 4)),
++            make_plots=False, max_milestones_this_run=1,
++        )
++        with pytest.raises(ValueError, match="complete, consistent summary"):
++            run_capacity_sample_sweep(reference, parent, tmp_path / "samples", train_samples=(32, 64))
++        with pytest.raises(ValueError, match="disjoint"):
++            run_capacity_sample_sweep(reference, parent, parent / "samples", train_samples=(32, 64))
+diff --git a/tests/test_sampling_audit.py b/tests/test_sampling_audit.py
+new file mode 100644
+index 0000000..64c746b
+--- /dev/null
++++ b/tests/test_sampling_audit.py
+@@ -0,0 +1,194 @@
++"""Sampler audit checks with synthetic CDFs; no Rainbow optical validation."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++
++import numpy as np
++import pytest
++from test_rainbow import write_rainbow_fixture
++
++from phaseflow.rainbow import RainbowReference
++from phaseflow.sampling_audit import (
++    _wilson_interval,
++    audit_training_sampling,
++    integrated_histogram,
++)
++from phaseflow.single_condition import SingleTrainingConfig, _points, train_single_condition
++from phaseflow.sphere_model import SphereFlowConfig
++
++
++def _train(record, run, *, count=4096, geometry_dtype="model"):
++    return train_single_condition(
++        record,
++        SphereFlowConfig(num_coupling_layers=2, num_bins=4, hidden_features=(4,),
++                         geometry_dtype=geometry_dtype, spline_dtype="model"),
++        SingleTrainingConfig(device="cpu", dtype="float32", seed=17, data_seed=37,
++                             train_samples=count, validation_samples=32, test_samples=32,
++                             train_monitor_samples=32, proposal_samples=0, steps=0,
++                             batch_size=16, eval_batch_size=128, tensorboard=False),
++        run, make_plots=False,
++    )
++
++
++def _hashes(directory):
++    return {str(path.relative_to(directory)): hashlib.sha256(path.read_bytes()).hexdigest()
++            for path in directory.rglob("*") if path.is_file()}
++
++
++def test_exact_nonuniform_source_cells_and_partial_rectangles(tmp_path):
++    masses, edges, _ = write_rainbow_fixture(tmp_path / "record")
++    with RainbowReference(tmp_path / "record") as record:
++        actual = integrated_histogram(record, edges, np.linspace(-180, 180, 5))
++        np.testing.assert_allclose(actual, masses.T, rtol=1e-14, atol=1e-16)
++        # Half of each occupied phi cell, with half of its first two u cells:
++        # .05/4 from phi cell 0, and (.1+.2)/4 from phi cell 2.
++        partial = integrated_histogram(record, np.array([0.05, 0.4]), np.array([-135, 45]))
++        np.testing.assert_allclose(partial, [[0.0875]], rtol=1e-14)
++        np.testing.assert_allclose(integrated_histogram(
++            record, np.array([0, 1]), np.array([-180, 180]),
++        ), [[1]], rtol=1e-14)
++
++
++def test_uniform_solid_angle_integrates_on_nonmatching_edges(tmp_path):
++    edges = np.array([0, 0.0001, 0.03, 0.2, 0.91, 1.0])
++    write_rainbow_fixture(tmp_path / "record", masses=np.tile(np.diff(edges) / 7, (7, 1)),
++                          u_edges=edges)
++    u, phi = np.array([0, 0.1, 0.8, 1]), np.array([-180, -21.3, 34.7, 180])
++    with RainbowReference(tmp_path / "record") as record:
++        expected = np.diff(u)[:, None] * np.diff(phi)[None, :] / 360
++        np.testing.assert_allclose(integrated_histogram(record, u, phi), expected, rtol=1e-14)
++
++
++@pytest.mark.parametrize("geometry_dtype", ["model", "float64"])
++def test_audit_counts_exact_recorded_pool_and_keeps_run_unchanged(tmp_path, geometry_dtype):
++    write_rainbow_fixture(tmp_path / "record", frame_rotation=0.37)
++    run, output = tmp_path / "run", tmp_path / "audit"
++    with RainbowReference(tmp_path / "record") as record:
++        _train(record, run, geometry_dtype=geometry_dtype)
++        before_hashes = _hashes(run)
++        report = audit_training_sampling(record, run, output, device="cpu", u_bins=7,
++                                         phi_bins=9, plot=False)
++        assert _hashes(run) == before_hashes
++        assert report["sample_count"] == 4096 and report["downsampling"] is False
++        assert report["status"] == "complete"
++        assert report["pool"]["hash_verified"] is True
++        assert report["histogram"]["global_p_value"] is None
++        assert report["histogram"]["precast_count_sum"] == 4096
++        points = _points(record, 4096, 37, "train")[0]
++        # Independent 3D frame round trip, instead of the audit's 2D rotation.
++        source = (points @ record.nf_frame.T) @ record.frame
++        theta = np.rad2deg(np.arctan2(np.hypot(source[:, 0], source[:, 1]), source[:, 2]))
++        phi = np.rad2deg(np.arctan2(source[:, 1], source[:, 0]))
++        with np.load(output / "sampling_histogram.npz", allow_pickle=False) as arrays:
++            observed = np.histogram2d(np.sin(np.deg2rad(theta) / 2) ** 2, phi,
++                                     bins=(arrays["u_edges"], arrays["phi_edges_degrees"]))[0]
++            np.testing.assert_array_equal(arrays["precast_fp64_counts"], observed)
++            np.testing.assert_allclose(arrays["reference_probability"].sum(), 1, atol=1e-14)
++            np.testing.assert_allclose(arrays["cell_solid_angles"].sum(), 4 * np.pi, atol=1e-14)
++            assert arrays["training_cast_counts"].sum() == 4096
++        for region in report["regions"]:
++            lo, hi = region["theta_degrees"]
++            left, right = region["phi_degrees"]
++            count = np.count_nonzero((theta >= lo) & (theta < hi) & (phi >= left) & (phi < right))
++            assert region["precast_fp64"]["observed_count"] == count
++            for hypothetical in region["hypothetical_pool_sizes"]:
++                probability = region["reference_probability"]
++                assert hypothetical["expected_count"] == probability * hypothetical["sample_count"]
++                assert 0 <= hypothetical["probability_of_no_points"] <= 1
++        assert json.loads((output / "sampling_audit.json").read_text()) == report
++        # A repeated diagnostic may refresh its own matching artifacts only.
++        again = audit_training_sampling(record, run, output, device="cpu", u_bins=7,
++                                        phi_bins=9, plot=False)
++        assert report == again and _hashes(run) == before_hashes
++
++
++def test_no_point_cap_and_plot_with_sparse_zero_count_bins(tmp_path):
++    write_rainbow_fixture(tmp_path / "record", frame_rotation=-0.29)
++    with RainbowReference(tmp_path / "record") as record:
++        _train(record, tmp_path / "run", count=262144)
++        report = audit_training_sampling(record, tmp_path / "run", tmp_path / "audit",
++                                         device="cpu", u_bins=8, phi_bins=16)
++    assert report["sample_count"] == 262144
++    assert report["histogram"]["precast_count_sum"] == 262144
++    assert report["histogram"]["training_cast_count_sum"] == 262144
++    assert report["histogram"]["bins_with_expected_count_below_5"] > 0
++    assert report["histogram"]["observed_precast_points_in_zero_mass_bins"] == 0
++    assert (tmp_path / "audit/sampling_histogram.png").stat().st_size > 1000
++
++
++def test_mismatched_run_or_configuration_refused_before_artifact_changes(tmp_path):
++    write_rainbow_fixture(tmp_path / "record")
++    run, output = tmp_path / "run", tmp_path / "audit"
++    with RainbowReference(tmp_path / "record") as record:
++        _train(record, run)
++        audit_training_sampling(record, run, output, device="cpu", plot=False)
++        hashes = _hashes(output)
++        with pytest.raises(ValueError, match="different run or configuration"):
++            audit_training_sampling(record, run, output, device="cpu", u_bins=16, plot=False)
++        assert _hashes(output) == hashes
++        for overlapping_output in (run, run / "audit", run.parent):
++            with pytest.raises(ValueError, match="separate directory"):
++                audit_training_sampling(record, run, overlapping_output, device="cpu", plot=False)
++        assert not (run / "audit").exists()
++        split = json.loads((run / "sample_split.json").read_text())
++        split["train_samples"] += 1
++        (run / "sample_split.json").write_text(json.dumps(split))
++        with pytest.raises(ValueError, match="differs from checkpoint"):
++            audit_training_sampling(record, run, tmp_path / "invalid", device="cpu", plot=False)
++        assert not (tmp_path / "invalid").exists()
++
++
++def test_failed_plot_retains_running_identity_and_identical_retry_recovers(tmp_path, monkeypatch):
++    import phaseflow.sampling_audit as audit_module
++
++    write_rainbow_fixture(tmp_path / "record")
++    run, output = tmp_path / "run", tmp_path / "audit"
++    with RainbowReference(tmp_path / "record") as record:
++        _train(record, run)
++        original_run = _hashes(run)
++        original_plot = audit_module._plot_histogram
++
++        def fail_plot(*args, **kwargs):
++            raise RuntimeError("intentional plotting failure")
++
++        monkeypatch.setattr(audit_module, "_plot_histogram", fail_plot)
++        with pytest.raises(RuntimeError, match="intentional plotting failure"):
++            audit_training_sampling(record, run, output, device="cpu", u_bins=4, phi_bins=8)
++        incomplete = json.loads((output / "sampling_audit.json").read_text())
++        assert incomplete["status"] == "running"
++        assert (output / "sampling_histogram.npz").is_file()
++        assert not (output / "sampling_histogram.png").exists()
++        assert _hashes(run) == original_run
++        # Simulate a killed writer's temporary files, which do not belong to a
++        # different experiment merely because their artifact write was incomplete.
++        orphans = [output / ".audit-stale", output / ".sampling_histogram.png.stale.tmp"]
++        for path in orphans:
++            path.write_bytes(b"interrupted output")
++        incomplete_hashes = _hashes(output)
++        with pytest.raises(ValueError, match="different run or configuration"):
++            audit_training_sampling(record, run, output, device="cpu", u_bins=8, phi_bins=8)
++        assert _hashes(output) == incomplete_hashes
++        monkeypatch.setattr(audit_module, "_plot_histogram", original_plot)
++        report = audit_training_sampling(record, run, output, device="cpu", u_bins=4, phi_bins=8)
++        assert report["status"] == "complete"
++        assert report["identity"] == incomplete["identity"]
++        assert json.loads((output / "sampling_audit.json").read_text()) == report
++        assert (output / "sampling_histogram.png").stat().st_size > 1000
++        assert not any(path.exists() for path in orphans)
++        assert _hashes(run) == original_run
++
++
++def test_wilson_intervals_cover_boundary_estimates_and_known_values():
++    np.testing.assert_allclose(_wilson_interval(0, 10), [0, 0.2775327998628892], rtol=1e-14)
++    np.testing.assert_allclose(_wilson_interval(10, 10), [0.7224672001371107, 1], rtol=1e-14)
++    np.testing.assert_allclose(_wilson_interval(5, 10), [0.236593090512564, 0.763406909487436],
++                               rtol=1e-14)
++
++
++@pytest.mark.parametrize("option", [{"u_bins": 0}, {"phi_bins": True}, {"plot": 1}])
++def test_invalid_options_fail_before_loading_run(tmp_path, option):
++    with pytest.raises(ValueError):
++        audit_training_sampling(None, tmp_path / "missing", tmp_path / "output", **option)
++    assert not (tmp_path / "output").exists()

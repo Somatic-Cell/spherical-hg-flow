@@ -118,8 +118,47 @@ validation に繰り返し適合させた選択の不確かさも表していま
 
 各試行は，既存の `config.json`，`best.pt`，`checkpoint.pt`，`history.jsonl`，
 `learning_curves.png`，TensorBoard，`metrics.json`，`plots/comparison.png` なども保存します．
-比較図の CDF 点群は描画用の独立 stream で，学習 pool 自体の散布図ではありません．
+比較図の点群は，保存記録のハッシュで同一性を確認した固定学習 pool の全 N 点です．
+`plots/training_scatter.npz` に全点の NF 方向とソルバ座標の角度も保存します．
 PDF の色尺度は各試行内で教師と NF が共通です．試行をまたいだ色尺度の同一性は保証していません．
+
+### 完了済み探索を実際の学習点群で再描画する
+
+旧版で描画した独立な 32,768 点を，実際に学習した各 N 点の図に更新するには，
+`sweep.bat` の `RECORD` と `OUTPUT` を完了済みの探索に合わせて実行します．
+
+```bat
+call sweep.bat replot
+```
+
+`OUTPUT/manifest.json` と `summary.json` に記録された設定と試行を読み，
+保存済み receipt に対して元の成果物のハッシュを検証します．現在の `CONFIG` や
+`SWEEP_CONFIG` を使って学習計画を作り直す処理はありません．全試行が完了していることが
+前提です．各 `best.pt` を順に GPU に読み，教師 PDF・全学習点群・NF PDF を再描画します．
+
+新しい出力先は `OUTPUT/training_point_plots/` です．その下の `stage_a/lr_.../`，
+`stage_b/n_.../` に `comparison.png`，3 種類の個別マップ，`plots.json` と
+`training_scatter.npz` を保存します．B の再利用行は，対応する A の出力を参照します．
+`replot_summary.json` に全 7 行と実際の 6 試行の対応を記録します．
+`replot_manifest.json` には元の探索の識別値と今回の描画設定・実装を記録します．
+
+元の重み，評価値，`summary.*`，`selection.json`，旧 `plots/` と receipt は変更しません．
+最適化の追加更新もありません．N を変更して独立な点を再抽出するのでなく，保存された
+data seed と学習用 stream で点群を再生成し，元の pool の SHA-256 と一致することを確認します．
+FP32 geometry で学習した実験では，同じ FP32 cast 後の方向を描きます．
+
+この描画修正で `plotting.py` の識別値が変わるため，旧探索を通常の `sweep.bat` で再開すると
+実装の不一致として停止します．旧結果の図だけを更新する場合は上の `replot` を使い，
+新しい探索は別の `OUTPUT` に保存してください．再描画の専用出力先は，同じ入力・設定・
+実装で再実行した場合のみ再使用できます．出力先を変えたい場合は，次の CLI を使えます．
+
+```bat
+call environment.bat
+"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow replot-sweep-rainbow ^
+  --record "..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800" ^
+  --sweep "runs\rainbow_sweep_gpu" ^
+  --output "runs\rainbow_sweep_training_plots" --device cuda:0
+```
 
 ### 再開と既存結果の保護
 
@@ -172,8 +211,9 @@ log PDF は −infinity のまま NPZ に保存します．小さな正数への
   モデル容量，HG 座標での特徴の狭さを，それぞれ別実験で検討します．
 
 同じ傾向は複数の原因で生じ得るので，この分類だけで因果関係を確定しません．
-特に添付図の「CDF samples N = 32768」は可視化用の点数，「selected step 1200」は
+特に旧版の添付図の「CDF samples N = 32768」は可視化用の点数，「selected step 1200」は
 validation が選んだ重みの時点です．図だけでは学習 pool の N や予定した T は分かりません．
+更新版の Fixed training pool の図は，その実験の学習 pool の N と一致します．
 
 ## 5. Jendersie & d'Eon (2023) の損失をどう評価するか
 

@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "family": "rainbow_single_condition",
+  "model": {
+    "num_coupling_layers": 4,
+    "num_bins": 16,
+    "hidden_features": [
+      64,
+      64
+    ],
+    "mirror_symmetry": true,
+    "min_bin_width": 1e-05,
+    "min_bin_height": 1e-05,
+    "min_derivative": 0.0001,
+    "activation": "silu",
+    "spline_dtype": "model",
+    "geometry_dtype": "model"
+  },
+  "training": {
+    "seed": 415,
+    "data_seed": 2026,
+    "device": "cuda",
+    "dtype": "float32",
+    "train_samples": 262144,
+    "validation_samples": 32768,
+    "test_samples": 65536,
+    "proposal_samples": 16384,
+    "batch_size": 1024,
+    "steps": 20000,
+    "learning_rate": 0.003,
+    "eval_every": 100,
+    "checkpoint_every": 100,
+    "eval_batch_size": 4096,
+    "grad_clip_norm": 10.0,
+    "deterministic": true,
+    "cpu_threads": 1,
+    "log_every": 20,
+    "tensorboard": true,
+    "train_monitor_samples": 8192
+  },
+  "visualization": {
+    "enabled": true,
+    "cdf_samples": 32768,
+    "seed": 2027,
+    "eval_batch_size": 4096,
+    "dpi": 160,
+    "write_pdf": false
+  }
+}

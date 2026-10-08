@@ -59,6 +59,11 @@ The current primary workflow is the **single-condition Rainbow model** documente
   Model selection uses validation data; final test data must not select weights.
   Record seeds, sample counts, update count, optimizer/RNG state, complete
   configuration, input file hashes and physical-source metadata.
+- Capacity sweeps plan the final optimizer update count before training. Archive
+  each milestone's best validation state before continuing, and never reuse a
+  later selected checkpoint for an earlier milestone. Sample-count comparisons
+  verify and preserve their completed parent experiment. Sampler-audit output
+  must be in a directory tree disjoint from the saved run or milestone archive.
 - Use NLL / forward KL with the correct solid-angle measure. Negative continuous
   NLL is valid. A finite-sample KL estimate can fluctuate below zero; do not
   replace it by zero or rename a plain NLL as KL. Evaluate importance ESS using
@@ -82,6 +87,10 @@ The current primary workflow is the **single-condition Rainbow model** documente
   recorded source frame, axes, extent and aspect. Share the two PDF maps' log
   color scale; mark true zero target density rather than flooring it. A scatter
   map in theta/azimuth coordinates is not an equal-area density estimate.
+  The default scatter must show every entry of the actual fixed training pool
+  once, without a display sample cap. Verify regeneration against the saved pool
+  hash and apply the saved training geometry dtype before plotting. Keep old
+  completed sweep artifacts intact when producing revised plots.
 - Report only actually executed platforms and measurements. CPU Python or host
   C++ tests do not establish CUDA training, NVCC compilation, OptiX integration,
   renderer correctness, or GPU sampling/evaluation speed.

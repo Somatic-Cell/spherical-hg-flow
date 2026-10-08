@@ -1,0 +1,1916 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 8fd41a3c2c02eed6a8e50dcc0aa7b0846d466474..4c8f64f30ee1f5361ec6d4359ab74f35acc1c50e 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -82,6 +82,10 @@ The current primary workflow is the **single-condition Rainbow model** documente
+   recorded source frame, axes, extent and aspect. Share the two PDF maps' log
+   color scale; mark true zero target density rather than flooring it. A scatter
+   map in theta/azimuth coordinates is not an equal-area density estimate.
++  The default scatter must show every entry of the actual fixed training pool
++  once, without a display sample cap. Verify regeneration against the saved pool
++  hash and apply the saved training geometry dtype before plotting. Keep old
++  completed sweep artifacts intact when producing revised plots.
+ - Report only actually executed platforms and measurements. CPU Python or host
+   C++ tests do not establish CUDA training, NVCC compilation, OptiX integration,
+   renderer correctness, or GPU sampling/evaluation speed.
+diff --git a/README.md b/README.md
+index d5e667575552cf50113edce36abf93cd571722a9..2f8703144a8cac48f62995c1bf23b2e93701f8c5 100644
+--- a/README.md
++++ b/README.md
+@@ -204,6 +204,19 @@ call monitor.bat runs\rainbow_sweep_gpu
+ [探索手順・集計の読み方・135 度付近の診断と論文の損失](docs/SWEEP_AND_RAINBOW_LOSS.md)
+ に詳しい仕様を記載しています．
+ 
++完了済みの A/B 探索について，**実際の固定学習点群を全点表示する図**を作る場合は，
++`sweep.bat` の `RECORD` と `OUTPUT` をその探索に合わせて実行します．
++
++```bat
++call sweep.bat replot
++```
++
++保存済みの重みと設定を読み，`OUTPUT\training_point_plots\` に新しい図を作ります．
++元の評価値，選択結果，旧図，学習記録は保持します．A と B が同じ試行を再利用した行は
++同じ図を参照します．この可視化修正により探索コードの識別値が変わるため，旧探索を
++通常の `sweep.bat` で再開する代わりに，図の更新には `replot` を使います．
++新しい探索を始める場合は新しい `OUTPUT` を指定します．
++
+ ### 完了後の 3 種類のマップ
+ 
+ 予定した更新が完了すると，validation で選んだ最良重みから `runs/rainbow_single_gpu/plots/` に
+@@ -212,10 +225,17 @@ call monitor.bat runs\rainbow_sweep_gpu
+ | ファイル | 内容 |
+ |---|---|
+ | `reference_pdf.png` | CDF のセル質量を立体角で割った教師 PDF，対数色表示 |
+-| `cdf_samples.png` | 同じ CDF から独立に生成した点群，既定 32,768 点 |
++| `cdf_samples.png` | 実際の固定学習点群を，学習時と同じ N 点すべて表示 |
+ | `nf_pdf.png` | NF の PDF 評価，教師図と共通の対数色尺度 |
+ | `comparison.png` | 3 枚を並べた比較図 |
+ | `plots.json` | 描画設定，座標・密度の規約と入力情報 |
++| `training_scatter.npz` | 描画した全学習点の NF 方向，ソルバ座標の角度，点群の検証情報 |
++
++点群は保存された `training.train_samples`，`training.data_seed` と学習用 stream から再生成し，
++学習時の SHA-256 と一致することを検証します．学習時と同じ geometry dtype に変換した方向を
++全点描きます．N が `262144` ならその全点を表示し，点数の上限や間引きはありません．
++これは固定 pool の各点を一度ずつ表示する図で，minibatch での反復回数を含む図ではありません．
++`best.pt` と同じ実験の `checkpoint.pt`，`config.json`，`sample_split.json` が必要です．
+ 
+ 横軸はソルバの方位角 `phi_s` の −180〜180 度，縦軸は散乱角 `theta` の 0〜180 度で，
+ 前方の 0 度を上に表示します．全て同じ軸・範囲と横 : 縦 = 2 : 1 のアスペクト比です．
+@@ -232,11 +252,13 @@ call environment.bat
+ "%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-rainbow ^
+   --record "..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800" ^
+   --checkpoint "runs\rainbow_single_gpu\best.pt" ^
+-  --output "runs\rainbow_single_gpu\plots" --samples 32768 --seed 2027
++  --output "runs\rainbow_single_gpu\plots_training" --scatter training
+ ```
+ 
+ `--write-pdf` で PDF 形式も保存します．学習時の自動出力を省略する場合は `--no-plots` を
+-指定します．描画の設定は学習設定の `visualization` にまとめています．
++指定します．描画の設定は学習設定の `visualization` にまとめています．既存設定の
++`visualization.cdf_samples` と `seed` は，学習点群の点数・seed を変更しません．
++独立なサンプラ診断を明示的に行う `--scatter independent` だけで使用します．
+ [図の仕様と設定](docs/RAINBOW_SINGLE_CONDITION.md#学習完了後の可視化) を参照してください．
+ 
+ ### 中断して再開する
+diff --git a/docs/RAINBOW_SINGLE_CONDITION.md b/docs/RAINBOW_SINGLE_CONDITION.md
+index 7062bc3bb35fc88f820eb30e4451f27a9ee609fd..75e24592192c76fb7e9f5904572e31fbc98b682c 100644
+--- a/docs/RAINBOW_SINGLE_CONDITION.md
++++ b/docs/RAINBOW_SINGLE_CONDITION.md
+@@ -398,10 +398,11 @@ PyTorch / CUDA の再現性には実行環境による範囲があります．
+ | ファイル | 表示内容 |
+ |---|---|
+ | `reference_pdf.png` | 保存 CDF のセル質量を実際の立体角で割った教師 PDF，対数色表示 |
+-| `cdf_samples.png` | 同じ保存 CDF から独立に生成した点群の散布図 |
++| `cdf_samples.png` | 学習に使った固定 pool の全 N 点の散布図 |
+ | `nf_pdf.png` | 学習済み NF の任意方向 PDF 評価，対数色表示 |
+ | `comparison.png` | 上記 3 枚を並べた比較図 |
+ | `plots.json` | 可視化設定，入力と checkpoint の hash，座標・密度・サンプルの情報 |
++| `training_scatter.npz` | 実際に描画した全 N 点の方向，角度，検証情報 |
+ 
+ 全てのマップの横軸はソルバの方位角 `phi_s`，範囲は `[-180,180]` 度です．
+ 縦軸は入射伝播方向からの散乱角 `theta`，範囲は `[0,180]` 度で，前方散乱の 0 度を上に
+@@ -419,9 +420,20 @@ NF も同じ全セルの `u` の中点・方位角の中点で PDF を評価し
+ 全ての正の値が同じ場合だけ，表示用の色範囲を上下に広げます．PDF 自体は変更しません．
+ 両方とも単位は `sr^-1` であり，画像上の角度面積あたりの密度ではありません．
+ 
+-点群は CDF サンプラの定性的な確認用で，既定では 32,768 点です．これは可視化専用の
+-独立な点群であり，学習 pool 自体を全点表示するものではありません．乱数 seed と点数を保存し，
+-学習・validation・test の点数を変えずに散布図の点数を変更できます．
++点群は **学習に使った固定 pool 自体を，全 N 点，元の順序で一度ずつ**表示します．
++学習時の `train_samples` と `data_seed`（未指定なら `seed`），学習用 stream = 0 を使い，
++元の FP64 の方向と教師 log PDF を再生成します．両配列の SHA-256 が学習時に記録された
++`training_points_sha256` と一致した場合だけ，学習と同じ geometry dtype に変換して描きます．
++FP32 学習では，GPU に入力したものと同じ FP32 の方向が対象です．GPU tensor を
++保存していたという主張ではなく，保存記録に対して検証した再生成です．
++
++`best.pt` と同じ実験の `checkpoint.pt`，`config.json`，`sample_split.json` が必要です．
++checkpoint の選択重み・step・条件，設定，入力 CDF と点群ハッシュの一致を確認します．
++不一致や記録の欠落があれば，別の独立点群に置き換えずに停止します．点数の上限や間引きは
++ありません．学習で同じ点を再使用した回数や，監視用 subset の点数とは区別します．
++`plots.json` の `scatter` には使用した N，seed，ハッシュの一致，描画時の dtype と，
++120〜150 度に入った実際の点数を記録します．`training_scatter.npz` は同じ全点を保存します．
++
+ `theta,phi_s` の長方形は等面積投影ではないため，点の見かけの密集度は
+ `p_Omega * sin(theta)` に従います．前方の PDF が大きい場所ほど必ず画面上の点が密になる，
+ という読み方はせず，ピーク・谷の位置や方位角の対応を確認します．定量比較は立体角に関する
+@@ -432,24 +444,35 @@ NLL / KL を使います．
+ ```json
+ "visualization": {
+   "enabled": true,
+-  "cdf_samples": 32768,
+-  "seed": 2027,
+   "eval_batch_size": 16384,
+   "dpi": 160,
+   "write_pdf": false
+ }
+ ```
+ 
++旧設定にある `cdf_samples` と `seed` は互換性のため読み込めますが，学習点群の描画では
++使用しません．`plots.json` にも unused と記録します．独立な CDF サンプラの診断を行う場合
++に限り，CLI の `--scatter independent --samples 32768 --seed 2027` で明示します．
++その図には Independent CDF diagnostic と表示され，学習点群の図とは区別されます．
++
+ `--no-plots` は完了後の自動描画を明示的に省略します．`--max-steps-this-run` で予定の途中で
+ 停止したときには，自動図は作りません．学習済み checkpoint から図だけを作り直す場合は，
+ 次のコマンドを使用できます．NF の評価は既定で CUDA，画像の構成と保存は Matplotlib で行います．
+ 
+-```powershell
+-.\.venv\Scripts\phaseflow.exe plot-rainbow --record $record --checkpoint runs/rainbow_single/best.pt --output runs/rainbow_single/plots --samples 32768 --seed 2027
++```bat
++call environment.bat
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-rainbow ^
++  --record "..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800" ^
++  --checkpoint "runs\rainbow_single_gpu\best.pt" ^
++  --output "runs\rainbow_single_gpu\plots_training" --scatter training
+ ```
+ 
+ `--batch-size` は描画時の NF 評価の batch size，`--dpi` は出力解像度です．
+ `--write-pdf` を付けると，PNG に加えて PDF 形式の図も出力します．
++checkpoint をコピーして別の場所に置いている場合は，`--training-run` で元の学習結果の
++ディレクトリを指定します．A/B 探索の完了済み結果は `call sweep.bat replot` でまとめて
++再描画できます．[既存探索の再描画](SWEEP_AND_RAINBOW_LOSS.md#完了済み探索を実際の学習点群で再描画する)
++を参照してください．
+ 
+ ## 評価指標の読み方
+ 
+diff --git a/docs/SWEEP_AND_RAINBOW_LOSS.md b/docs/SWEEP_AND_RAINBOW_LOSS.md
+index 0444bc51c73ed51f5eb6a1380d45cd196df338f4..6cc1ba271f082c50a05f81cb23fa0f4975cc16ab 100644
+--- a/docs/SWEEP_AND_RAINBOW_LOSS.md
++++ b/docs/SWEEP_AND_RAINBOW_LOSS.md
+@@ -118,9 +118,48 @@ validation に繰り返し適合させた選択の不確かさも表していま
+ 
+ 各試行は，既存の `config.json`，`best.pt`，`checkpoint.pt`，`history.jsonl`，
+ `learning_curves.png`，TensorBoard，`metrics.json`，`plots/comparison.png` なども保存します．
+-比較図の CDF 点群は描画用の独立 stream で，学習 pool 自体の散布図ではありません．
++比較図の点群は，保存記録のハッシュで同一性を確認した固定学習 pool の全 N 点です．
++`plots/training_scatter.npz` に全点の NF 方向とソルバ座標の角度も保存します．
+ PDF の色尺度は各試行内で教師と NF が共通です．試行をまたいだ色尺度の同一性は保証していません．
+ 
++### 完了済み探索を実際の学習点群で再描画する
++
++旧版で描画した独立な 32,768 点を，実際に学習した各 N 点の図に更新するには，
++`sweep.bat` の `RECORD` と `OUTPUT` を完了済みの探索に合わせて実行します．
++
++```bat
++call sweep.bat replot
++```
++
++`OUTPUT/manifest.json` と `summary.json` に記録された設定と試行を読み，
++保存済み receipt に対して元の成果物のハッシュを検証します．現在の `CONFIG` や
++`SWEEP_CONFIG` を使って学習計画を作り直す処理はありません．全試行が完了していることが
++前提です．各 `best.pt` を順に GPU に読み，教師 PDF・全学習点群・NF PDF を再描画します．
++
++新しい出力先は `OUTPUT/training_point_plots/` です．その下の `stage_a/lr_.../`，
++`stage_b/n_.../` に `comparison.png`，3 種類の個別マップ，`plots.json` と
++`training_scatter.npz` を保存します．B の再利用行は，対応する A の出力を参照します．
++`replot_summary.json` に全 7 行と実際の 6 試行の対応を記録します．
++`replot_manifest.json` には元の探索の識別値と今回の描画設定・実装を記録します．
++
++元の重み，評価値，`summary.*`，`selection.json`，旧 `plots/` と receipt は変更しません．
++最適化の追加更新もありません．N を変更して独立な点を再抽出するのでなく，保存された
++data seed と学習用 stream で点群を再生成し，元の pool の SHA-256 と一致することを確認します．
++FP32 geometry で学習した実験では，同じ FP32 cast 後の方向を描きます．
++
++この描画修正で `plotting.py` の識別値が変わるため，旧探索を通常の `sweep.bat` で再開すると
++実装の不一致として停止します．旧結果の図だけを更新する場合は上の `replot` を使い，
++新しい探索は別の `OUTPUT` に保存してください．再描画の専用出力先は，同じ入力・設定・
++実装で再実行した場合のみ再使用できます．出力先を変えたい場合は，次の CLI を使えます．
++
++```bat
++call environment.bat
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow replot-sweep-rainbow ^
++  --record "..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800" ^
++  --sweep "runs\rainbow_sweep_gpu" ^
++  --output "runs\rainbow_sweep_training_plots" --device cuda:0
++```
++
+ ### 再開と既存結果の保護
+ 
+ 同一の探索を再実行すると，完了した試行の設定・checkpoint・結果ファイルのハッシュを確認して
+@@ -172,8 +211,9 @@ log PDF は −infinity のまま NPZ に保存します．小さな正数への
+   モデル容量，HG 座標での特徴の狭さを，それぞれ別実験で検討します．
+ 
+ 同じ傾向は複数の原因で生じ得るので，この分類だけで因果関係を確定しません．
+-特に添付図の「CDF samples N = 32768」は可視化用の点数，「selected step 1200」は
++特に旧版の添付図の「CDF samples N = 32768」は可視化用の点数，「selected step 1200」は
+ validation が選んだ重みの時点です．図だけでは学習 pool の N や予定した T は分かりません．
++更新版の Fixed training pool の図は，その実験の学習 pool の N と一致します．
+ 
+ ## 5. Jendersie & d'Eon (2023) の損失をどう評価するか
+ 
+diff --git a/execute.bat b/execute.bat
+index 4fd7d70a994168d1b39fd4dbbb7b3e339aafee86..784bb36de613bd2683b1e696481dc1de01e1d101 100644
+--- a/execute.bat
++++ b/execute.bat
+@@ -12,8 +12,6 @@ set "OUTPUT=runs\rainbow_single_gpu"
+ set "DEVICE=cuda:0"
+ set "EVAL_SAMPLES=65536"
+ set "EVAL_SEED=2026"
+-set "PLOT_SAMPLES=32768"
+-set "PLOT_SEED=2027"
+ 
+ pushd "%~dp0"
+ if not "%ERRORLEVEL%"=="0" exit /b 1
+@@ -111,13 +109,12 @@ echo [4/5] Evaluating the validation-selected checkpoint...
+     --output "%OUTPUT%\evaluation.json"
+ if not "%ERRORLEVEL%"=="0" goto :failed
+ 
+-echo [5/5] Plotting the CDF PDF, CDF samples, and NF PDF...
++echo [5/5] Plotting the CDF PDF, every fixed training point, and NF PDF...
+ "%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-rainbow ^
+     --record "%RECORD%" ^
+     --checkpoint "%OUTPUT%\best.pt" ^
+     --output "%OUTPUT%\plots" ^
+-    --samples %PLOT_SAMPLES% ^
+-    --seed %PLOT_SEED% ^
++    --scatter training ^
+     --device "%DEVICE%"
+ if not "%ERRORLEVEL%"=="0" goto :failed
+ 
+diff --git a/src/phaseflow/cli.py b/src/phaseflow/cli.py
+index 7be1a702eb7c364da9074473f79db4f284140809..9a2560c9aba7aa747874dd6598050e7785072c38 100644
+--- a/src/phaseflow/cli.py
++++ b/src/phaseflow/cli.py
+@@ -78,6 +78,15 @@ def _parser() -> argparse.ArgumentParser:
+     rainbow_sweep.add_argument("--max-trials-this-run", type=int)
+     rainbow_sweep.add_argument("--no-plots", action="store_true")
+     rainbow_sweep.add_argument("--quiet", action="store_true")
++    rainbow_replot = commands.add_parser(
++        "replot-sweep-rainbow", help="redraw completed sweep maps with every verified training point"
++    )
++    rainbow_replot.add_argument("--record", required=True, type=Path)
++    rainbow_replot.add_argument("--sweep", required=True, type=Path)
++    rainbow_replot.add_argument("--output", type=Path)
++    rainbow_replot.add_argument("--device", default="cuda")
++    rainbow_replot.add_argument("--cpu-threads", type=int, default=1)
++    rainbow_replot.add_argument("--quiet", action="store_true")
+     rainbow_diagnose = commands.add_parser(
+         "diagnose-rainbow", help="angular band mass and PDF profiles for an existing selected model"
+     )
+@@ -99,14 +108,16 @@ def _parser() -> argparse.ArgumentParser:
+     rainbow_eval.add_argument("--cpu-threads", type=int, default=1)
+     rainbow_eval.add_argument("--output", type=Path)
+     rainbow_plot = commands.add_parser(
+-        "plot-rainbow", help="aligned CDF PDF, CDF samples and NF PDF for one checkpoint"
++        "plot-rainbow", help="aligned CDF PDF, complete training pool and NF PDF for one checkpoint"
+     )
+     rainbow_plot.add_argument("--record", required=True, type=Path)
+     rainbow_plot.add_argument("--checkpoint", required=True, type=Path)
+     rainbow_plot.add_argument("--output", "--output-dir", required=True, type=Path)
+     rainbow_plot.add_argument("--device", default="cuda")
+-    rainbow_plot.add_argument("--samples", type=int, default=32768)
+-    rainbow_plot.add_argument("--seed", type=int, default=2027)
++    rainbow_plot.add_argument("--scatter", choices=("training", "independent"), default="training")
++    rainbow_plot.add_argument("--training-run", type=Path)
++    rainbow_plot.add_argument("--samples", type=int, help="point count for --scatter independent only")
++    rainbow_plot.add_argument("--seed", type=int, help="sample seed for --scatter independent only")
+     rainbow_plot.add_argument("--batch-size", type=int, default=16384)
+     rainbow_plot.add_argument("--dpi", type=int, default=160)
+     rainbow_plot.add_argument("--write-pdf", action="store_true")
+@@ -195,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
+     arguments = parser.parse_args(argv)
+     if arguments.command in (
+         "inspect-rainbow", "train-rainbow", "evaluate-rainbow", "plot-rainbow", "precision-rainbow",
+-        "sweep-rainbow", "diagnose-rainbow",
++        "sweep-rainbow", "diagnose-rainbow", "replot-sweep-rainbow",
+     ):
+         return _rainbow_main(arguments)
+     if arguments.command == "plot-history":
+@@ -368,6 +379,24 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+         if arguments.command == "inspect-rainbow":
+             _print_json(reference.summary())
+             return 0
++        if arguments.command == "replot-sweep-rainbow":
++            import torch
++
++            from .replot import replot_sweep_training_points
++
++            if arguments.cpu_threads < 1:
++                raise ValueError("cpu-threads must be positive")
++            torch.set_num_threads(arguments.cpu_threads)
++
++            def replot_progress(entry):
++                print(json.dumps(entry, sort_keys=True, allow_nan=False), flush=True)
++
++            _print_json(replot_sweep_training_points(
++                reference, arguments.sweep, arguments.output,
++                device=arguments.device,
++                callback=None if arguments.quiet else replot_progress,
++            ))
++            return 0
+         if arguments.command in ("train-rainbow", "sweep-rainbow"):
+             model_config, training_config, enabled, plot_config = _read_rainbow_config(
+                 arguments.config, arguments.device,
+@@ -495,18 +524,29 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+         if arguments.command == "plot-rainbow":
+             from .plotting import RainbowPlotConfig, plot_rainbow_comparison
+ 
++            if arguments.scatter == "training" and (
++                arguments.samples is not None or arguments.seed is not None
++            ):
++                raise ValueError(
++                    "training scatter uses the saved training count/data seed; "
++                    "--samples and --seed require --scatter independent"
++                )
++            if arguments.scatter == "independent" and arguments.training_run is not None:
++                raise ValueError("--training-run requires --scatter training")
+             report = plot_rainbow_comparison(
+                 model,
+                 reference,
+                 arguments.output,
+                 config=RainbowPlotConfig(
+-                    cdf_samples=arguments.samples,
+-                    seed=arguments.seed,
++                    cdf_samples=32768 if arguments.samples is None else arguments.samples,
++                    seed=2027 if arguments.seed is None else arguments.seed,
+                     eval_batch_size=arguments.batch_size,
+                     dpi=arguments.dpi,
+                     write_pdf=arguments.write_pdf,
+                 ),
+                 checkpoint_path=arguments.checkpoint,
++                scatter_mode=arguments.scatter,
++                training_run_directory=arguments.training_run,
+                 selected_step=(
+                     checkpoint["global_step"] if checkpoint["kind"] == "inference" else None
+                 ),
+diff --git a/src/phaseflow/plotting.py b/src/phaseflow/plotting.py
+index f0261ee202961adfb60c6615c78431c2f2e81c2e..3b225ca7684edef91c8ef44740c29528b108598b 100644
+--- a/src/phaseflow/plotting.py
++++ b/src/phaseflow/plotting.py
+@@ -12,6 +12,7 @@ from __future__ import annotations
+ import hashlib
+ import json
+ import math
++import tempfile
+ from dataclasses import asdict, dataclass
+ from pathlib import Path
+ from typing import TYPE_CHECKING, Any
+@@ -28,7 +29,7 @@ if TYPE_CHECKING:
+     from .sphere_model import SingleConditionSphereFlow
+ 
+ 
+-PLOT_SCHEMA = "phaseflow.rainbow_plots.v1"
++PLOT_SCHEMA = "phaseflow.rainbow_plots.v2"
+ _CDF_PLOT_STREAM = 100
+ _ZERO_COLOR = "#d2d6dc"
+ _DENSITY_LABEL = r"PDF [sr$^{-1}$], logarithmic scale"
+@@ -40,7 +41,12 @@ _CHART_NOTE = (
+ 
+ @dataclass(frozen=True)
+ class RainbowPlotConfig:
+-    """Display and batching settings; none change the learned distribution."""
++    """Display settings; ``cdf_samples`` and ``seed`` are independent-mode only.
++
++    Training-mode scatter always uses the saved run's complete fixed pool. The
++    legacy fields remain readable so old training/sweep configuration identities
++    are preserved; they cannot override the training sample count or data seed.
++    """
+ 
+     cdf_samples: int = 32768
+     seed: int = 2027
+@@ -113,9 +119,9 @@ def evaluate_rainbow_grid(
+     """Evaluate every native CDF cell using bounded model-device batches.
+ 
+     CPU arrays hold the display grid; inference executes on ``model.device``.
+-    Directions and geometry stay float64 even with a float32 conditioner. The
+-    recorded source-to-NF rotation is applied before PDF evaluation. No global
+-    RNG is used, and the caller's training/evaluation mode is restored on errors.
++    Directions use the model's configured geometry precision. The recorded
++    source-to-NF rotation is applied before PDF evaluation. No global RNG is
++    used, and the caller's training/evaluation mode is restored on errors.
+     """
+     if type(batch_size) is not int or batch_size < 1:
+         raise ValueError("batch_size must be a positive integer")
+@@ -150,7 +156,8 @@ def evaluate_rainbow_grid(
+     training_modes = [(module, module.training) for module in model.modules()]
+     try:
+         model.eval()
+-        with torch.no_grad():
++        # A caller's ambient autocast must not change the saved model precision.
++        with torch.no_grad(), torch.autocast(device_type=model.device.type, enabled=False):
+             for start in range(0, nf_log_pdf.size, batch_size):
+                 stop = min(start + batch_size, nf_log_pdf.size)
+                 index = np.arange(start, stop, dtype=np.int64)
+@@ -258,13 +265,28 @@ def _file_hash(path: Path) -> str:
+ 
+ def _save_figure(fig: Figure, path: Path, *, dpi: int, write_pdf: bool) -> list[str]:
+     paths = [path.name]
++
++    def save_atomic(destination: Path, *, file_format: str, **options) -> None:
++        # Rendering directly to a pre-existing hard link would also overwrite
++        # the linked original figure. A same-directory temporary file followed
++        # by replace changes this directory entry without touching that inode.
++        with tempfile.NamedTemporaryFile(
++            dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp", delete=False
++        ) as stream:
++            temporary = Path(stream.name)
++        try:
++            fig.savefig(temporary, format=file_format, facecolor="white", **options)
++            temporary.replace(destination)
++        finally:
++            temporary.unlink(missing_ok=True)
++
+     try:
+         # Deliberately avoid bbox_inches='tight': all individual output canvases
+         # and data rectangles must have exactly the same size and placement.
+-        fig.savefig(path, dpi=dpi, facecolor="white")
++        save_atomic(path, file_format="png", dpi=dpi)
+         if write_pdf:
+             pdf_path = path.with_suffix(".pdf")
+-            fig.savefig(pdf_path, facecolor="white")
++            save_atomic(pdf_path, file_format="pdf")
+             paths.append(pdf_path.name)
+     finally:
+         fig.clear()
+@@ -280,6 +302,8 @@ def plot_rainbow_comparison(
+     checkpoint_path: str | Path | None = None,
+     selected_step: int | None = None,
+     title: str | None = None,
++    scatter_mode: str = "training",
++    training_run_directory: str | Path | None = None,
+ ) -> dict[str, Any]:
+     """Save three aligned maps, a combined figure and a provenance manifest.
+ 
+@@ -289,9 +313,13 @@ def plot_rainbow_comparison(
+     raster display pixels need not resolve subpixel cells, so native numerical
+     grid statistics and resolution are recorded in ``plots.json``.
+ 
+-    ``checkpoint_path`` records the exact file hash when supplied. The function
+-    plots the passed model's current weights; callers loading a checkpoint must
+-    validate the record identity before calling, as the CLI does.
++    By default, scatter displays every entry in the saved fixed training pool.
++    ``checkpoint_path`` and the original saved run files are required, and the
++    passed model/checkpoint/pool identity is verified before creating artifacts.
++    ``training_run_directory`` locates those files if the checkpoint was copied.
++    Explicit ``scatter_mode='independent'`` retains a separate CDF-sampler
++    diagnostic without claiming to display the training pool. Only that mode
++    uses ``config.cdf_samples`` and ``config.seed``.
+     """
+     # Headless object-oriented rendering does not set a global backend or import
+     # pyplot, and keeps CLI help / non-plotting commands free of matplotlib work.
+@@ -305,17 +333,54 @@ def plot_rainbow_comparison(
+         raise ValueError("config must be a RainbowPlotConfig")
+     if selected_step is not None and (type(selected_step) is not int or selected_step < 0):
+         raise ValueError("selected_step must be a nonnegative integer or None")
++    if scatter_mode not in ("training", "independent"):
++        raise ValueError("scatter_mode must be 'training' or 'independent'")
++    if scatter_mode == "independent" and training_run_directory is not None:
++        raise ValueError("training_run_directory is only valid for training scatter")
+     if model.hg_g != reference.g or model.incident_cosine != float(reference.condition[1]):
+         raise ValueError("Model HG g or incident condition does not match the reference record")
+     checkpoint = None
+-    if checkpoint_path is not None:
++    training_scatter = None
++    checkpoint_step = None
++    if scatter_mode == "training":
++        from .training_scatter import resolve_training_scatter
++
++        training_scatter = resolve_training_scatter(
++            model, reference, checkpoint_path, run_directory=training_run_directory
++        )
++        scatter_phi = training_scatter.source_phi_degrees
++        scatter_theta = training_scatter.theta_degrees
++        scatter_metadata = {"mode": "training", **training_scatter.provenance}
++        checkpoint = scatter_metadata["plotted_checkpoint"]
++        checkpoint_step = checkpoint["global_step"]
++        if selected_step is not None and selected_step != checkpoint_step:
++            raise ValueError("selected_step differs from the verified plotted checkpoint")
++        if checkpoint["kind"] == "inference":
++            selected_step = checkpoint_step
++        scatter_title = f"Fixed training pool (N = {scatter_metadata['sample_count']:,})"
++    else:
++        scatter_phi, scatter_theta = cdf_scatter_coordinates(
++            reference, samples=config.cdf_samples, seed=config.seed
++        )
++        scatter_metadata = {
++            "mode": "independent",
++            "source": "stored_cdf_independent_diagnostic_stream",
++            "sample_count": config.cdf_samples,
++            "displayed_sample_count": len(scatter_phi),
++            "downsampling": False,
++            "seed": config.seed,
++            "stream_id": _CDF_PLOT_STREAM,
++            "rng": "numpy.PCG64(SeedSequence([seed,stream_id]))",
++            "uniform_midpoint_bits": 52,
++            "source_phi_degrees_sha256": _array_hash(scatter_phi),
++            "theta_degrees_sha256": _array_hash(scatter_theta),
++        }
++        scatter_title = f"Independent CDF diagnostic (N = {config.cdf_samples:,})"
++    if checkpoint_path is not None and checkpoint is None:
+         checkpoint_file = Path(checkpoint_path).resolve()
+         checkpoint = {"path": str(checkpoint_file), "sha256": _file_hash(checkpoint_file)}
+ 
+     grid = evaluate_rainbow_grid(model, reference, batch_size=config.eval_batch_size)
+-    scatter_phi, scatter_theta = cdf_scatter_coordinates(
+-        reference, samples=config.cdf_samples, seed=config.seed
+-    )
+     vmin, vmax = _shared_color_limits(grid)
+     norm = LogNorm(vmin=vmin, vmax=vmax, clip=False)
+     # Use a perceptually ordered map and reserve gray for actual zero mass.
+@@ -334,11 +399,13 @@ def plot_rainbow_comparison(
+     heading = f"{source_kind} | {condition_label}"
+     if title is not None:
+         heading += f"\n{title}"
++    elif training_scatter is not None and checkpoint["kind"] == "training":
++        heading += f"\nTraining checkpoint (step {checkpoint_step})"
+     elif selected_step is not None:
+         heading += f"\nValidation-selected model (step {selected_step})"
+     panel_titles = (
+         "Reference PDF from the stored CDF",
+-        f"Samples from the stored CDF (N = {config.cdf_samples:,})",
++        scatter_title,
+         "NF PDF evaluated at source cell centers",
+     )
+ 
+@@ -372,6 +439,25 @@ def plot_rainbow_comparison(
+ 
+     output = Path(output_directory).resolve()
+     output.mkdir(parents=True, exist_ok=True)
++    arrays: dict[str, Any] = {}
++    if training_scatter is not None:
++        array_path = output / "training_scatter.npz"
++        temporary_array = output / "training_scatter.npz.tmp"
++        with temporary_array.open("wb") as stream:
++            np.savez_compressed(
++                stream,
++                directions_nf=training_scatter.directions_nf,
++                source_phi_degrees=scatter_phi,
++                theta_degrees=scatter_theta,
++                provenance_json=np.array(json.dumps(scatter_metadata, allow_nan=False)),
++            )
++        temporary_array.replace(array_path)
++        arrays["training_scatter"] = {
++            "path": array_path.name,
++            "sha256": _file_hash(array_path),
++            "format": "numpy_npz_no_pickle",
++            "sample_count": scatter_metadata["sample_count"],
++        }
+     files: dict[str, list[str]] = {}
+     # Fixed rectangles ensure the scatter canvas has exactly the same dimensions
+     # as either PDF canvas, including the space reserved for their colorbars.
+@@ -434,6 +520,14 @@ def plot_rainbow_comparison(
+         "source_kind": "synthetic_fixture" if synthetic else "rainbow_cdf_record",
+         "title": heading,
+         "configuration": config.to_dict(),
++        "configuration_usage": {
++            "cdf_samples": "unused" if scatter_mode == "training" else "independent_sample_count",
++            "seed": "unused" if scatter_mode == "training" else "independent_sample_seed",
++            "training_pool_source": (
++                "saved training config and verified sample_split"
++                if scatter_mode == "training" else "not used"
++            ),
++        },
+         "condition": reference.condition.tolist(),
+         "base_g": reference.g,
+         "selected_step": selected_step,
+@@ -480,16 +574,7 @@ def plot_rainbow_comparison(
+             "reference_pdf_sha256": _array_hash(grid.reference_pdf),
+             "nf_pdf_sha256": _array_hash(grid.nf_pdf),
+         },
+-        "scatter": {
+-            "source": "stored_cdf_independent_diagnostic_stream",
+-            "sample_count": config.cdf_samples,
+-            "seed": config.seed,
+-            "stream_id": _CDF_PLOT_STREAM,
+-            "rng": "numpy.PCG64(SeedSequence([seed,stream_id]))",
+-            "uniform_midpoint_bits": 52,
+-            "source_phi_degrees_sha256": _array_hash(scatter_phi),
+-            "theta_degrees_sha256": _array_hash(scatter_theta),
+-        },
++        "scatter": scatter_metadata,
+         "color_scale": {
+             "normalization": "matplotlib.colors.LogNorm",
+             "shared_between": ["reference_pdf", "nf_pdf"],
+@@ -509,6 +594,7 @@ def plot_rainbow_comparison(
+             "display_note": "PNG raster pixels may combine native cells narrower than a pixel.",
+         },
+         "files": files,
++        "arrays": arrays,
+     }
+     temporary = output / "plots.json.tmp"
+     temporary.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+diff --git a/src/phaseflow/replot.py b/src/phaseflow/replot.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d3726457776ab842435b74ffa6236e7bcc63cad
+--- /dev/null
++++ b/src/phaseflow/replot.py
+@@ -0,0 +1,303 @@
++"""Replot verified completed sweeps without changing their scientific artifacts.
++
++Saved sweep manifests describe the original training implementation. They are
++validated as saved records, rather than compared with a newly constructed
++training manifest: this is inference and point-pool reconstruction, not resume.
++"""
++
++from __future__ import annotations
++
++import json
++from dataclasses import replace
++from pathlib import Path, PurePosixPath
++from typing import Any, Callable
++
++from .plotting import RainbowPlotConfig, plot_rainbow_comparison
++from .rainbow import RainbowReference
++from .single_condition import (
++    SingleTrainingConfig,
++    _code_hash,
++    _resolve_device,
++    _runtime,
++    load_single_checkpoint,
++)
++from .sweep import SWEEP_SCHEMA, SweepConfig, _file_hash, _manifest_hash, _trial, _verify_receipt
++from .training import atomic_json
++
++REPLOT_SCHEMA = "phaseflow.sweep_training_point_plots.v1"
++
++
++def _read_object(path: Path) -> dict[str, Any]:
++    with path.open(encoding="utf-8") as handle:
++        value = json.load(handle)
++    if not isinstance(value, dict):
++        raise ValueError(f"Expected a JSON object: {path}")
++    return value
++
++
++def _trial_directory(root: Path, relative: str) -> Path:
++    if not isinstance(relative, str) or not relative or "\\" in relative:
++        raise ValueError("Invalid saved trial directory")
++    value = PurePosixPath(relative)
++    if value.is_absolute() or ".." in value.parts or ":" in relative:
++        raise ValueError("Saved trial directory must remain inside the sweep")
++    result = (root / relative).resolve()
++    if result == root or not result.is_relative_to(root):
++        raise ValueError("Saved trial directory must remain inside the sweep")
++    return result
++
++
++def _verify_completed_sweep(reference: RainbowReference, root: Path):
++    manifest = _read_object(root / "manifest.json")
++    summary = _read_object(root / "summary.json")
++    selection = _read_object(root / "selection.json")
++    if manifest.get("schema") != SWEEP_SCHEMA:
++        raise ValueError("Unsupported saved sweep manifest")
++    if manifest.get("dataset_fingerprint") != reference.fingerprint():
++        raise ValueError("Replot record differs from the saved sweep teacher")
++    manifest_hash = _manifest_hash(manifest)
++    if (
++        summary.get("schema") != SWEEP_SCHEMA
++        or summary.get("status") != "complete"
++        or summary.get("manifest_sha256") != manifest_hash
++        or summary.get("selection_metric") != "validation_nll"
++        or summary.get("test_used_for_selection") is not False
++    ):
++        raise ValueError("Replot requires a complete, consistent saved sweep summary")
++    cfg = SingleTrainingConfig.from_dict(manifest["base_training"])
++    sweep = SweepConfig.from_dict(manifest["sweep"])
++    rows = summary.get("trials")
++    if not isinstance(rows, list) or len(rows) != len(sweep.learning_rates) + len(sweep.train_samples):
++        raise ValueError("Saved sweep summary has an unexpected trial count")
++    expected_a = [
++        _trial("A", f"lr_{float(rate)}", replace(
++            cfg, learning_rate=rate, train_samples=sweep.baseline_train_samples,
++        )) for rate in sweep.learning_rates
++    ]
++    physical: dict[str, dict[str, Any]] = {}
++    original_hashes = {
++        name: _file_hash(root / name)
++        for name in (
++            "manifest.json", "selection.json", "summary.json", "summary.csv", "summary.md",
++            "summary.png",
++        ) if (root / name).is_file()
++    }
++
++    def verify_row(row: dict[str, Any], expected: dict[str, Any]) -> None:
++        if not isinstance(row, dict) or row.get("status") != "complete":
++            raise ValueError("Saved sweep includes a non-completed trial")
++        for key in (
++            "trial_id", "stage", "run_directory", "learning_rate", "train_samples",
++            "training_config", "reuse_of",
++        ):
++            if row.get(key) != expected[key]:
++                raise ValueError(f"Saved sweep trial differs in {key}")
++        relative = row["run_directory"]
++        directory = _trial_directory(root, relative)
++        if relative not in physical:
++            training = SingleTrainingConfig.from_dict(row["training_config"])
++            verified = _verify_receipt(directory, training, manifest)
++            receipt_name = f"{relative}/sweep_completed.json"
++            original_hashes[receipt_name] = _file_hash(root / receipt_name)
++            receipt = _read_object(root / receipt_name)
++            for filename, digest in receipt["files_sha256"].items():
++                original_hashes[f"{relative}/{filename}"] = digest
++            physical[relative] = {
++                "run_directory": relative,
++                "trial_ids": [],
++                "training_config": row["training_config"],
++                "results": verified,
++                "receipt_sha256": original_hashes[receipt_name],
++            }
++        saved = physical[relative]
++        if saved["training_config"] != row["training_config"]:
++            raise ValueError("Reused trial has a different training configuration")
++        for key, value in saved["results"].items():
++            if row.get(key) != value:
++                raise ValueError(f"Saved summary differs from verified trial results in {key}")
++        saved["trial_ids"].append(row["trial_id"])
++
++    for row, expected in zip(rows, expected_a, strict=False):
++        verify_row(row, expected)
++    a_rows = rows[:len(expected_a)]
++    winner = min(a_rows, key=lambda row: (row["validation_nll"], row["learning_rate"]))
++    expected_selection = {
++        "schema": SWEEP_SCHEMA,
++        "manifest_sha256": manifest_hash,
++        "selected_trial_id": winner["trial_id"],
++        "selected_learning_rate": winner["learning_rate"],
++        "selected_validation_nll": winner["validation_nll"],
++        "rule": manifest["selection"],
++        "test_used": False,
++        "candidates": [{key: row[key] for key in (
++            "trial_id", "learning_rate", "validation_nll", "validation_kl", "selected_step",
++            "run_directory",
++        )} for row in a_rows],
++    }
++    if selection != expected_selection or summary.get("selection") != selection:
++        raise ValueError("Saved selection differs from verified validation results")
++    for row, n in zip(rows[len(expected_a):], sweep.train_samples, strict=True):
++        expected = _trial("B", f"n_{n}", replace(
++            cfg, train_samples=n, learning_rate=winner["learning_rate"],
++        ))
++        if expected["training_config"] == winner["training_config"]:
++            expected.update(reuse_of=winner["trial_id"], run_directory=winner["run_directory"])
++        verify_row(row, expected)
++    return manifest, summary, list(physical.values()), original_hashes
++
++
++def replot_sweep_training_points(
++    reference: RainbowReference,
++    sweep_directory: str | Path,
++    output_directory: str | Path | None = None,
++    *,
++    device: str = "cuda",
++    plot_config: RainbowPlotConfig | None = None,
++    callback: Callable[[dict[str, Any]], None] | None = None,
++) -> dict[str, Any]:
++    """Plot every saved training pool once per physical trial, without training.
++
++    The default destination is ``<sweep>/training_point_plots``. Existing trial
++    plots, completion receipts, metrics, checkpoints and selection are retained.
++    An identical replot invocation may rewrite only its own output tree; changed
++    inputs/configuration/implementation require a new destination.
++    """
++    plotting = RainbowPlotConfig() if plot_config is None else plot_config
++    if not isinstance(plotting, RainbowPlotConfig):
++        raise ValueError("plot_config must be a RainbowPlotConfig")
++    root = Path(sweep_directory).resolve()
++    manifest, summary, physical, original_hashes = _verify_completed_sweep(reference, root)
++    output = (root / "training_point_plots" if output_directory is None
++              else Path(output_directory)).resolve()
++    if root.is_relative_to(output):
++        raise ValueError("Replot output must not overwrite or contain the original sweep")
++    for trial in physical:
++        original = _trial_directory(root, trial["run_directory"])
++        if output.is_relative_to(original) or original.is_relative_to(output):
++            raise ValueError("Replot output must not overlap any original trial directory")
++    # Resolve CUDA explicitly before writing output; CPU fallback is never used.
++    resolved_device = _resolve_device(device)
++    sources = Path(__file__).parent
++    mappings = [{
++        "trial_id": row["trial_id"], "stage": row["stage"],
++        "learning_rate": row["learning_rate"], "train_samples": row["train_samples"],
++        "selected_step": row["selected_step"], "reuse_of": row["reuse_of"],
++        "run_directory": row["run_directory"],
++        "plot_directory": row["run_directory"],
++    } for row in summary["trials"]]
++    inputs = {
++        "schema": REPLOT_SCHEMA,
++        "scope": "completed_sweep_training_point_visualization_only",
++        "sweep_directory": str(root),
++        "dataset_fingerprint": reference.fingerprint(),
++        "original_manifest_sha256": _manifest_hash(manifest),
++        "original_files_sha256": original_hashes,
++        "configuration": plotting.to_dict(),
++        "scatter_mode": "training",
++        "all_training_pool_points": True,
++        "original_training_code_fingerprint": manifest["training_code_fingerprint"],
++        "current_training_code_fingerprint": _code_hash(),
++        "implementation_sha256": {
++            name: _file_hash(sources / name)
++            for name in ("replot.py", "plotting.py", "training_scatter.py")
++        },
++        "runtime": _runtime(resolved_device, manifest["base_training"]["dtype"]),
++        "logical_trials": mappings,
++    }
++    input_path = output / "replot_manifest.json"
++    if output.exists():
++        if not output.is_dir():
++            raise FileExistsError("Replot output is not a directory")
++        if input_path.exists():
++            if _read_object(input_path) != inputs:
++                raise ValueError("Replot inputs/configuration/code/runtime changed; use a new output")
++        elif any(output.iterdir()):
++            raise FileExistsError("Replot output is not empty and has no matching replot manifest")
++        for path in output.rglob("*"):
++            if path.is_symlink() and not path.resolve().is_relative_to(output):
++                raise ValueError("Replot output contains a link outside its own output directory")
++            if path.is_file() and path.stat().st_nlink > 1:
++                raise ValueError("Replot output contains a hard-linked file; use a new output")
++    # Preflight every destination before rendering any trial, including symlinks.
++    for trial in physical:
++        destination = (output / trial["run_directory"]).resolve()
++        if not destination.is_relative_to(output) or destination == output:
++            raise ValueError("Replot trial destination escapes the new output directory")
++    output.mkdir(parents=True, exist_ok=True)
++    atomic_json(input_path, inputs)
++
++    def notify(event: str, **values: Any) -> None:
++        if callback is not None:
++            callback({"event": event, **values})
++
++    result = {
++        "schema": REPLOT_SCHEMA,
++        "status": "running",
++        "scope": inputs["scope"],
++        "output_directory": str(output),
++        "sweep_directory": str(root),
++        "dataset_fingerprint": reference.fingerprint(),
++        "replot_manifest_sha256": _file_hash(input_path),
++        "logical_trial_count": len(mappings),
++        "physical_trial_count": len(physical),
++        "optimizer_updates": 0,
++        "selection_changed": False,
++        "original_artifacts_unchanged": None,
++        "logical_trials": mappings,
++        "physical_trials": [],
++    }
++    result_path = output / "replot_summary.json"
++    atomic_json(result_path, result)
++    notify("replot_started", physical_trial_count=len(physical), logical_trial_count=len(mappings),
++           output_directory=str(output))
++    try:
++        for trial in physical:
++            original = root / trial["run_directory"]
++            destination = output / trial["run_directory"]
++            checkpoint_path = original / "best.pt"
++            notify("trial_replot_started", trial_ids=trial["trial_ids"],
++                   train_samples=trial["training_config"]["train_samples"],
++                   run_directory=str(original))
++            model, checkpoint = load_single_checkpoint(checkpoint_path, device=resolved_device)
++            try:
++                report = plot_rainbow_comparison(
++                    model, reference, destination, config=plotting,
++                    checkpoint_path=checkpoint_path, selected_step=checkpoint["global_step"],
++                    title=f"Validation-selected model (step {checkpoint['global_step']})",
++                    scatter_mode="training", training_run_directory=original,
++                )
++            finally:
++                del model  # At most one physical trial's inference model is retained.
++            if report["scatter"]["sample_count"] != trial["training_config"]["train_samples"]:
++                raise ValueError("Plot did not retain every fixed training-pool entry")
++            result["physical_trials"].append({
++                "trial_ids": trial["trial_ids"],
++                "run_directory": trial["run_directory"],
++                "plot_directory": trial["run_directory"],
++                "selected_step": checkpoint["global_step"],
++                "training_points_sha256": trial["results"]["sample_split"]["training_points_sha256"],
++                "sample_count": report["scatter"]["sample_count"],
++                "scatter": report["scatter"],
++                "files_sha256": {
++                    path.relative_to(destination).as_posix(): _file_hash(path)
++                    for path in sorted(destination.rglob("*")) if path.is_file()
++                },
++            })
++            del checkpoint, report
++            atomic_json(result_path, result)
++            notify("trial_replot_completed", trial_ids=trial["trial_ids"],
++                   plot_directory=str(destination),
++                   sample_count=trial["training_config"]["train_samples"])
++        for relative, expected in original_hashes.items():
++            if _file_hash(root / relative) != expected:
++                raise ValueError(f"Original sweep artifact changed during replot: {relative}")
++        result.update(status="complete", original_artifacts_unchanged=True)
++        atomic_json(result_path, result)
++        notify("replot_completed", output_directory=str(output),
++               physical_trial_count=len(physical), logical_trial_count=len(mappings))
++        return result
++    except BaseException as error:
++        result["status"] = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
++        result["error"] = f"{type(error).__name__}: {error}"
++        atomic_json(result_path, result)
++        raise
+diff --git a/src/phaseflow/training_scatter.py b/src/phaseflow/training_scatter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ab3fbd48254ac60af7f1e3073f263532486266cd
+--- /dev/null
++++ b/src/phaseflow/training_scatter.py
+@@ -0,0 +1,266 @@
++"""Recover a recorded fixed training pool for faithful, read-only plotting.
++
++Version-4 runs record the hash of the FP64 CDF directions and teacher log PDF,
++not the device tensor itself. Regeneration is accepted only when that complete
++pool hash agrees. Directions are then cast exactly as in the saved training
++configuration. This is verified regeneration, not a claim to read archived GPU
++memory. It neither changes training state nor requires the old runtime to run.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++from collections.abc import Mapping
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++import torch
++from numpy.typing import NDArray
++
++from .rainbow import RainbowReference
++from .single_condition import (
++    FAMILY,
++    SingleTrainingConfig,
++    _array_hash,
++    _points,
++    read_single_checkpoint,
++)
++from .sphere_model import SingleConditionSphereFlow, SphereFlowConfig
++
++TRAINING_SCATTER_SCHEMA = "phaseflow.training_scatter.v1"
++
++
++@dataclass(frozen=True)
++class TrainingScatter:
++    """Every pool entry once, in its training geometry dtype and original order."""
++
++    directions_nf: NDArray[np.float32] | NDArray[np.float64]
++    source_phi_degrees: NDArray[np.float64]
++    theta_degrees: NDArray[np.float64]
++    provenance: dict[str, Any]
++
++
++def _file_hash(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as stream:
++        while block := stream.read(1024 * 1024):
++            digest.update(block)
++    return digest.hexdigest()
++
++
++def _read_object(path: Path) -> dict[str, Any]:
++    if not path.is_file():
++        raise ValueError(f"Training scatter requires the saved run file: {path}")
++    value = json.loads(path.read_text(encoding="utf-8-sig"))
++    if not isinstance(value, dict):
++        raise ValueError(f"Saved run file must contain a JSON object: {path}")
++    return value
++
++
++def _state_equal(left: Any, right: Any) -> bool:
++    if isinstance(left, torch.Tensor) or isinstance(right, torch.Tensor):
++        return (
++            isinstance(left, torch.Tensor)
++            and isinstance(right, torch.Tensor)
++            and left.dtype == right.dtype
++            and left.shape == right.shape
++            and torch.equal(left.detach().cpu(), right.detach().cpu())
++        )
++    if isinstance(left, Mapping) or isinstance(right, Mapping):
++        return (
++            isinstance(left, Mapping)
++            and isinstance(right, Mapping)
++            and left.keys() == right.keys()
++            and all(_state_equal(left[key], right[key]) for key in left)
++        )
++    if isinstance(left, (list, tuple)) or isinstance(right, (list, tuple)):
++        return (
++            type(left) is type(right)
++            and len(left) == len(right)
++            and all(_state_equal(a, b) for a, b in zip(left, right, strict=True))
++        )
++    return left == right
++
++
++def _identity(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
++    return {
++        "path": str(path),
++        "sha256": _file_hash(path),
++        "kind": payload["kind"],
++        "checkpoint_version": payload["checkpoint_version"],
++        "global_step": payload["global_step"],
++        "code_fingerprint": payload["code_fingerprint"],
++    }
++
++
++def resolve_training_scatter(
++    model: SingleConditionSphereFlow,
++    reference: RainbowReference,
++    checkpoint_path: str | Path | None,
++    *,
++    run_directory: str | Path | None = None,
++) -> TrainingScatter:
++    """Verify saved run/checkpoint identity and reconstruct the entire pool.
++
++    The plotted checkpoint, resumable ``checkpoint.pt``, ``config.json`` and
++    ``sample_split.json`` must describe one run. A passed inference model must
++    match its checkpoint, which in turn must match the recorded best state and
++    validation selection. Training checkpoints are supported but explicitly
++    identified as such. Read-only plotting may use a different device/runtime;
++    the saved model configuration and geometry precision must still agree.
++    """
++    reference._require_open()
++    if checkpoint_path is None:
++        raise ValueError(
++            "Training scatter requires a checkpoint and its saved run directory; "
++            "use scatter_mode='independent' explicitly for a diagnostic CDF sample"
++        )
++    if not isinstance(model, SingleConditionSphereFlow):
++        raise ValueError("Training scatter requires the saved single-condition sphere model")
++    plotted_path = Path(checkpoint_path).resolve()
++    run = Path(run_directory).resolve() if run_directory is not None else plotted_path.parent
++    training_path = run / "checkpoint.pt"
++    for path in (plotted_path, training_path):
++        if not path.is_file():
++            raise ValueError(f"Training scatter requires the saved checkpoint: {path}")
++    plotted = read_single_checkpoint(plotted_path)
++    training = plotted if plotted_path == training_path else read_single_checkpoint(training_path)
++    if training["kind"] != "training" or training["checkpoint_version"] != 4:
++        raise ValueError("Training scatter requires a version-4 training checkpoint.pt")
++    required = {"training_config", "sample_split", "best_state", "best_step", "best_validation"}
++    if not required <= training.keys():
++        raise ValueError("Training checkpoint is missing fixed-pool or selection provenance")
++    config_path, split_path = run / "config.json", run / "sample_split.json"
++    saved_config, saved_split = _read_object(config_path), _read_object(split_path)
++    if saved_config.get("schema_version") != 2 or saved_config.get("family") != FAMILY:
++        raise ValueError("Training scatter requires a saved schema-2 single-condition config")
++    if saved_config.get("training") != training["training_config"]:
++        raise ValueError("Saved training configuration differs from checkpoint.pt")
++    if saved_split != training["sample_split"]:
++        raise ValueError("Saved sample_split.json differs from checkpoint.pt")
++    cfg = SingleTrainingConfig.from_dict(training["training_config"])
++    model_config = SphereFlowConfig.from_dict(training["model_config"])
++    if not isinstance(saved_config.get("model"), dict) or (
++        SphereFlowConfig.from_dict(saved_config["model"]) != model_config
++    ):
++        raise ValueError("Saved model configuration differs from checkpoint.pt")
++    if model.config != model_config:
++        raise ValueError("Passed model configuration differs from the saved training model")
++    for key in ("checkpoint_version", "family", "dtype", "physics", "dataset_fingerprint",
++                "code_fingerprint"):
++        if plotted.get(key) != training.get(key):
++            raise ValueError(f"Plotted checkpoint and training checkpoint differ in {key}")
++    if SphereFlowConfig.from_dict(plotted["model_config"]) != model_config:
++        raise ValueError("Plotted checkpoint model configuration differs from checkpoint.pt")
++    fingerprint = reference.fingerprint()
++    physics = {
++        "hg_g": reference.g,
++        "incident_cosine": float(reference.condition[1]),
++        "wavelength_nm": float(reference.condition[0]),
++    }
++    if training["dataset_fingerprint"] != fingerprint or training["physics"] != physics:
++        raise ValueError("Training scatter reference record differs from the saved checkpoint")
++    if model.hg_g != reference.g or model.incident_cosine != physics["incident_cosine"]:
++        raise ValueError("Passed model physics differs from the saved reference")
++    dtype = {"float32": torch.float32, "float64": torch.float64}[cfg.dtype]
++    geometry_dtype = torch.float64 if model_config.geometry_dtype == "float64" else dtype
++    if training["dtype"] != cfg.dtype or model.dtype != dtype or model.geometry_dtype != geometry_dtype:
++        raise ValueError("Passed model dtype differs from the saved training precision")
++    if type(training["global_step"]) is not int or not 0 <= training["global_step"] <= cfg.steps:
++        raise ValueError("Invalid saved training checkpoint step")
++    if type(training["best_step"]) is not int or not (
++        0 <= training["best_step"] <= training["global_step"]
++    ):
++        raise ValueError("Invalid saved best checkpoint step")
++    if plotted["kind"] == "inference":
++        if plotted["global_step"] != training["best_step"] or not _state_equal(
++            plotted["model_state"], training["best_state"]
++        ):
++            raise ValueError("Inference checkpoint differs from the recorded best state or step")
++        if plotted.get("validation") != training["best_validation"]:
++            raise ValueError("Inference checkpoint differs from the recorded best validation")
++        scope = "validation_selected_checkpoint"
++    else:
++        if plotted["global_step"] != training["global_step"] or not _state_equal(
++            plotted["model_state"], training["model_state"]
++        ):
++            raise ValueError("Plotted training checkpoint differs from the saved run state")
++        scope = "training_checkpoint_iterate_not_necessarily_validation_selected"
++    if not _state_equal(model.state_dict(), plotted["model_state"]):
++        raise ValueError("Passed model state differs from the plotted checkpoint")
++
++    data_seed = cfg.seed if cfg.data_seed is None else cfg.data_seed
++    if (
++        saved_split.get("seed") != cfg.seed
++        or saved_split.get("data_seed") != data_seed
++        or saved_split.get("train_samples") != cfg.train_samples
++        or saved_split.get("streams", {}).get("train") != 0
++        or saved_split.get("uniforms") != "52-bit open midpoint grid"
++    ):
++        raise ValueError("Saved fixed-pool seed, count or sampling stream is inconsistent")
++    recorded_hash = saved_split.get("training_points_sha256")
++    if not isinstance(recorded_hash, str) or len(recorded_hash) != 64:
++        raise ValueError("Saved training pool is missing its SHA-256 identity")
++    directions, log_pdf = _points(reference, cfg.train_samples, data_seed, "train")
++    regenerated_hash = _array_hash(directions, log_pdf)
++    if regenerated_hash != recorded_hash:
++        raise ValueError(
++            "Regenerated fixed training pool does not match training_points_sha256; "
++            "refusing to plot a different point cloud"
++        )
++    # Match the trainer's one-time NumPy -> model-device geometry cast exactly.
++    cast_directions = torch.as_tensor(
++        directions, dtype=model.geometry_dtype, device=model.device
++    ).detach().cpu().numpy().copy()
++    source = cast_directions.astype(np.float64) @ reference.source_to_nf
++    source_phi = np.arctan2(source[:, 1], source[:, 0])
++    source_phi = (source_phi + np.pi) % (2 * np.pi) - np.pi
++    theta = np.arctan2(np.hypot(source[:, 0], source[:, 1]), source[:, 2])
++    source_phi_degrees, theta_degrees = np.rad2deg(source_phi), np.rad2deg(theta)
++    in_band = (theta_degrees >= 120.0) & (theta_degrees <= 150.0)
++    provenance = {
++        "schema": TRAINING_SCATTER_SCHEMA,
++        "source": "verified_regeneration_of_recorded_fixed_training_pool",
++        "scope": "each_fixed_pool_entry_once_not_minibatch_repetitions",
++        "sample_count": cfg.train_samples,
++        "displayed_sample_count": int(cast_directions.shape[0]),
++        "downsampling": False,
++        "seed": cfg.seed,
++        "data_seed": data_seed,
++        "stream_id": 0,
++        "rng": "numpy.PCG64(SeedSequence([data_seed,stream_id]))",
++        "uniform_midpoint_bits": 52,
++        "training_points_sha256": recorded_hash,
++        "regenerated_training_points_sha256": regenerated_hash,
++        "hash_verified": True,
++        "pool_hash_covers": "FP64 directions_nf and FP64 teacher_log_pdf, before device cast",
++        "geometry_dtype": str(geometry_dtype).removeprefix("torch."),
++        "directions_nf_sha256": _array_hash(cast_directions),
++        "source_phi_degrees_sha256": _array_hash(source_phi_degrees),
++        "theta_degrees_sha256": _array_hash(theta_degrees),
++        "precision_provenance": (
++            "Regenerated FP64 pool matches the saved hash; the plotted NF directions use "
++            "the saved training geometry cast. Original device tensor bytes were not archived."
++        ),
++        "dataset_fingerprint": fingerprint,
++        "training_run_directory": str(run),
++        "plotted_checkpoint": _identity(plotted_path, plotted),
++        "training_checkpoint": _identity(training_path, training),
++        "plotted_model_scope": scope,
++        "model_state_verified": True,
++        "implementation_sha256": _file_hash(Path(__file__)),
++        "configuration": {"path": str(config_path), "sha256": _file_hash(config_path)},
++        "sample_split": {"path": str(split_path), "sha256": _file_hash(split_path)},
++        "band": {
++            "theta_degrees": [120.0, 150.0],
++            "boundary": "inclusive endpoints",
++            "azimuth": "full circle",
++            "observed_train_samples": int(np.count_nonzero(in_band)),
++            "observed_train_fraction": float(np.mean(in_band)),
++            "count_scope": "actual dtype-cast fixed pool; not an expected count",
++        },
++    }
++    return TrainingScatter(cast_directions, source_phi_degrees, theta_degrees, provenance)
+diff --git a/sweep.bat b/sweep.bat
+index 30090c3587fb24a39bf4a79425ffdd1773f047a7..deccbc55075d85ecab4081535273c77618ed9b50 100644
+--- a/sweep.bat
++++ b/sweep.bat
+@@ -4,8 +4,9 @@ setlocal EnableExtensions DisableDelayedExpansion
+ rem Use the same RECORD as your working execute.bat.
+ rem No argument: run A, select the validation winner, then run B and summarize.
+ rem Repeating the same command continues only an exactly matching sweep.
+-rem Usage: sweep.bat [diagnose]
++rem Usage: sweep.bat [diagnose^|replot]
+ rem diagnose evaluates EXISTING_RUN\best.pt without training.
++rem replot redraws all completed OUTPUT trials with every fixed training point.
+ set "RECORD=..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800"
+ set "CONFIG=configs\rainbow_single.json"
+ set "SWEEP_CONFIG=configs\rainbow_sweep.json"
+@@ -24,6 +25,7 @@ set "MODE=%~1"
+ if "%MODE%"=="" set "MODE=run"
+ if /i "%MODE%"=="run" goto :check
+ if /i "%MODE%"=="diagnose" goto :check
++if /i "%MODE%"=="replot" goto :check
+ goto :usage
+ 
+ :check
+@@ -31,6 +33,7 @@ echo Checking the shared Python and CUDA environment...
+ "%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% "scripts\check_environment.py" check --device "%DEVICE%"
+ if not "%ERRORLEVEL%"=="0" goto :failed
+ if not exist "%RECORD%\metadata.json" goto :missing_record
++if /i "%MODE%"=="replot" goto :replot
+ if not exist "%SWEEP_CONFIG%" goto :missing_sweep_config
+ if /i "%MODE%"=="diagnose" goto :diagnose
+ if not exist "%CONFIG%" goto :missing_config
+@@ -51,6 +54,19 @@ echo Monitor: call monitor.bat "%OUTPUT%"
+ set "EXIT_CODE=0"
+ goto :finish
+ 
++:replot
++if not exist "%OUTPUT%\manifest.json" goto :missing_sweep_run
++if not exist "%OUTPUT%\summary.json" goto :missing_sweep_run
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow replot-sweep-rainbow ^
++    --record "%RECORD%" ^
++    --sweep "%OUTPUT%" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Training-point comparisons: "%OUTPUT%\training_point_plots"
++set "EXIT_CODE=0"
++goto :finish
++
+ :diagnose
+ if not exist "%EXISTING_RUN%\best.pt" goto :missing_existing_run
+ if not exist "%EXISTING_RUN%\config.json" goto :missing_existing_run
+@@ -86,14 +102,20 @@ echo [ERROR] Missing base training configuration: "%CONFIG%"
+ set "EXIT_CODE=1"
+ goto :finish
+ 
++:missing_sweep_run
++echo [ERROR] OUTPUT must contain manifest.json and summary.json from a completed sweep.
++set "EXIT_CODE=1"
++goto :finish
++
+ :missing_existing_run
+ echo [ERROR] EXISTING_RUN must contain config.json and best.pt from a completed run.
+ set "EXIT_CODE=1"
+ goto :finish
+ 
+ :usage
+-echo Usage: sweep.bat [diagnose]
+-echo No argument runs or continues the A-to-B sweep. diagnose adds profiles to EXISTING_RUN.
++echo Usage: sweep.bat [diagnose^|replot]
++echo No argument runs or continues the A-to-B sweep.
++echo diagnose adds profiles to EXISTING_RUN. replot redraws completed OUTPUT trials.
+ set "EXIT_CODE=1"
+ goto :finish
+ 
+diff --git a/tests/test_rainbow_plotting.py b/tests/test_rainbow_plotting.py
+index db7761efb215846e013da887b268b6f946323467..06c4caaa42b91b90a444f0f368bb9ceef2dcacc7 100644
+--- a/tests/test_rainbow_plotting.py
++++ b/tests/test_rainbow_plotting.py
+@@ -12,6 +12,7 @@ from test_rainbow import write_rainbow_fixture
+ 
+ from phaseflow.plotting import (
+     RainbowPlotConfig,
++    _save_figure,
+     cdf_scatter_coordinates,
+     evaluate_rainbow_grid,
+     plot_rainbow_comparison,
+@@ -112,6 +113,7 @@ def test_aligned_figures_manifest_and_log_color_range(tmp_path):
+             tmp_path / "plots",
+             config=RainbowPlotConfig(cdf_samples=1000, dpi=60, write_pdf=True),
+             selected_step=17,
++            scatter_mode="independent",
+         )
+         assert model.training
+         positive = grid.reference_pdf[grid.reference_pdf > 0]
+@@ -167,6 +169,7 @@ def test_isotropic_constant_plot_has_finite_display_range_without_changing_densi
+             record,
+             tmp_path / "plots",
+             config=RainbowPlotConfig(cdf_samples=10, dpi=30),
++            scatter_mode="independent",
+         )
+         assert not model.training
+         assert 0 < result["color_scale"]["vmin"] < 1 / (4 * np.pi)
+@@ -175,6 +178,31 @@ def test_isotropic_constant_plot_has_finite_display_range_without_changing_densi
+         assert result["grid"]["nf_mass_midpoint_estimate"] == pytest.approx(1, abs=1e-14)
+ 
+ 
++def test_grid_keeps_saved_fp32_precision_inside_ambient_autocast(tmp_path):
++    write_rainbow_fixture(tmp_path / "record")
++    with RainbowReference(tmp_path / "record") as record, torch.random.fork_rng(devices=[]):
++        torch.manual_seed(724)
++        model = SingleConditionSphereFlow(
++            record.g,
++            record.condition[1],
++            SphereFlowConfig(
++                num_coupling_layers=2, num_bins=4, hidden_features=(8,),
++                geometry_dtype="model", spline_dtype="model",
++            ),
++            dtype=torch.float32, device="cpu",
++        )
++        # Nonidentity weights make reduced-precision conditioner evaluation visible.
++        with torch.no_grad():
++            for parameter in model.parameters():
++                parameter.normal_(std=0.1)
++        expected = evaluate_rainbow_grid(model, record)
++        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
++            actual = evaluate_rainbow_grid(model, record)
++            assert torch.is_autocast_enabled("cpu")
++        np.testing.assert_array_equal(actual.nf_pdf, expected.nf_pdf)
++        assert model.dtype == torch.float32 and model.training
++
++
+ @pytest.mark.parametrize("bad_value", [math.nan, math.inf, -math.inf, -800.0, 800.0])
+ def test_invalid_nf_grid_fails_without_floor_or_mode_change(tmp_path, bad_value):
+     write_rainbow_fixture(tmp_path / "record")
+@@ -201,6 +229,38 @@ def test_plot_config_rejects_invalid_parameters(kwargs):
+         RainbowPlotConfig(**kwargs)
+ 
+ 
++def test_figure_output_replaces_png_and_pdf_hardlinks_without_changing_originals(tmp_path):
++    from matplotlib.backends.backend_agg import FigureCanvasAgg
++    from matplotlib.figure import Figure
++
++    originals = tmp_path / "originals"
++    outputs = tmp_path / "outputs"
++    originals.mkdir()
++    outputs.mkdir()
++    original_bytes = {"png": b"original PNG bytes", "pdf": b"original PDF bytes"}
++    for suffix, content in original_bytes.items():
++        original = originals / f"reference_pdf.{suffix}"
++        original.write_bytes(content)
++        (outputs / original.name).hardlink_to(original)
++    fig = Figure(figsize=(2, 1))
++    FigureCanvasAgg(fig)
++    fig.add_subplot().plot([0, 1], [1, 0])
++    assert _save_figure(fig, outputs / "reference_pdf.png", dpi=30, write_pdf=True) == [
++        "reference_pdf.png", "reference_pdf.pdf",
++    ]
++    for suffix, content in original_bytes.items():
++        original = originals / f"reference_pdf.{suffix}"
++        output = outputs / original.name
++        assert original.read_bytes() == content
++        assert not output.samefile(original)
++        assert output.stat().st_size > 100
++    assert (outputs / "reference_pdf.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
++    assert (outputs / "reference_pdf.pdf").read_bytes().startswith(b"%PDF-")
++    assert sorted(path.name for path in outputs.iterdir()) == [
++        "reference_pdf.pdf", "reference_pdf.png",
++    ]
++
++
+ @pytest.mark.cuda
+ @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device is not available")
+ def test_grid_uses_cuda_for_inference_and_matches_cpu(tmp_path):
+diff --git a/tests/test_replot.py b/tests/test_replot.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e3d69b7fd18637695a9c09e2ebc103231059c9d
+--- /dev/null
++++ b/tests/test_replot.py
+@@ -0,0 +1,203 @@
++"""Replot saved synthetic CPU sweeps; these tests do not validate Rainbow optics."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++from pathlib import Path
++
++import numpy as np
++import pytest
++from test_single_condition import smooth_teacher
++from test_sweep import configuration, model_configuration
++
++import phaseflow.plotting as plotting_module
++import phaseflow.replot as replot_module
++import phaseflow.single_condition as single_module
++import phaseflow.sweep as sweep_module
++from phaseflow.plotting import RainbowPlotConfig
++from phaseflow.rainbow import RainbowReference
++from phaseflow.replot import replot_sweep_training_points
++from phaseflow.single_condition import _points
++from phaseflow.sweep import SweepConfig, run_single_condition_sweep
++
++
++def read_json(path):
++    return json.loads(path.read_text(encoding="utf-8"))
++
++
++def file_hashes(directory):
++    return {
++        path.relative_to(directory).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
++        for path in directory.rglob("*") if path.is_file()
++    }
++
++
++def assert_preserved(directory, previous):
++    for name, digest in previous.items():
++        assert hashlib.sha256((directory / name).read_bytes()).hexdigest() == digest
++
++
++def forbidden(*args, **kwargs):
++    raise AssertionError("Replot must not train or perform additional selection")
++
++
++def make_small_sweep(tmp_path, monkeypatch):
++    monkeypatch.setattr(sweep_module, "_summary_plot", lambda *args: None)
++    record = smooth_teacher(tmp_path / "record")
++    root = tmp_path / "sweep"
++    with RainbowReference(record) as reference:
++        summary = run_single_condition_sweep(
++            reference, model_configuration(), configuration(steps=0), root,
++            sweep_config=SweepConfig(
++                learning_rates=(1e-3,), train_samples=(64,), baseline_train_samples=64,
++            ),
++            make_plots=False,
++        )
++    return record, root, summary
++
++
++def test_replot_keeps_old_plots_and_all_scientific_files_without_training(tmp_path, monkeypatch):
++    record = smooth_teacher(tmp_path / "record")
++    root = tmp_path / "sweep"
++    cfg = configuration(steps=1, eval_every=1, checkpoint_every=1)
++    plan = SweepConfig(
++        learning_rates=(3e-4, 1e-3, 3e-3), train_samples=(16, 32, 64, 128),
++        baseline_train_samples=64,
++    )
++    plot_config = RainbowPlotConfig(cdf_samples=17, seed=19, dpi=35, eval_batch_size=64)
++    real_plot = plotting_module.plot_rainbow_comparison
++    real_hash = sweep_module._file_hash
++
++    def old_independent_plot(*args, **kwargs):
++        kwargs["scatter_mode"] = "independent"
++        return real_plot(*args, **kwargs)
++
++    def prior_implementation_hash(path):
++        # Model a recorded older plot/sweep implementation. Replot must verify
++        # that saved manifest, not reconstruct one with the current code hashes.
++        if Path(path).name == "plotting.py":
++            return "e" * 64
++        if Path(path).name == "sweep.py":
++            return "d" * 64
++        return real_hash(path)
++
++    with monkeypatch.context() as original_implementation:
++        original_implementation.setattr(
++            plotting_module, "plot_rainbow_comparison", old_independent_plot,
++        )
++        original_implementation.setattr(sweep_module, "_file_hash", prior_implementation_hash)
++        with RainbowReference(record) as reference:
++            summary = run_single_condition_sweep(
++                reference, model_configuration(), cfg, root, sweep_config=plan,
++                plot_config=plot_config,
++            )
++    before = file_hashes(root)
++    assert len(summary["trials"]) == 7
++    assert len({row["run_directory"] for row in summary["trials"]}) == 6
++    for row in summary["trials"]:
++        old = read_json(root / row["run_directory"] / "plots/plots.json")
++        assert old["scatter"]["sample_count"] == 17
++    monkeypatch.setattr(sweep_module, "train_single_condition", forbidden)
++    monkeypatch.setattr(single_module, "train_single_condition", forbidden)
++    monkeypatch.setattr(sweep_module, "run_single_condition_sweep", forbidden)
++    events = []
++    with RainbowReference(record) as reference:
++        result = replot_sweep_training_points(
++            reference, root, device="cpu", plot_config=plot_config, callback=events.append,
++        )
++        assert result["status"] == "complete"
++        assert result["logical_trial_count"] == 7
++        assert result["physical_trial_count"] == 6
++        assert result["optimizer_updates"] == 0
++        assert result["selection_changed"] is False
++        assert result["original_artifacts_unchanged"] is True
++        output = Path(result["output_directory"])
++        assert output == root / "training_point_plots"
++        assert len(result["physical_trials"]) == 6
++        for trial in result["physical_trials"]:
++            plot_dir = output / trial["plot_directory"]
++            count = trial["sample_count"]
++            directions, _ = _points(reference, count, cfg.data_seed, "train")
++            with np.load(plot_dir / "training_scatter.npz", allow_pickle=False) as arrays:
++                np.testing.assert_array_equal(arrays["directions_nf"], directions.astype(np.float32))
++                assert arrays["directions_nf"].shape == (count, 3)
++                assert arrays["source_phi_degrees"].shape == (count,)
++                assert arrays["theta_degrees"].shape == (count,)
++            split = read_json(root / trial["run_directory"] / "sample_split.json")
++            assert trial["training_points_sha256"] == split["training_points_sha256"]
++            manifest = read_json(plot_dir / "plots.json")
++            assert manifest["scatter"]["sample_count"] == count
++            assert count != plot_config.cdf_samples
++            assert (plot_dir / "comparison.png").is_file()
++        reused = next(row for row in result["logical_trials"] if row["reuse_of"] is not None)
++        original = next(row for row in result["logical_trials"]
++                        if row["trial_id"] == reused["reuse_of"])
++        assert reused["plot_directory"] == original["plot_directory"]
++        assert_preserved(root, before)
++        again = replot_sweep_training_points(reference, root, device="cpu", plot_config=plot_config)
++        assert again["status"] == "complete" and again["physical_trial_count"] == 6
++        assert_preserved(root, before)
++        with pytest.raises(ValueError, match="Replot inputs/configuration/code/runtime changed"):
++            replot_sweep_training_points(
++                reference, root, device="cpu", plot_config=RainbowPlotConfig(dpi=36),
++            )
++        assert_preserved(root, before)
++        saved_replot_summary = (output / "replot_summary.json").read_bytes()
++        temporary_alias = output / "replot_summary.json.tmp"
++        temporary_alias.hardlink_to(root / summary["trials"][0]["run_directory"] / "best.pt")
++        with pytest.raises(ValueError, match="hard-linked file"):
++            replot_sweep_training_points(reference, root, device="cpu", plot_config=plot_config)
++        assert (output / "replot_summary.json").read_bytes() == saved_replot_summary
++        assert_preserved(root, before)
++        temporary_alias.unlink()
++    assert [event["event"] for event in events].count("trial_replot_started") == 6
++    assert [event["event"] for event in events].count("trial_replot_completed") == 6
++    assert events[0]["event"] == "replot_started"
++    assert events[-1]["event"] == "replot_completed"
++
++
++@pytest.mark.parametrize("damage", ["summary", "selection", "receipt", "teacher", "incomplete"])
++def test_replot_refuses_mismatches_before_writing_any_output(tmp_path, monkeypatch, damage):
++    record, root, summary = make_small_sweep(tmp_path, monkeypatch)
++    if damage == "summary":
++        summary["trials"][-1]["validation_nll"] += 1
++        (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
++    elif damage == "selection":
++        selection = read_json(root / "selection.json")
++        selection["selected_learning_rate"] = 0.003
++        (root / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
++    elif damage == "receipt":
++        (root / summary["trials"][0]["run_directory"] / "metrics.json").write_text(
++            "{}", encoding="utf-8",
++        )
++    elif damage == "teacher":
++        record = smooth_teacher(tmp_path / "other", isotropic=True)
++    else:
++        summary["status"] = "paused"
++        (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
++    before = file_hashes(root)
++    monkeypatch.setattr(replot_module, "plot_rainbow_comparison", forbidden)
++    monkeypatch.setattr(sweep_module, "train_single_condition", forbidden)
++    with RainbowReference(record) as reference, pytest.raises(ValueError):
++        replot_sweep_training_points(reference, root, device="cpu")
++    assert not (root / "training_point_plots").exists()
++    assert_preserved(root, before)
++
++
++def test_replot_refuses_output_overlap_and_unowned_output(tmp_path, monkeypatch):
++    record, root, summary = make_small_sweep(tmp_path, monkeypatch)
++    original = root / summary["trials"][0]["run_directory"]
++    before = file_hashes(root)
++    monkeypatch.setattr(replot_module, "plot_rainbow_comparison", forbidden)
++    with RainbowReference(record) as reference:
++        for output in (root, root.parent, original, original / "plots", original.parent):
++            with pytest.raises(ValueError, match="original"):
++                replot_sweep_training_points(reference, root, output, device="cpu")
++        unknown = tmp_path / "unrelated"
++        unknown.mkdir()
++        (unknown / "keep.txt").write_text("unrelated artifact", encoding="utf-8")
++        with pytest.raises(FileExistsError, match="not empty"):
++            replot_sweep_training_points(reference, root, unknown, device="cpu")
++        assert (unknown / "keep.txt").read_text(encoding="utf-8") == "unrelated artifact"
++    assert_preserved(root, before)
+diff --git a/tests/test_single_condition.py b/tests/test_single_condition.py
+index c85425c1eae0eebfcc6665768c5434f61a12456d..078287b5366bbaabdfee68178759af2b6a349d72 100644
+--- a/tests/test_single_condition.py
++++ b/tests/test_single_condition.py
+@@ -248,11 +248,20 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
+     assert not (tmp_path / "unsupported_export").exists()
+     assert main([
+         "plot-rainbow", "--record", str(record_path), "--checkpoint", str(run / "best.pt"),
+-        "--output", str(tmp_path / "replot"), "--device", "cpu", "--samples", "128",
++        "--output", str(tmp_path / "replot"), "--device", "cpu",
+         "--dpi", "80",
+     ]) == 0
+     replotted = json.loads(capsys.readouterr().out)
+     assert replotted["selected_step"] == trained["metrics"]["selected_step"]
++    assert replotted["scatter"]["sample_count"] == small_config().train_samples
++    # A display count must never silently replace the actual training pool.
++    rejected = tmp_path / "wrong_plot_count"
++    with pytest.raises(ValueError, match="--samples and --seed require --scatter independent"):
++        main([
++            "plot-rainbow", "--record", str(record_path), "--checkpoint", str(run / "best.pt"),
++            "--output", str(rejected), "--device", "cpu", "--samples", "128",
++        ])
++    assert not rejected.exists()
+ 
+ 
+ def test_nonfinite_update_does_not_overwrite_valid_checkpoint(tmp_path, monkeypatch):
+diff --git a/tests/test_sweep_cli.py b/tests/test_sweep_cli.py
+index b62185cfb72db8f9aeab38b7ac158d11dde43106..dbc42b2dc864739e4d0d48f122ce896211401318 100644
+--- a/tests/test_sweep_cli.py
++++ b/tests/test_sweep_cli.py
+@@ -43,7 +43,7 @@ def write_configs(tmp_path):
+     return training, sweep
+ 
+ 
+-def test_sweep_cli_pause_resume_and_real_diagnostic_summary(tmp_path, capsys):
++def test_sweep_cli_pause_resume_and_real_diagnostic_summary(tmp_path, capsys, monkeypatch):
+     record = smooth_teacher(tmp_path / "record")
+     config, sweep_config = write_configs(tmp_path)
+     output = tmp_path / "runs"
+@@ -91,6 +91,29 @@ def test_sweep_cli_pause_resume_and_real_diagnostic_summary(tmp_path, capsys):
+     assert manifest["diagnostics"]["configuration"]["theta_band_degrees"] == [120.0, 150.0]
+     assert len(manifest["diagnostics"]["implementation_sha256"]) == 64
+ 
++    # The batch replot route needs only the saved completed sweep and record.
++    # Remove both original launch configs and forbid additional optimization.
++    config.unlink()
++    sweep_config.unlink()
++
++    def no_training(*args, **kwargs):
++        raise AssertionError("Replot CLI must not invoke training")
++
++    monkeypatch.setattr("phaseflow.sweep.train_single_condition", no_training)
++    before = (output / "summary.json").read_bytes()
++    assert main([
++        "replot-sweep-rainbow", "--record", str(record), "--sweep", str(output),
++        "--device", "cpu", "--quiet",
++    ]) == 0
++    replot = json.loads(capsys.readouterr().out)
++    assert replot["status"] == "complete" and replot["optimizer_updates"] == 0
++    assert replot["logical_trial_count"] == 4 and replot["physical_trial_count"] == 3
++    assert (output / "summary.json").read_bytes() == before
++    for row in replot["physical_trials"]:
++        plotted = output / "training_point_plots" / row["plot_directory"]
++        with np.load(plotted / "training_scatter.npz", allow_pickle=False) as arrays:
++            assert arrays["directions_nf"].shape == (row["sample_count"], 3)
++
+ 
+ def test_standalone_diagnose_uses_selected_checkpoint_and_rejects_other_teacher(tmp_path, capsys):
+     record = smooth_teacher(tmp_path / "record")
+diff --git a/tests/test_training_scatter.py b/tests/test_training_scatter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..72ef952e5d401faa737008276e0f87eccb30161f
+--- /dev/null
++++ b/tests/test_training_scatter.py
+@@ -0,0 +1,267 @@
++"""Recorded-pool identity and faithful plots; synthetic CPU fixtures only."""
++
++from __future__ import annotations
++
++import json
++from dataclasses import replace
++
++import numpy as np
++import pytest
++import torch
++from test_rainbow import write_rainbow_fixture
++
++from phaseflow.plotting import RainbowPlotConfig, plot_rainbow_comparison
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import (
++    SingleTrainingConfig,
++    _array_hash,
++    _points,
++    load_single_checkpoint,
++    read_single_checkpoint,
++    train_single_condition,
++)
++from phaseflow.sphere_model import SingleConditionSphereFlow, SphereFlowConfig
++from phaseflow.training_scatter import resolve_training_scatter
++
++
++def _configuration(**changes):
++    return replace(
++        SingleTrainingConfig(
++            device="cpu", dtype="float32", seed=11, data_seed=37,
++            train_samples=137, validation_samples=32, test_samples=32,
++            proposal_samples=0, steps=2, batch_size=16, eval_every=1,
++            checkpoint_every=1, eval_batch_size=64, log_every=1,
++        ),
++        **changes,
++    )
++
++
++def _model_config(*, geometry_dtype="model"):
++    return SphereFlowConfig(
++        num_coupling_layers=2, num_bins=4, hidden_features=(4,),
++        geometry_dtype=geometry_dtype,
++    )
++
++
++@pytest.fixture
++def trained(tmp_path):
++    write_rainbow_fixture(tmp_path / "record", frame_rotation=0.37)
++    with RainbowReference(tmp_path / "record") as record:
++        cfg = _configuration()
++        run = tmp_path / "run"
++        result = train_single_condition(record, _model_config(), cfg, run, make_plots=False)
++        yield record, cfg, run, result
++
++
++def test_automatic_training_plot_uses_complete_actual_pool_and_data_seed(tmp_path, monkeypatch):
++    from matplotlib.axes import Axes
++
++    write_rainbow_fixture(tmp_path / "record", frame_rotation=-0.29)
++    observed = []
++    original = Axes.scatter
++
++    def record_scatter(ax, x, y, *args, **kwargs):
++        observed.append((np.asarray(x).copy(), np.asarray(y).copy()))
++        return original(ax, x, y, *args, **kwargs)
++
++    monkeypatch.setattr(Axes, "scatter", record_scatter)
++    with RainbowReference(tmp_path / "record") as record:
++        cfg = _configuration()
++        run = tmp_path / "run"
++        result = train_single_condition(
++            record, _model_config(), cfg, run,
++            plot_config=RainbowPlotConfig(cdf_samples=7, seed=99, dpi=30),
++        )
++        manifest = json.loads((run / "plots/plots.json").read_text())
++        scatter = manifest["scatter"]
++        assert scatter["sample_count"] == scatter["displayed_sample_count"] == 137
++        assert scatter["seed"] == 11 and scatter["data_seed"] == 37
++        assert scatter["stream_id"] == 0 and scatter["hash_verified"]
++        assert scatter["downsampling"] is False
++        assert manifest["configuration_usage"]["cdf_samples"] == "unused"
++        assert manifest["configuration_usage"]["seed"] == "unused"
++        points = _points(record, 137, 37, "train")
++        assert scatter["training_points_sha256"] == _array_hash(*points)
++        assert scatter["training_points_sha256"] != _array_hash(*_points(record, 137, 11, "train"))
++        with np.load(run / "plots/training_scatter.npz", allow_pickle=False) as saved:
++            expected = torch.as_tensor(points[0], dtype=torch.float32).numpy()
++            np.testing.assert_array_equal(saved["directions_nf"], expected)
++            assert saved["directions_nf"].dtype == np.float32
++            assert saved["directions_nf"].shape == (137, 3)
++            source = expected.astype(np.float64) @ record.source_to_nf
++            phi = (np.arctan2(source[:, 1], source[:, 0]) + np.pi) % (2 * np.pi) - np.pi
++            theta = np.arctan2(np.hypot(source[:, 0], source[:, 1]), source[:, 2])
++            np.testing.assert_array_equal(saved["source_phi_degrees"], np.rad2deg(phi))
++            np.testing.assert_array_equal(saved["theta_degrees"], np.rad2deg(theta))
++            assert json.loads(saved["provenance_json"].item()) == scatter
++            assert len(observed) == 2
++            for x, y in observed:
++                np.testing.assert_array_equal(x, saved["source_phi_degrees"])
++                np.testing.assert_array_equal(y, saved["theta_degrees"])
++            expected_band = np.count_nonzero(
++                (saved["theta_degrees"] >= 120) & (saved["theta_degrees"] <= 150)
++            )
++            assert scatter["band"]["observed_train_samples"] == expected_band
++        assert manifest["selected_step"] == result.metrics["selected_step"]
++
++
++@pytest.mark.parametrize("geometry_dtype,expected_dtype", [("model", np.float32), ("float64", np.float64)])
++def test_geometry_precision_matches_saved_training_mode(tmp_path, geometry_dtype, expected_dtype):
++    write_rainbow_fixture(tmp_path / "record", frame_rotation=0.13)
++    with RainbowReference(tmp_path / "record") as record:
++        cfg = _configuration(data_seed=None, steps=0)
++        result = train_single_condition(
++            record, _model_config(geometry_dtype=geometry_dtype), cfg,
++            tmp_path / "run", make_plots=False,
++        )
++        pool = resolve_training_scatter(result.model, record, result.best_path)
++        assert pool.directions_nf.dtype == expected_dtype
++        expected = _points(record, cfg.train_samples, cfg.seed, "train")[0].astype(expected_dtype)
++        np.testing.assert_array_equal(pool.directions_nf, expected)
++        assert pool.provenance["data_seed"] == cfg.seed
++
++
++def test_largest_requested_pool_has_no_display_cap(tmp_path, monkeypatch):
++    from matplotlib.axes import Axes
++
++    write_rainbow_fixture(tmp_path / "record")
++    counts = []
++    original = Axes.scatter
++
++    def count_scatter(ax, x, y, *args, **kwargs):
++        counts.append((len(x), len(y)))
++        return original(ax, x, y, *args, **kwargs)
++
++    monkeypatch.setattr(Axes, "scatter", count_scatter)
++    with RainbowReference(tmp_path / "record") as record:
++        cfg = _configuration(train_samples=262144, steps=0)
++        result = train_single_condition(
++            record, _model_config(), cfg, tmp_path / "run", make_plots=False
++        )
++        manifest = plot_rainbow_comparison(
++            result.model, record, tmp_path / "plots", checkpoint_path=result.best_path,
++            config=RainbowPlotConfig(cdf_samples=3, dpi=20),
++        )
++        assert counts == [(262144, 262144), (262144, 262144)]
++        assert manifest["scatter"]["sample_count"] == 262144
++        with np.load(tmp_path / "plots/training_scatter.npz", allow_pickle=False) as arrays:
++            assert arrays["directions_nf"].shape == (262144, 3)
++
++
++def test_fp32_polar_angles_retain_the_nonzero_transverse_components(tmp_path):
++    masses = np.tile(np.array([0.5, 0.2, 0.3]) / 4, (4, 1))
++    write_rainbow_fixture(
++        tmp_path / "record", masses=masses, u_edges=np.array([0, 1e-12, 0.3, 1.0]),
++        frame_rotation=0.4,
++    )
++    with RainbowReference(tmp_path / "record") as record:
++        result = train_single_condition(
++            record, _model_config(), _configuration(steps=0), tmp_path / "run", make_plots=False
++        )
++        pool = resolve_training_scatter(result.model, record, result.best_path)
++        rounded_z = pool.directions_nf[:, 2] == 1
++        assert rounded_z.any()
++        assert np.all(np.hypot(pool.directions_nf[rounded_z, 0], pool.directions_nf[rounded_z, 1]) > 0)
++        assert np.all(pool.theta_degrees[rounded_z] > 0)
++        assert np.all(pool.theta_degrees[rounded_z] < 0.001)
++
++
++@pytest.mark.parametrize("damage", ["config", "split", "hash", "seed", "best_step", "best_state", "validation"])
++def test_inconsistent_saved_provenance_is_rejected_before_output(trained, tmp_path, damage):
++    record, _, run, result = trained
++    checkpoint = read_single_checkpoint(result.checkpoint_path)
++    best = read_single_checkpoint(result.best_path)
++    config = json.loads((run / "config.json").read_text())
++    split = json.loads((run / "sample_split.json").read_text())
++    if damage == "config":
++        config["training"]["train_samples"] += 1
++    elif damage == "split":
++        split["train_samples"] += 1
++    elif damage == "hash":
++        split["training_points_sha256"] = "0" * 64
++        checkpoint["sample_split"] = split
++    elif damage == "seed":
++        config["training"]["data_seed"] += 1
++        checkpoint["training_config"] = config["training"]
++        split["data_seed"] = config["training"]["data_seed"]
++        checkpoint["sample_split"] = split
++    elif damage == "best_step":
++        best["global_step"] += 1
++    elif damage == "best_state":
++        key = next(key for key, value in best["model_state"].items() if isinstance(value, torch.Tensor))
++        best["model_state"][key] = best["model_state"][key] + 0.1
++    else:
++        best["validation"]["nll"] += 1
++    (run / "config.json").write_text(json.dumps(config))
++    (run / "sample_split.json").write_text(json.dumps(split))
++    torch.save(checkpoint, result.checkpoint_path)
++    torch.save(best, result.best_path)
++    output = tmp_path / "invalid_plots"
++    with pytest.raises(ValueError):
++        plot_rainbow_comparison(result.model, record, output, checkpoint_path=result.best_path)
++    assert not output.exists()
++
++
++def test_wrong_model_reference_dtype_and_missing_run_rejected(trained, tmp_path):
++    record, _, _, result = trained
++    with pytest.raises(ValueError, match="requires a checkpoint"):
++        plot_rainbow_comparison(result.model, record, tmp_path / "no_context")
++    assert not (tmp_path / "no_context").exists()
++    with pytest.raises(ValueError, match="selected_step"):
++        plot_rainbow_comparison(
++            result.model, record, tmp_path / "wrong_step", checkpoint_path=result.best_path,
++            selected_step=999,
++        )
++    changed_model, _ = load_single_checkpoint(result.best_path, device="cpu")
++    with torch.no_grad():
++        next(changed_model.parameters()).add_(0.1)
++    with pytest.raises(ValueError, match="model state"):
++        resolve_training_scatter(changed_model, record, result.best_path)
++    changed_model, _ = load_single_checkpoint(result.best_path, device="cpu")
++    changed_model.double()
++    with pytest.raises(ValueError, match="dtype"):
++        resolve_training_scatter(changed_model, record, result.best_path)
++    write_rainbow_fixture(tmp_path / "different_record", frame_rotation=0.38)
++    with RainbowReference(tmp_path / "different_record") as different:
++        with pytest.raises(ValueError, match="reference record"):
++            resolve_training_scatter(result.model, different, result.best_path)
++    copied = tmp_path / "copied.pt"
++    copied.write_bytes(result.best_path.read_bytes())
++    with pytest.raises(ValueError, match="saved checkpoint"):
++        resolve_training_scatter(result.model, record, copied)
++    verified = resolve_training_scatter(result.model, record, copied, run_directory=result.best_path.parent)
++    assert verified.provenance["model_state_verified"]
++
++
++def test_read_only_regeneration_allows_changed_runtime_and_preserves_global_rng(trained):
++    record, _, run, result = trained
++    for path in (result.best_path, result.checkpoint_path):
++        payload = read_single_checkpoint(path)
++        payload["code_fingerprint"] = "old_training_implementation"
++        payload["runtime"] = {"device": "unavailable_original_gpu"}
++        torch.save(payload, path)
++    numpy_state = np.random.get_state()
++    torch_state = torch.get_rng_state().clone()
++    pool = resolve_training_scatter(result.model, record, result.best_path)
++    assert pool.provenance["hash_verified"]
++    torch.testing.assert_close(torch_state, torch.get_rng_state(), rtol=0, atol=0)
++    now = np.random.get_state()
++    assert numpy_state[0] == now[0] and numpy_state[2:] == now[2:]
++    np.testing.assert_array_equal(numpy_state[1], now[1])
++    current, _ = load_single_checkpoint(run / "checkpoint.pt", device="cpu")
++    current_pool = resolve_training_scatter(current, record, run / "checkpoint.pt")
++    assert current_pool.provenance["plotted_model_scope"].startswith("training_checkpoint")
++    np.testing.assert_array_equal(current_pool.directions_nf, pool.directions_nf)
++
++
++def test_bad_mode_has_no_implicit_diagnostic_fallback(tmp_path):
++    write_rainbow_fixture(tmp_path / "record")
++    with RainbowReference(tmp_path / "record") as record:
++        model = SingleConditionSphereFlow(record.g, record.condition[1], _model_config())
++        with pytest.raises(ValueError, match="scatter_mode"):
++            plot_rainbow_comparison(model, record, tmp_path / "bad", scatter_mode="automatic")
++        with pytest.raises(ValueError, match="only valid"):
++            plot_rainbow_comparison(
++                model, record, tmp_path / "bad", scatter_mode="independent",
++                training_run_directory=tmp_path,
++            )

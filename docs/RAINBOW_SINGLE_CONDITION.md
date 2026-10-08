@@ -398,10 +398,11 @@ PyTorch / CUDA の再現性には実行環境による範囲があります．�
 | ファイル | 表示内容 |
 |---|---|
 | `reference_pdf.png` | 保存 CDF のセル質量を実際の立体角で割った教師 PDF，対数色表示 |
-| `cdf_samples.png` | 同じ保存 CDF から独立に生成した点群の散布図 |
+| `cdf_samples.png` | 学習に使った固定 pool の全 N 点の散布図 |
 | `nf_pdf.png` | 学習済み NF の任意方向 PDF 評価，対数色表示 |
 | `comparison.png` | 上記 3 枚を並べた比較図 |
 | `plots.json` | 可視化設定，入力と checkpoint の hash，座標・密度・サンプルの情報 |
+| `training_scatter.npz` | 実際に描画した全 N 点の方向，角度，検証情報 |
 
 全てのマップの横軸はソルバの方位角 `phi_s`，範囲は `[-180,180]` 度です．
 縦軸は入射伝播方向からの散乱角 `theta`，範囲は `[0,180]` 度で，前方散乱の 0 度を上に
@@ -419,9 +420,20 @@ NF も同じ全セルの `u` の中点・方位角の中点で PDF を評価し�
 全ての正の値が同じ場合だけ，表示用の色範囲を上下に広げます．PDF 自体は変更しません．
 両方とも単位は `sr^-1` であり，画像上の角度面積あたりの密度ではありません．
 
-点群は CDF サンプラの定性的な確認用で，既定では 32,768 点です．これは可視化専用の
-独立な点群であり，学習 pool 自体を全点表示するものではありません．乱数 seed と点数を保存し，
-学習・validation・test の点数を変えずに散布図の点数を変更できます．
+点群は **学習に使った固定 pool 自体を，全 N 点，元の順序で一度ずつ**表示します．
+学習時の `train_samples` と `data_seed`（未指定なら `seed`），学習用 stream = 0 を使い，
+元の FP64 の方向と教師 log PDF を再生成します．両配列の SHA-256 が学習時に記録された
+`training_points_sha256` と一致した場合だけ，学習と同じ geometry dtype に変換して描きます．
+FP32 学習では，GPU に入力したものと同じ FP32 の方向が対象です．GPU tensor を
+保存していたという主張ではなく，保存記録に対して検証した再生成です．
+
+`best.pt` と同じ実験の `checkpoint.pt`，`config.json`，`sample_split.json` が必要です．
+checkpoint の選択重み・step・条件，設定，入力 CDF と点群ハッシュの一致を確認します．
+不一致や記録の欠落があれば，別の独立点群に置き換えずに停止します．点数の上限や間引きは
+ありません．学習で同じ点を再使用した回数や，監視用 subset の点数とは区別します．
+`plots.json` の `scatter` には使用した N，seed，ハッシュの一致，描画時の dtype と，
+120〜150 度に入った実際の点数を記録します．`training_scatter.npz` は同じ全点を保存します．
+
 `theta,phi_s` の長方形は等面積投影ではないため，点の見かけの密集度は
 `p_Omega * sin(theta)` に従います．前方の PDF が大きい場所ほど必ず画面上の点が密になる，
 という読み方はせず，ピーク・谷の位置や方位角の対応を確認します．定量比較は立体角に関する
@@ -432,24 +444,35 @@ NLL / KL を使います．
 ```json
 "visualization": {
   "enabled": true,
-  "cdf_samples": 32768,
-  "seed": 2027,
   "eval_batch_size": 16384,
   "dpi": 160,
   "write_pdf": false
 }
 ```
 
+旧設定にある `cdf_samples` と `seed` は互換性のため読み込めますが，学習点群の描画では
+使用しません．`plots.json` にも unused と記録します．独立な CDF サンプラの診断を行う場合
+に限り，CLI の `--scatter independent --samples 32768 --seed 2027` で明示します．
+その図には Independent CDF diagnostic と表示され，学習点群の図とは区別されます．
+
 `--no-plots` は完了後の自動描画を明示的に省略します．`--max-steps-this-run` で予定の途中で
 停止したときには，自動図は作りません．学習済み checkpoint から図だけを作り直す場合は，
 次のコマンドを使用できます．NF の評価は既定で CUDA，画像の構成と保存は Matplotlib で行います．
 
-```powershell
-.\.venv\Scripts\phaseflow.exe plot-rainbow --record $record --checkpoint runs/rainbow_single/best.pt --output runs/rainbow_single/plots --samples 32768 --seed 2027
+```bat
+call environment.bat
+"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-rainbow ^
+  --record "..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800" ^
+  --checkpoint "runs\rainbow_single_gpu\best.pt" ^
+  --output "runs\rainbow_single_gpu\plots_training" --scatter training
 ```
 
 `--batch-size` は描画時の NF 評価の batch size，`--dpi` は出力解像度です．
 `--write-pdf` を付けると，PNG に加えて PDF 形式の図も出力します．
+checkpoint をコピーして別の場所に置いている場合は，`--training-run` で元の学習結果の
+ディレクトリを指定します．A/B 探索の完了済み結果は `call sweep.bat replot` でまとめて
+再描画できます．[既存探索の再描画](SWEEP_AND_RAINBOW_LOSS.md#完了済み探索を実際の学習点群で再描画する)
+を参照してください．
 
 ## 評価指標の読み方
 

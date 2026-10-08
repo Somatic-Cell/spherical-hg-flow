@@ -248,11 +248,20 @@ def test_cli_inspect_train_evaluate_and_native_export_guard(tmp_path, capsys):
     assert not (tmp_path / "unsupported_export").exists()
     assert main([
         "plot-rainbow", "--record", str(record_path), "--checkpoint", str(run / "best.pt"),
-        "--output", str(tmp_path / "replot"), "--device", "cpu", "--samples", "128",
+        "--output", str(tmp_path / "replot"), "--device", "cpu",
         "--dpi", "80",
     ]) == 0
     replotted = json.loads(capsys.readouterr().out)
     assert replotted["selected_step"] == trained["metrics"]["selected_step"]
+    assert replotted["scatter"]["sample_count"] == small_config().train_samples
+    # A display count must never silently replace the actual training pool.
+    rejected = tmp_path / "wrong_plot_count"
+    with pytest.raises(ValueError, match="--samples and --seed require --scatter independent"):
+        main([
+            "plot-rainbow", "--record", str(record_path), "--checkpoint", str(run / "best.pt"),
+            "--output", str(rejected), "--device", "cpu", "--samples", "128",
+        ])
+    assert not rejected.exists()
 
 
 def test_nonfinite_update_does_not_overwrite_valid_checkpoint(tmp_path, monkeypatch):

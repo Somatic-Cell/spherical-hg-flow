@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
     from .sphere_model import SingleConditionSphereFlow
 
 
-PLOT_SCHEMA = "phaseflow.rainbow_plots.v1"
+PLOT_SCHEMA = "phaseflow.rainbow_plots.v2"
 _CDF_PLOT_STREAM = 100
 _ZERO_COLOR = "#d2d6dc"
 _DENSITY_LABEL = r"PDF [sr$^{-1}$], logarithmic scale"
@@ -40,7 +41,12 @@ _CHART_NOTE = (
 
 @dataclass(frozen=True)
 class RainbowPlotConfig:
-    """Display and batching settings; none change the learned distribution."""
+    """Display settings; ``cdf_samples`` and ``seed`` are independent-mode only.
+
+    Training-mode scatter always uses the saved run's complete fixed pool. The
+    legacy fields remain readable so old training/sweep configuration identities
+    are preserved; they cannot override the training sample count or data seed.
+    """
 
     cdf_samples: int = 32768
     seed: int = 2027
@@ -113,9 +119,9 @@ def evaluate_rainbow_grid(
     """Evaluate every native CDF cell using bounded model-device batches.
 
     CPU arrays hold the display grid; inference executes on ``model.device``.
-    Directions and geometry stay float64 even with a float32 conditioner. The
-    recorded source-to-NF rotation is applied before PDF evaluation. No global
-    RNG is used, and the caller's training/evaluation mode is restored on errors.
+    Directions use the model's configured geometry precision. The recorded
+    source-to-NF rotation is applied before PDF evaluation. No global RNG is
+    used, and the caller's training/evaluation mode is restored on errors.
     """
     if type(batch_size) is not int or batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
@@ -150,7 +156,8 @@ def evaluate_rainbow_grid(
     training_modes = [(module, module.training) for module in model.modules()]
     try:
         model.eval()
-        with torch.no_grad():
+        # A caller's ambient autocast must not change the saved model precision.
+        with torch.no_grad(), torch.autocast(device_type=model.device.type, enabled=False):
             for start in range(0, nf_log_pdf.size, batch_size):
                 stop = min(start + batch_size, nf_log_pdf.size)
                 index = np.arange(start, stop, dtype=np.int64)
@@ -258,13 +265,28 @@ def _file_hash(path: Path) -> str:
 
 def _save_figure(fig: Figure, path: Path, *, dpi: int, write_pdf: bool) -> list[str]:
     paths = [path.name]
+
+    def save_atomic(destination: Path, *, file_format: str, **options) -> None:
+        # Rendering directly to a pre-existing hard link would also overwrite
+        # the linked original figure. A same-directory temporary file followed
+        # by replace changes this directory entry without touching that inode.
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+        try:
+            fig.savefig(temporary, format=file_format, facecolor="white", **options)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     try:
         # Deliberately avoid bbox_inches='tight': all individual output canvases
         # and data rectangles must have exactly the same size and placement.
-        fig.savefig(path, dpi=dpi, facecolor="white")
+        save_atomic(path, file_format="png", dpi=dpi)
         if write_pdf:
             pdf_path = path.with_suffix(".pdf")
-            fig.savefig(pdf_path, facecolor="white")
+            save_atomic(pdf_path, file_format="pdf")
             paths.append(pdf_path.name)
     finally:
         fig.clear()
@@ -280,6 +302,8 @@ def plot_rainbow_comparison(
     checkpoint_path: str | Path | None = None,
     selected_step: int | None = None,
     title: str | None = None,
+    scatter_mode: str = "training",
+    training_run_directory: str | Path | None = None,
 ) -> dict[str, Any]:
     """Save three aligned maps, a combined figure and a provenance manifest.
 
@@ -289,9 +313,13 @@ def plot_rainbow_comparison(
     raster display pixels need not resolve subpixel cells, so native numerical
     grid statistics and resolution are recorded in ``plots.json``.
 
-    ``checkpoint_path`` records the exact file hash when supplied. The function
-    plots the passed model's current weights; callers loading a checkpoint must
-    validate the record identity before calling, as the CLI does.
+    By default, scatter displays every entry in the saved fixed training pool.
+    ``checkpoint_path`` and the original saved run files are required, and the
+    passed model/checkpoint/pool identity is verified before creating artifacts.
+    ``training_run_directory`` locates those files if the checkpoint was copied.
+    Explicit ``scatter_mode='independent'`` retains a separate CDF-sampler
+    diagnostic without claiming to display the training pool. Only that mode
+    uses ``config.cdf_samples`` and ``config.seed``.
     """
     # Headless object-oriented rendering does not set a global backend or import
     # pyplot, and keeps CLI help / non-plotting commands free of matplotlib work.
@@ -305,17 +333,54 @@ def plot_rainbow_comparison(
         raise ValueError("config must be a RainbowPlotConfig")
     if selected_step is not None and (type(selected_step) is not int or selected_step < 0):
         raise ValueError("selected_step must be a nonnegative integer or None")
+    if scatter_mode not in ("training", "independent"):
+        raise ValueError("scatter_mode must be 'training' or 'independent'")
+    if scatter_mode == "independent" and training_run_directory is not None:
+        raise ValueError("training_run_directory is only valid for training scatter")
     if model.hg_g != reference.g or model.incident_cosine != float(reference.condition[1]):
         raise ValueError("Model HG g or incident condition does not match the reference record")
     checkpoint = None
-    if checkpoint_path is not None:
+    training_scatter = None
+    checkpoint_step = None
+    if scatter_mode == "training":
+        from .training_scatter import resolve_training_scatter
+
+        training_scatter = resolve_training_scatter(
+            model, reference, checkpoint_path, run_directory=training_run_directory
+        )
+        scatter_phi = training_scatter.source_phi_degrees
+        scatter_theta = training_scatter.theta_degrees
+        scatter_metadata = {"mode": "training", **training_scatter.provenance}
+        checkpoint = scatter_metadata["plotted_checkpoint"]
+        checkpoint_step = checkpoint["global_step"]
+        if selected_step is not None and selected_step != checkpoint_step:
+            raise ValueError("selected_step differs from the verified plotted checkpoint")
+        if checkpoint["kind"] == "inference":
+            selected_step = checkpoint_step
+        scatter_title = f"Fixed training pool (N = {scatter_metadata['sample_count']:,})"
+    else:
+        scatter_phi, scatter_theta = cdf_scatter_coordinates(
+            reference, samples=config.cdf_samples, seed=config.seed
+        )
+        scatter_metadata = {
+            "mode": "independent",
+            "source": "stored_cdf_independent_diagnostic_stream",
+            "sample_count": config.cdf_samples,
+            "displayed_sample_count": len(scatter_phi),
+            "downsampling": False,
+            "seed": config.seed,
+            "stream_id": _CDF_PLOT_STREAM,
+            "rng": "numpy.PCG64(SeedSequence([seed,stream_id]))",
+            "uniform_midpoint_bits": 52,
+            "source_phi_degrees_sha256": _array_hash(scatter_phi),
+            "theta_degrees_sha256": _array_hash(scatter_theta),
+        }
+        scatter_title = f"Independent CDF diagnostic (N = {config.cdf_samples:,})"
+    if checkpoint_path is not None and checkpoint is None:
         checkpoint_file = Path(checkpoint_path).resolve()
         checkpoint = {"path": str(checkpoint_file), "sha256": _file_hash(checkpoint_file)}
 
     grid = evaluate_rainbow_grid(model, reference, batch_size=config.eval_batch_size)
-    scatter_phi, scatter_theta = cdf_scatter_coordinates(
-        reference, samples=config.cdf_samples, seed=config.seed
-    )
     vmin, vmax = _shared_color_limits(grid)
     norm = LogNorm(vmin=vmin, vmax=vmax, clip=False)
     # Use a perceptually ordered map and reserve gray for actual zero mass.
@@ -334,11 +399,13 @@ def plot_rainbow_comparison(
     heading = f"{source_kind} | {condition_label}"
     if title is not None:
         heading += f"\n{title}"
+    elif training_scatter is not None and checkpoint["kind"] == "training":
+        heading += f"\nTraining checkpoint (step {checkpoint_step})"
     elif selected_step is not None:
         heading += f"\nValidation-selected model (step {selected_step})"
     panel_titles = (
         "Reference PDF from the stored CDF",
-        f"Samples from the stored CDF (N = {config.cdf_samples:,})",
+        scatter_title,
         "NF PDF evaluated at source cell centers",
     )
 
@@ -372,6 +439,25 @@ def plot_rainbow_comparison(
 
     output = Path(output_directory).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    arrays: dict[str, Any] = {}
+    if training_scatter is not None:
+        array_path = output / "training_scatter.npz"
+        temporary_array = output / "training_scatter.npz.tmp"
+        with temporary_array.open("wb") as stream:
+            np.savez_compressed(
+                stream,
+                directions_nf=training_scatter.directions_nf,
+                source_phi_degrees=scatter_phi,
+                theta_degrees=scatter_theta,
+                provenance_json=np.array(json.dumps(scatter_metadata, allow_nan=False)),
+            )
+        temporary_array.replace(array_path)
+        arrays["training_scatter"] = {
+            "path": array_path.name,
+            "sha256": _file_hash(array_path),
+            "format": "numpy_npz_no_pickle",
+            "sample_count": scatter_metadata["sample_count"],
+        }
     files: dict[str, list[str]] = {}
     # Fixed rectangles ensure the scatter canvas has exactly the same dimensions
     # as either PDF canvas, including the space reserved for their colorbars.
@@ -434,6 +520,14 @@ def plot_rainbow_comparison(
         "source_kind": "synthetic_fixture" if synthetic else "rainbow_cdf_record",
         "title": heading,
         "configuration": config.to_dict(),
+        "configuration_usage": {
+            "cdf_samples": "unused" if scatter_mode == "training" else "independent_sample_count",
+            "seed": "unused" if scatter_mode == "training" else "independent_sample_seed",
+            "training_pool_source": (
+                "saved training config and verified sample_split"
+                if scatter_mode == "training" else "not used"
+            ),
+        },
         "condition": reference.condition.tolist(),
         "base_g": reference.g,
         "selected_step": selected_step,
@@ -480,16 +574,7 @@ def plot_rainbow_comparison(
             "reference_pdf_sha256": _array_hash(grid.reference_pdf),
             "nf_pdf_sha256": _array_hash(grid.nf_pdf),
         },
-        "scatter": {
-            "source": "stored_cdf_independent_diagnostic_stream",
-            "sample_count": config.cdf_samples,
-            "seed": config.seed,
-            "stream_id": _CDF_PLOT_STREAM,
-            "rng": "numpy.PCG64(SeedSequence([seed,stream_id]))",
-            "uniform_midpoint_bits": 52,
-            "source_phi_degrees_sha256": _array_hash(scatter_phi),
-            "theta_degrees_sha256": _array_hash(scatter_theta),
-        },
+        "scatter": scatter_metadata,
         "color_scale": {
             "normalization": "matplotlib.colors.LogNorm",
             "shared_between": ["reference_pdf", "nf_pdf"],
@@ -509,6 +594,7 @@ def plot_rainbow_comparison(
             "display_note": "PNG raster pixels may combine native cells narrower than a pixel.",
         },
         "files": files,
+        "arrays": arrays,
     }
     temporary = output / "plots.json.tmp"
     temporary.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")

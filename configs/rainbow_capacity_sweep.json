@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "sweep": {
+    "num_bins": [
+      16,
+      32,
+      64,
+      128
+    ],
+    "milestones": [
+      2000,
+      6000,
+      10000,
+      20000
+    ]
+  },
+  "diagnostics": {
+    "enabled": true,
+    "theta_band_degrees": [
+      120.0,
+      150.0
+    ],
+    "source_phi_degrees": [
+      -90.0,
+      0.0,
+      90.0
+    ],
+    "eval_batch_size": 4096,
+    "dpi": 140
+  }
+}

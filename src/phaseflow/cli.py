@@ -78,6 +78,48 @@ def _parser() -> argparse.ArgumentParser:
     rainbow_sweep.add_argument("--max-trials-this-run", type=int)
     rainbow_sweep.add_argument("--no-plots", action="store_true")
     rainbow_sweep.add_argument("--quiet", action="store_true")
+    capacity_sweep = commands.add_parser(
+        "sweep-capacity-rainbow", help="compare spline bins along shared optimization milestones"
+    )
+    capacity_sweep.add_argument("--record", required=True, type=Path)
+    capacity_sweep.add_argument("--config", required=True, type=Path)
+    capacity_sweep.add_argument("--sweep-config", required=True, type=Path)
+    capacity_sweep.add_argument("--output", required=True, type=Path)
+    capacity_sweep.add_argument("--device")
+    capacity_sweep.add_argument("--max-milestones-this-run", type=int)
+    capacity_sweep.add_argument("--no-plots", action="store_true")
+    capacity_sweep.add_argument("--quiet", action="store_true")
+    sample_sweep = commands.add_parser(
+        "sweep-samples-rainbow", help="recheck training pool sizes for a completed capacity winner"
+    )
+    sample_sweep.add_argument("--record", required=True, type=Path)
+    sample_sweep.add_argument("--capacity", required=True, type=Path)
+    sample_sweep.add_argument("--output", required=True, type=Path)
+    sample_sweep.add_argument("--device")
+    sample_sweep.add_argument("--train-samples", nargs="+", type=int,
+                              default=[65536, 262144, 1048576])
+    sample_sweep.add_argument("--max-trials-this-run", type=int)
+    sample_sweep.add_argument("--quiet", action="store_true")
+    sampling_audit = commands.add_parser(
+        "audit-sampling-rainbow", help="compare a verified training pool to exact CDF region masses"
+    )
+    sampling_audit.add_argument("--record", required=True, type=Path)
+    sampling_audit.add_argument("--run", required=True, type=Path)
+    sampling_audit.add_argument("--output", required=True, type=Path)
+    sampling_audit.add_argument("--device", default="cuda")
+    sampling_audit.add_argument("--cpu-threads", type=int, default=1)
+    sampling_audit.add_argument("--u-bins", type=int, default=32)
+    sampling_audit.add_argument("--phi-bins", type=int, default=64)
+    sampling_audit.add_argument("--no-plots", action="store_true")
+    rainbow_replot = commands.add_parser(
+        "replot-sweep-rainbow", help="redraw completed sweep maps with every verified training point"
+    )
+    rainbow_replot.add_argument("--record", required=True, type=Path)
+    rainbow_replot.add_argument("--sweep", required=True, type=Path)
+    rainbow_replot.add_argument("--output", type=Path)
+    rainbow_replot.add_argument("--device", default="cuda")
+    rainbow_replot.add_argument("--cpu-threads", type=int, default=1)
+    rainbow_replot.add_argument("--quiet", action="store_true")
     rainbow_diagnose = commands.add_parser(
         "diagnose-rainbow", help="angular band mass and PDF profiles for an existing selected model"
     )
@@ -99,14 +141,16 @@ def _parser() -> argparse.ArgumentParser:
     rainbow_eval.add_argument("--cpu-threads", type=int, default=1)
     rainbow_eval.add_argument("--output", type=Path)
     rainbow_plot = commands.add_parser(
-        "plot-rainbow", help="aligned CDF PDF, CDF samples and NF PDF for one checkpoint"
+        "plot-rainbow", help="aligned CDF PDF, complete training pool and NF PDF for one checkpoint"
     )
     rainbow_plot.add_argument("--record", required=True, type=Path)
     rainbow_plot.add_argument("--checkpoint", required=True, type=Path)
     rainbow_plot.add_argument("--output", "--output-dir", required=True, type=Path)
     rainbow_plot.add_argument("--device", default="cuda")
-    rainbow_plot.add_argument("--samples", type=int, default=32768)
-    rainbow_plot.add_argument("--seed", type=int, default=2027)
+    rainbow_plot.add_argument("--scatter", choices=("training", "independent"), default="training")
+    rainbow_plot.add_argument("--training-run", type=Path)
+    rainbow_plot.add_argument("--samples", type=int, help="point count for --scatter independent only")
+    rainbow_plot.add_argument("--seed", type=int, help="sample seed for --scatter independent only")
     rainbow_plot.add_argument("--batch-size", type=int, default=16384)
     rainbow_plot.add_argument("--dpi", type=int, default=160)
     rainbow_plot.add_argument("--write-pdf", action="store_true")
@@ -195,7 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     if arguments.command in (
         "inspect-rainbow", "train-rainbow", "evaluate-rainbow", "plot-rainbow", "precision-rainbow",
-        "sweep-rainbow", "diagnose-rainbow",
+        "sweep-rainbow", "diagnose-rainbow", "replot-sweep-rainbow",
+        "sweep-capacity-rainbow", "sweep-samples-rainbow", "audit-sampling-rainbow",
     ):
         return _rainbow_main(arguments)
     if arguments.command == "plot-history":
@@ -345,6 +390,27 @@ def _read_sweep_config(path: Path):
     return sweep_config, enabled, diagnostic_config
 
 
+def _read_capacity_config(path: Path):
+    from .angular_diagnostics import AngularDiagnosticConfig
+    from .capacity_sweep import CapacitySweepConfig
+
+    with path.open(encoding="utf-8") as handle:
+        config = json.load(handle)
+    if (
+        not isinstance(config, dict)
+        or config.get("schema_version") != 1
+        or set(config) != {"schema_version", "sweep", "diagnostics"}
+        or not isinstance(config["diagnostics"], dict)
+    ):
+        raise ValueError("capacity config requires schema_version=1, sweep and diagnostics")
+    sweep_config = CapacitySweepConfig.from_dict(config["sweep"])
+    diagnostics = config["diagnostics"].copy()
+    enabled = diagnostics.pop("enabled", True)
+    if type(enabled) is not bool:
+        raise ValueError("diagnostics.enabled must be boolean")
+    return sweep_config, enabled, AngularDiagnosticConfig.from_dict(diagnostics)
+
+
 def _rainbow_main(arguments: argparse.Namespace) -> int:
     from .rainbow import RainbowReference
     from .single_condition import (
@@ -367,6 +433,144 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
     with RainbowReference(arguments.record) as reference:
         if arguments.command == "inspect-rainbow":
             _print_json(reference.summary())
+            return 0
+        if arguments.command == "audit-sampling-rainbow":
+            import torch
+
+            from .sampling_audit import audit_training_sampling
+
+            if arguments.cpu_threads < 1:
+                raise ValueError("cpu-threads must be positive")
+            torch.set_num_threads(arguments.cpu_threads)
+            _print_json(audit_training_sampling(
+                reference, arguments.run, arguments.output,
+                device=arguments.device, u_bins=arguments.u_bins, phi_bins=arguments.phi_bins,
+                plot=not arguments.no_plots,
+            ))
+            return 0
+        if arguments.command == "sweep-samples-rainbow":
+            from . import angular_diagnostics
+            from .capacity_sweep import CAPACITY_SCHEMA, run_capacity_sample_sweep
+
+            with (arguments.capacity / "manifest.json").open(encoding="utf-8") as handle:
+                parent = json.load(handle)
+            if not isinstance(parent, dict) or parent.get("schema") != CAPACITY_SCHEMA:
+                raise ValueError("--capacity must identify a completed bin/step sweep")
+            recorded_diagnostics = parent.get("diagnostics")
+            diagnostic_config = diagnostic_identity = None
+            if recorded_diagnostics is not None:
+                if (
+                    not isinstance(recorded_diagnostics, dict)
+                    or recorded_diagnostics.get("id") != "phaseflow.angular_diagnostics.v1"
+                ):
+                    raise ValueError("unsupported saved angular diagnostic configuration")
+                diagnostic_config = angular_diagnostics.AngularDiagnosticConfig.from_dict(
+                    recorded_diagnostics["configuration"],
+                )
+                diagnostic_identity = {
+                    "id": "phaseflow.angular_diagnostics.v1",
+                    "configuration": diagnostic_config.to_dict(),
+                    "implementation_sha256": hashlib.sha256(
+                        Path(angular_diagnostics.__file__).read_bytes()
+                    ).hexdigest(),
+                }
+
+            def sample_diagnostics(model, source, trial_directory):
+                _, trial_config, _, _ = _read_rainbow_config(trial_directory / "config.json")
+                return angular_diagnostics.evaluate_angular_diagnostics(
+                    model, source, trial_directory / "diagnostics",
+                    train_samples=trial_config.train_samples,
+                    batch_size=trial_config.batch_size,
+                    config=diagnostic_config,
+                    checkpoint_path=trial_directory / "best.pt",
+                )
+
+            def sample_progress(entry):
+                print(json.dumps(entry, sort_keys=True, allow_nan=False), flush=True)
+
+            report = run_capacity_sample_sweep(
+                reference, arguments.capacity, arguments.output,
+                train_samples=tuple(arguments.train_samples), device=arguments.device,
+                callback=None if arguments.quiet else sample_progress,
+                max_trials_this_run=arguments.max_trials_this_run,
+                diagnostic_callback=sample_diagnostics if diagnostic_config is not None else None,
+                diagnostic_config=diagnostic_identity,
+            )
+            _print_json({
+                "complete": report["status"] == "complete", "status": report["status"],
+                "output_directory": str(arguments.output.resolve()),
+                "summary": str((arguments.output / "summary.json").resolve()),
+                "table": str((arguments.output / "summary.csv").resolve()),
+                "report": str((arguments.output / "summary.md").resolve()),
+            })
+            return 0
+        if arguments.command == "sweep-capacity-rainbow":
+            from . import angular_diagnostics
+            from .capacity_sweep import run_capacity_sweep
+
+            model_config, training_config, enabled, plot_config = _read_rainbow_config(
+                arguments.config, arguments.device,
+            )
+            sweep_config, diagnose, diagnostic_config = _read_capacity_config(
+                arguments.sweep_config,
+            )
+
+            def capacity_diagnostics(model, source, trial_directory):
+                _, trial_config, _, _ = _read_rainbow_config(trial_directory / "config.json")
+                return angular_diagnostics.evaluate_angular_diagnostics(
+                    model, source, trial_directory / "diagnostics",
+                    train_samples=trial_config.train_samples,
+                    batch_size=trial_config.batch_size,
+                    config=diagnostic_config,
+                    checkpoint_path=trial_directory / "best.pt",
+                )
+
+            def capacity_progress(entry):
+                print(json.dumps(entry, sort_keys=True, allow_nan=False), flush=True)
+
+            report = run_capacity_sweep(
+                reference, model_config, training_config, arguments.output,
+                sweep_config=sweep_config, make_plots=enabled and not arguments.no_plots,
+                plot_config=plot_config,
+                callback=None if arguments.quiet else capacity_progress,
+                max_milestones_this_run=arguments.max_milestones_this_run,
+                diagnostic_callback=capacity_diagnostics if diagnose else None,
+                diagnostic_config=(
+                    {
+                        "id": "phaseflow.angular_diagnostics.v1",
+                        "configuration": diagnostic_config.to_dict(),
+                        "implementation_sha256": hashlib.sha256(
+                            Path(angular_diagnostics.__file__).read_bytes()
+                        ).hexdigest(),
+                    } if diagnose else None
+                ),
+            )
+            _print_json({
+                "complete": report["status"] == "complete", "status": report["status"],
+                "output_directory": str(arguments.output.resolve()),
+                "summary": str((arguments.output / "summary.json").resolve()),
+                "table": str((arguments.output / "summary.csv").resolve()),
+                "report": str((arguments.output / "summary.md").resolve()),
+                "plot": str((arguments.output / "summary.png").resolve()),
+            })
+            return 0
+        if arguments.command == "replot-sweep-rainbow":
+            import torch
+
+            from .replot import replot_sweep_training_points
+
+            if arguments.cpu_threads < 1:
+                raise ValueError("cpu-threads must be positive")
+            torch.set_num_threads(arguments.cpu_threads)
+
+            def replot_progress(entry):
+                print(json.dumps(entry, sort_keys=True, allow_nan=False), flush=True)
+
+            _print_json(replot_sweep_training_points(
+                reference, arguments.sweep, arguments.output,
+                device=arguments.device,
+                callback=None if arguments.quiet else replot_progress,
+            ))
             return 0
         if arguments.command in ("train-rainbow", "sweep-rainbow"):
             model_config, training_config, enabled, plot_config = _read_rainbow_config(
@@ -495,18 +699,29 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
         if arguments.command == "plot-rainbow":
             from .plotting import RainbowPlotConfig, plot_rainbow_comparison
 
+            if arguments.scatter == "training" and (
+                arguments.samples is not None or arguments.seed is not None
+            ):
+                raise ValueError(
+                    "training scatter uses the saved training count/data seed; "
+                    "--samples and --seed require --scatter independent"
+                )
+            if arguments.scatter == "independent" and arguments.training_run is not None:
+                raise ValueError("--training-run requires --scatter training")
             report = plot_rainbow_comparison(
                 model,
                 reference,
                 arguments.output,
                 config=RainbowPlotConfig(
-                    cdf_samples=arguments.samples,
-                    seed=arguments.seed,
+                    cdf_samples=32768 if arguments.samples is None else arguments.samples,
+                    seed=2027 if arguments.seed is None else arguments.seed,
                     eval_batch_size=arguments.batch_size,
                     dpi=arguments.dpi,
                     write_pdf=arguments.write_pdf,
                 ),
                 checkpoint_path=arguments.checkpoint,
+                scatter_mode=arguments.scatter,
+                training_run_directory=arguments.training_run,
                 selected_step=(
                     checkpoint["global_step"] if checkpoint["kind"] == "inference" else None
                 ),

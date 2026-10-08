@@ -204,6 +204,39 @@ call monitor.bat runs\rainbow_sweep_gpu
 [探索手順・集計の読み方・135 度付近の診断と論文の損失](docs/SWEEP_AND_RAINBOW_LOSS.md)
 に詳しい仕様を記載しています．
 
+完了済みの A/B 探索について，**実際の固定学習点群を全点表示する図**を作る場合は，
+`sweep.bat` の `RECORD` と `OUTPUT` をその探索に合わせて実行します．
+
+```bat
+call sweep.bat replot
+```
+
+保存済みの重みと設定を読み，`OUTPUT\training_point_plots\` に新しい図を作ります．
+元の評価値，選択結果，旧図，学習記録は保持します．A と B が同じ試行を再利用した行は
+同じ図を参照します．この可視化修正により探索コードの識別値が変わるため，旧探索を
+通常の `sweep.bat` で再開する代わりに，図の更新には `replot` を使います．
+新しい探索を始める場合は新しい `OUTPUT` を指定します．
+
+### 点群を検査し，bin 数と最適化ステップ数を比較する
+
+追加の `sweep.bat` モードで，実際の固定学習点群と CDF の確率質量を比較し，
+続いて RQS bin 数と最適化ステップ数を探索できます．
+
+```bat
+call sweep.bat audit
+call sweep.bat capacity
+call sweep.bat samples
+```
+
+`audit` は `AUDIT_RUN` の元の学習結果を読みます．`capacity` は新しい出力先で
+bin 数 16・32・64・128 を，同じ 262,144 点と 20,000 更新の計画で比較します．
+2,000・6,000・10,000・20,000 更新時点の重みと図を保存して続けるため，短い実験を
+最初からやり直しません．`samples` は完了した容量探索で選んだ bin 数を使い，
+65,536・262,144・1,048,576 点を再比較します．損失は既存の NLL のままです．
+
+[設定・結果の読み方・LUT の規模](docs/CAPACITY_SWEEP.md) を参照してください．
+引数なしの `sweep.bat` は従来の学習率 A → 点数 B の探索を続けて使用できます．
+
 ### 完了後の 3 種類のマップ
 
 予定した更新が完了すると，validation で選んだ最良重みから `runs/rainbow_single_gpu/plots/` に
@@ -212,10 +245,17 @@ call monitor.bat runs\rainbow_sweep_gpu
 | ファイル | 内容 |
 |---|---|
 | `reference_pdf.png` | CDF のセル質量を立体角で割った教師 PDF，対数色表示 |
-| `cdf_samples.png` | 同じ CDF から独立に生成した点群，既定 32,768 点 |
+| `cdf_samples.png` | 実際の固定学習点群を，学習時と同じ N 点すべて表示 |
 | `nf_pdf.png` | NF の PDF 評価，教師図と共通の対数色尺度 |
 | `comparison.png` | 3 枚を並べた比較図 |
 | `plots.json` | 描画設定，座標・密度の規約と入力情報 |
+| `training_scatter.npz` | 描画した全学習点の NF 方向，ソルバ座標の角度，点群の検証情報 |
+
+点群は保存された `training.train_samples`，`training.data_seed` と学習用 stream から再生成し，
+学習時の SHA-256 と一致することを検証します．学習時と同じ geometry dtype に変換した方向を
+全点描きます．N が `262144` ならその全点を表示し，点数の上限や間引きはありません．
+これは固定 pool の各点を一度ずつ表示する図で，minibatch での反復回数を含む図ではありません．
+`best.pt` と同じ実験の `checkpoint.pt`，`config.json`，`sample_split.json` が必要です．
 
 横軸はソルバの方位角 `phi_s` の −180〜180 度，縦軸は散乱角 `theta` の 0〜180 度で，
 前方の 0 度を上に表示します．全て同じ軸・範囲と横 : 縦 = 2 : 1 のアスペクト比です．
@@ -232,11 +272,13 @@ call environment.bat
 "%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-rainbow ^
   --record "..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800" ^
   --checkpoint "runs\rainbow_single_gpu\best.pt" ^
-  --output "runs\rainbow_single_gpu\plots" --samples 32768 --seed 2027
+  --output "runs\rainbow_single_gpu\plots_training" --scatter training
 ```
 
 `--write-pdf` で PDF 形式も保存します．学習時の自動出力を省略する場合は `--no-plots` を
-指定します．描画の設定は学習設定の `visualization` にまとめています．
+指定します．描画の設定は学習設定の `visualization` にまとめています．既存設定の
+`visualization.cdf_samples` と `seed` は，学習点群の点数・seed を変更しません．
+独立なサンプラ診断を明示的に行う `--scatter independent` だけで使用します．
 [図の仕様と設定](docs/RAINBOW_SINGLE_CONDITION.md#学習完了後の可視化) を参照してください．
 
 ### 中断して再開する

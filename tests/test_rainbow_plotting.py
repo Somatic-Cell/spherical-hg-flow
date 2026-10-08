@@ -12,6 +12,7 @@ from test_rainbow import write_rainbow_fixture
 
 from phaseflow.plotting import (
     RainbowPlotConfig,
+    _save_figure,
     cdf_scatter_coordinates,
     evaluate_rainbow_grid,
     plot_rainbow_comparison,
@@ -112,6 +113,7 @@ def test_aligned_figures_manifest_and_log_color_range(tmp_path):
             tmp_path / "plots",
             config=RainbowPlotConfig(cdf_samples=1000, dpi=60, write_pdf=True),
             selected_step=17,
+            scatter_mode="independent",
         )
         assert model.training
         positive = grid.reference_pdf[grid.reference_pdf > 0]
@@ -167,12 +169,38 @@ def test_isotropic_constant_plot_has_finite_display_range_without_changing_densi
             record,
             tmp_path / "plots",
             config=RainbowPlotConfig(cdf_samples=10, dpi=30),
+            scatter_mode="independent",
         )
         assert not model.training
         assert 0 < result["color_scale"]["vmin"] < 1 / (4 * np.pi)
         assert result["color_scale"]["vmax"] > 1 / (4 * np.pi)
         assert result["grid"]["reference_mass_exact"] == pytest.approx(1, abs=1e-14)
         assert result["grid"]["nf_mass_midpoint_estimate"] == pytest.approx(1, abs=1e-14)
+
+
+def test_grid_keeps_saved_fp32_precision_inside_ambient_autocast(tmp_path):
+    write_rainbow_fixture(tmp_path / "record")
+    with RainbowReference(tmp_path / "record") as record, torch.random.fork_rng(devices=[]):
+        torch.manual_seed(724)
+        model = SingleConditionSphereFlow(
+            record.g,
+            record.condition[1],
+            SphereFlowConfig(
+                num_coupling_layers=2, num_bins=4, hidden_features=(8,),
+                geometry_dtype="model", spline_dtype="model",
+            ),
+            dtype=torch.float32, device="cpu",
+        )
+        # Nonidentity weights make reduced-precision conditioner evaluation visible.
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.normal_(std=0.1)
+        expected = evaluate_rainbow_grid(model, record)
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            actual = evaluate_rainbow_grid(model, record)
+            assert torch.is_autocast_enabled("cpu")
+        np.testing.assert_array_equal(actual.nf_pdf, expected.nf_pdf)
+        assert model.dtype == torch.float32 and model.training
 
 
 @pytest.mark.parametrize("bad_value", [math.nan, math.inf, -math.inf, -800.0, 800.0])
@@ -199,6 +227,38 @@ def test_invalid_nf_grid_fails_without_floor_or_mode_change(tmp_path, bad_value)
 def test_plot_config_rejects_invalid_parameters(kwargs):
     with pytest.raises(ValueError):
         RainbowPlotConfig(**kwargs)
+
+
+def test_figure_output_replaces_png_and_pdf_hardlinks_without_changing_originals(tmp_path):
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    originals = tmp_path / "originals"
+    outputs = tmp_path / "outputs"
+    originals.mkdir()
+    outputs.mkdir()
+    original_bytes = {"png": b"original PNG bytes", "pdf": b"original PDF bytes"}
+    for suffix, content in original_bytes.items():
+        original = originals / f"reference_pdf.{suffix}"
+        original.write_bytes(content)
+        (outputs / original.name).hardlink_to(original)
+    fig = Figure(figsize=(2, 1))
+    FigureCanvasAgg(fig)
+    fig.add_subplot().plot([0, 1], [1, 0])
+    assert _save_figure(fig, outputs / "reference_pdf.png", dpi=30, write_pdf=True) == [
+        "reference_pdf.png", "reference_pdf.pdf",
+    ]
+    for suffix, content in original_bytes.items():
+        original = originals / f"reference_pdf.{suffix}"
+        output = outputs / original.name
+        assert original.read_bytes() == content
+        assert not output.samefile(original)
+        assert output.stat().st_size > 100
+    assert (outputs / "reference_pdf.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert (outputs / "reference_pdf.pdf").read_bytes().startswith(b"%PDF-")
+    assert sorted(path.name for path in outputs.iterdir()) == [
+        "reference_pdf.pdf", "reference_pdf.png",
+    ]
 
 
 @pytest.mark.cuda

@@ -43,7 +43,7 @@ def write_configs(tmp_path):
     return training, sweep
 
 
-def test_sweep_cli_pause_resume_and_real_diagnostic_summary(tmp_path, capsys):
+def test_sweep_cli_pause_resume_and_real_diagnostic_summary(tmp_path, capsys, monkeypatch):
     record = smooth_teacher(tmp_path / "record")
     config, sweep_config = write_configs(tmp_path)
     output = tmp_path / "runs"
@@ -90,6 +90,29 @@ def test_sweep_cli_pause_resume_and_real_diagnostic_summary(tmp_path, capsys):
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["diagnostics"]["configuration"]["theta_band_degrees"] == [120.0, 150.0]
     assert len(manifest["diagnostics"]["implementation_sha256"]) == 64
+
+    # The batch replot route needs only the saved completed sweep and record.
+    # Remove both original launch configs and forbid additional optimization.
+    config.unlink()
+    sweep_config.unlink()
+
+    def no_training(*args, **kwargs):
+        raise AssertionError("Replot CLI must not invoke training")
+
+    monkeypatch.setattr("phaseflow.sweep.train_single_condition", no_training)
+    before = (output / "summary.json").read_bytes()
+    assert main([
+        "replot-sweep-rainbow", "--record", str(record), "--sweep", str(output),
+        "--device", "cpu", "--quiet",
+    ]) == 0
+    replot = json.loads(capsys.readouterr().out)
+    assert replot["status"] == "complete" and replot["optimizer_updates"] == 0
+    assert replot["logical_trial_count"] == 4 and replot["physical_trial_count"] == 3
+    assert (output / "summary.json").read_bytes() == before
+    for row in replot["physical_trials"]:
+        plotted = output / "training_point_plots" / row["plot_directory"]
+        with np.load(plotted / "training_scatter.npz", allow_pickle=False) as arrays:
+            assert arrays["directions_nf"].shape == (row["sample_count"], 3)
 
 
 def test_standalone_diagnose_uses_selected_checkpoint_and_rejects_other_teacher(tmp_path, capsys):

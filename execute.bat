@@ -12,8 +12,6 @@ set "OUTPUT=runs\rainbow_single_gpu"
 set "DEVICE=cuda:0"
 set "EVAL_SAMPLES=65536"
 set "EVAL_SEED=2026"
-set "PLOT_SAMPLES=32768"
-set "PLOT_SEED=2027"
 
 pushd "%~dp0"
 if not "%ERRORLEVEL%"=="0" exit /b 1
@@ -111,13 +109,12 @@ echo [4/5] Evaluating the validation-selected checkpoint...
     --output "%OUTPUT%\evaluation.json"
 if not "%ERRORLEVEL%"=="0" goto :failed
 
-echo [5/5] Plotting the CDF PDF, CDF samples, and NF PDF...
+echo [5/5] Plotting the CDF PDF, every fixed training point, and NF PDF...
 "%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-rainbow ^
     --record "%RECORD%" ^
     --checkpoint "%OUTPUT%\best.pt" ^
     --output "%OUTPUT%\plots" ^
-    --samples %PLOT_SAMPLES% ^
-    --seed %PLOT_SEED% ^
+    --scatter training ^
     --device "%DEVICE%"
 if not "%ERRORLEVEL%"=="0" goto :failed
 
