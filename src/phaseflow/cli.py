@@ -135,6 +135,10 @@ def _parser() -> argparse.ArgumentParser:
     rainbow_eval.add_argument("--checkpoint", required=True, type=Path)
     rainbow_eval.add_argument("--samples", type=int, default=65536)
     rainbow_eval.add_argument("--proposal-samples", type=int)
+    rainbow_eval.add_argument(
+        "--uniform-samples", type=int,
+        help="independent solid-angle log-error queries; version-5 default from objective",
+    )
     rainbow_eval.add_argument("--seed", type=int, default=2026)
     rainbow_eval.add_argument("--batch-size", type=int, default=4096)
     rainbow_eval.add_argument("--device", default="cuda")
@@ -332,22 +336,32 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-def _read_rainbow_config(path: Path, device: str | None = None):
+def _read_rainbow_config(
+    path: Path, device: str | None = None, *, include_objective: bool = False,
+):
+    from .log_objective import LogObjectiveConfig
     from .plotting import RainbowPlotConfig
     from .single_condition import FAMILY, SingleTrainingConfig
     from .sphere_model import SphereFlowConfig
 
-    with path.open(encoding="utf-8") as handle:
+    with path.open(encoding="utf-8-sig") as handle:
         config = json.load(handle)
+    allowed = {"schema_version", "family", "model", "training", "visualization"}
+    objective = None
+    version = config.get("schema_version") if isinstance(config, dict) else None
+    if include_objective and version == 3:
+        allowed.add("objective")
+        objective = LogObjectiveConfig.from_dict(config.get("objective"))
     if (
         not isinstance(config, dict)
         or not {"schema_version", "family", "model", "training"} <= set(config)
-        or set(config) - {"schema_version", "family", "model", "training", "visualization"}
-        or config["schema_version"] != 2
+        or set(config) - allowed
+        or (version != 2 and not (include_objective and version == 3))
         or config["family"] != FAMILY
     ):
         raise ValueError(
-            "Rainbow config requires schema_version=2, family="
+            "Rainbow config requires schema_version=2 (NLL), or an explicitly supported "
+            "schema_version=3 objective workflow, family="
             + FAMILY
             + ", and explicit model/training objects"
         )
@@ -365,7 +379,8 @@ def _read_rainbow_config(path: Path, device: str | None = None):
     enabled = visualization.pop("enabled", True)
     if type(enabled) is not bool:
         raise ValueError("visualization.enabled must be boolean")
-    return model_config, training_config, enabled, RainbowPlotConfig.from_dict(visualization)
+    values = (model_config, training_config, enabled, RainbowPlotConfig.from_dict(visualization))
+    return (*values, objective) if include_objective else values
 
 
 def _read_sweep_config(path: Path):
@@ -421,11 +436,14 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
 
     def progress(entry: dict[str, Any]) -> None:
         value = {key: entry[key] for key in (
-            "global_step", "loss", "gradient_norm_before_clip", "examples_seen", "effective_passes"
+            "global_step", "loss", "nll", "log_mse", "beta", "nll_weight",
+            "gradient_norm_before_clip", "examples_seen", "effective_passes"
         ) if key in entry}
         if "validation" in entry:
             value["validation_nll"] = entry["validation"]["nll"]
             value["validation_forward_kl"] = entry["validation"]["forward_kl_estimate"]
+            if "log_rmse" in entry["validation"]:
+                value["validation_log_rmse"] = entry["validation"]["log_rmse"]
         if "train_monitor" in entry:
             value["train_fixed_subset_nll"] = entry["train_monitor"]["nll"]
         print(json.dumps(value, sort_keys=True, allow_nan=False), flush=True)
@@ -573,9 +591,11 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
             ))
             return 0
         if arguments.command in ("train-rainbow", "sweep-rainbow"):
-            model_config, training_config, enabled, plot_config = _read_rainbow_config(
+            parsed = _read_rainbow_config(
                 arguments.config, arguments.device,
+                include_objective=arguments.command == "train-rainbow",
             )
+            model_config, training_config, enabled, plot_config = parsed[:4]
             make_plots = enabled and not arguments.no_plots
             if arguments.command == "sweep-rainbow":
                 from . import angular_diagnostics
@@ -636,6 +656,7 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
                 callback=None if arguments.quiet else progress,
                 make_plots=make_plots,
                 plot_config=plot_config,
+                objective_config=parsed[4],
             )
             _print_json(
                 {
@@ -656,8 +677,8 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
 
             from .angular_diagnostics import evaluate_angular_diagnostics
 
-            model_config, training_config, _, _ = _read_rainbow_config(
-                arguments.run / "config.json",
+            model_config, training_config, _, _, objective = _read_rainbow_config(
+                arguments.run / "config.json", include_objective=True,
             )
             _, _, diagnostic_config = _read_sweep_config(arguments.sweep_config)
             torch.set_num_threads(training_config.cpu_threads)
@@ -677,6 +698,7 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
                 batch_size=training_config.batch_size,
                 config=diagnostic_config,
                 checkpoint_path=checkpoint_path,
+                objective_config=objective,
             ))
             return 0
         import torch
@@ -732,6 +754,9 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
             )
             _print_json(report)
             return 0
+        uniform_samples = arguments.uniform_samples
+        if uniform_samples is None:
+            uniform_samples = checkpoint.get("objective_config", {}).get("test_uniform_samples", 0)
         report = evaluate_single_condition(
             model,
             reference,
@@ -739,6 +764,7 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
             seed=arguments.seed,
             batch_size=arguments.batch_size,
             proposal_samples=arguments.proposal_samples,
+            uniform_samples=uniform_samples,
         )
         report["checkpoint"] = str(arguments.checkpoint.resolve())
         report["checkpoint_step"] = checkpoint["global_step"]

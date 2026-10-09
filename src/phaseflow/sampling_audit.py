@@ -171,7 +171,14 @@ audit to retry without treating incomplete output as a completed measurement.
     run, output = Path(run_directory).resolve(), Path(output_directory).resolve()
     if output == run or run.is_relative_to(output) or output.is_relative_to(run):
         raise ValueError("Audit output must be a separate directory with a disjoint tree from the run")
-    model, _ = load_single_checkpoint(run / "best.pt", device=device)
+    model, checkpoint = load_single_checkpoint(run / "best.pt", device=device)
+    if checkpoint["checkpoint_version"] == 5:
+        raise ValueError(
+            "The legacy sampling audit requires a version-4 CDF-only pool. "
+            "Version-5 pools have geometry-cast teacher labels and explicit component "
+            "identities; use their component-labelled training plots and objective-aware "
+            "angular diagnostics. No CDF-only binomial test is applied to a mixed pool."
+        )
     pool = resolve_training_scatter(model, reference, run / "best.pt", run_directory=run)
     count, data_seed = pool.provenance["sample_count"], pool.provenance["data_seed"]
     points = _points(reference, count, data_seed, "train")

@@ -20,6 +20,14 @@ import torch
 import zuko
 
 from . import __version__
+from .log_objective import (
+    LogObjectiveConfig,
+    evaluate_log_shape,
+    loss_terms,
+    make_training_pool,
+    make_uniform_points,
+    verify_positive_teacher,
+)
 from .monitoring import TrainingMonitor, check_tensorboard, plot_training_history
 from .rainbow import RainbowReference
 from .sphere_model import SingleConditionSphereFlow, SphereFlowConfig
@@ -38,7 +46,8 @@ if TYPE_CHECKING:
 
 FAMILY = "rainbow_single_condition"
 CHECKPOINT_VERSION = 4
-READABLE_CHECKPOINT_VERSIONS = (2, 3, 4)
+LOG_CHECKPOINT_VERSION = 5
+READABLE_CHECKPOINT_VERSIONS = (2, 3, 4, 5)
 _STREAMS = {"train": 0, "validation": 1, "minibatches": 2, "test": 3, "proposal": 4}
 
 
@@ -210,6 +219,7 @@ def _code_hash() -> str:
         "geometry.py",
         "training.py",
         "monitoring.py",
+        "log_objective.py",
     ):
         digest.update(name.encode("ascii"))
         digest.update((root / name).read_bytes())
@@ -359,6 +369,7 @@ def evaluate_single_condition(
     seed: int = 2026,
     batch_size: int = 4096,
     proposal_samples: int | None = None,
+    uniform_samples: int = 0,
 ) -> dict[str, Any]:
     """Independent same-condition likelihood/KL and proposal-weight diagnostics.
 
@@ -375,6 +386,10 @@ def evaluate_single_condition(
         proposal_samples = samples
     if type(proposal_samples) is not int or (proposal_samples != 0 and proposal_samples < 2):
         raise ValueError("proposal_samples must be zero or at least two")
+    if type(uniform_samples) is not int or (uniform_samples != 0 and uniform_samples < 2):
+        raise ValueError("uniform_samples must be zero or at least two")
+    if uniform_samples:
+        verify_positive_teacher(reference)
     _check_model_reference(model, reference)
     previous_mode = model.training
     previous_validation = model.validate_args
@@ -404,6 +419,12 @@ def evaluate_single_condition(
             },
             proposal=_proposal_metrics(model, reference, proposal_samples, seed, batch_size),
         )
+        if uniform_samples:
+            uniform_points = make_uniform_points(
+                reference, uniform_samples, seed, "test", model.geometry_dtype
+            )
+            result.update(evaluate_log_shape(model, reference, uniform_points, batch_size))
+            result["uniform_test_points_sha256"] = _array_hash(*uniform_points)
         return result
     finally:
         model.train(previous_mode)
@@ -417,7 +438,7 @@ def read_single_checkpoint(path: str | Path) -> dict[str, Any]:
         or payload.get("checkpoint_version") not in READABLE_CHECKPOINT_VERSIONS
         or (payload.get("family") != FAMILY)
     ):
-        raise ValueError("not a supported version-2/3/4 Rainbow single-condition checkpoint")
+        raise ValueError("not a supported version-2/3/4/5 Rainbow single-condition checkpoint")
     required = {
         "kind",
         "model_config",
@@ -430,6 +451,10 @@ def read_single_checkpoint(path: str | Path) -> dict[str, Any]:
     }
     if not required <= payload.keys() or payload["kind"] not in ("training", "inference"):
         raise ValueError("malformed Rainbow single-condition checkpoint")
+    if payload["checkpoint_version"] == LOG_CHECKPOINT_VERSION:
+        LogObjectiveConfig.from_dict(payload.get("objective_config"))
+        if payload.get("selection_metric") not in ("nll", "log_rmse"):
+            raise ValueError("version-5 checkpoint requires an explicit selection metric")
     return payload
 
 
@@ -465,6 +490,39 @@ class SingleTrainResult:
     complete: bool
 
 
+def _validate_selections(
+    selections: dict[str, Any], history: list[dict[str, Any]], step: int,
+    objective: LogObjectiveConfig, best_step: int, best_validation: dict[str, Any],
+    best_state: dict[str, Any],
+) -> None:
+    """Reject inconsistent dual-selection metadata before a resumed run writes."""
+    from .training_scatter import _state_equal
+
+    events = [entry for entry in history if "validation" in entry]
+    if not events or set(selections) != {"nll", "log_rmse"}:
+        raise ValueError("invalid version-5 selection history")
+    for metric in ("nll", "log_rmse"):
+        if any(
+            type(entry.get("global_step")) is not int
+            or not 0 <= entry["global_step"] <= step
+            or not isinstance(entry["validation"].get(metric), (float, int))
+            or not math.isfinite(entry["validation"][metric])
+            for entry in events
+        ):
+            raise ValueError("invalid validation event in version-5 selection history")
+        chosen = min(events, key=lambda entry: entry["validation"][metric])
+        saved = selections[metric]
+        if not isinstance(saved, dict) or set(saved) != {"step", "validation", "model_state"}:
+            raise ValueError("malformed version-5 selection state")
+        if (saved["step"] != chosen["global_step"]
+                or saved["validation"] != chosen["validation"]):
+            raise ValueError("saved selection does not match first minimum validation history")
+    primary = selections[objective.selection_metric]
+    if (best_step != primary["step"] or best_validation != primary["validation"]
+            or not _state_equal(best_state, primary["model_state"])):
+        raise ValueError("primary best checkpoint differs from its explicit selection state")
+
+
 def train_single_condition(
     reference: RainbowReference,
     model_config: SphereFlowConfig,
@@ -476,10 +534,14 @@ def train_single_condition(
     callback: Callable[[dict[str, Any]], None] | None = None,
     make_plots: bool = True,
     plot_config: RainbowPlotConfig | None = None,
+    objective_config: LogObjectiveConfig | None = None,
 ) -> SingleTrainResult:
-    """Train a fixed point pool; choose the best checkpoint only by validation NLL.
+    """Train a fixed pool with an explicitly versioned density objective.
 
     ``checkpoint.pt`` resumes optimization; ``best.pt`` is inference-only.
+    Without ``objective_config``, the legacy NLL/version-4 contract is unchanged.
+    The optional version-5 workflow supervises log density under solid angle,
+    retains independent target NLL/KL validation, and saves both selections.
     The final independent test set is evaluated only when the planned steps are
     complete. A controlled interruption does not add checkpoint-selection events.
     """
@@ -489,12 +551,18 @@ def train_single_condition(
         raise ValueError("max_steps_this_run must be a nonnegative integer")
     if type(make_plots) is not bool:
         raise ValueError("make_plots must be boolean")
+    if objective_config is not None and not isinstance(objective_config, LogObjectiveConfig):
+        raise ValueError("objective_config must be a LogObjectiveConfig or None")
+    objective = objective_config
+    checkpoint_version = CHECKPOINT_VERSION if objective is None else LOG_CHECKPOINT_VERSION
     from .plotting import RainbowPlotConfig
 
     plotting = plot_config if plot_config is not None else RainbowPlotConfig()
     if not isinstance(plotting, RainbowPlotConfig):
         raise ValueError("plot_config must be a RainbowPlotConfig")
     cfg = training_config
+    if objective is not None:
+        objective.validate_training_count(cfg.train_samples)
     if cfg.tensorboard:
         check_tensorboard()  # Fail before expensive data preparation or optimization.
     output = Path(output_directory)
@@ -517,10 +585,10 @@ def train_single_condition(
     if previous is not None:
         if previous["kind"] != "training":
             raise ValueError("best.pt is inference-only; resume from checkpoint.pt")
-        if previous["checkpoint_version"] != CHECKPOINT_VERSION:
+        if previous["checkpoint_version"] != checkpoint_version:
             raise ValueError(
-                "exact resume requires a version-4 checkpoint from this implementation; "
-                "version-2/3 checkpoints remain readable for evaluation/plotting"
+                f"exact resume requires a version-{checkpoint_version} checkpoint from this "
+                "objective and implementation; older checkpoints remain readable for evaluation"
             )
         required = {
             "training_config",
@@ -537,6 +605,12 @@ def train_single_condition(
         }
         if not required <= previous.keys():
             raise ValueError("training checkpoint is missing resume state")
+        if objective is not None and (
+            previous.get("objective_config") != objective.to_dict()
+            or previous.get("selection_metric") != objective.selection_metric
+            or not isinstance(previous.get("selections"), dict)
+        ):
+            raise ValueError("exact resume requires the original objective and selection state")
         if previous["model_config"] != model_config.to_dict() or (
             previous["training_config"] != cfg.to_dict()
         ):
@@ -573,7 +647,20 @@ def train_single_condition(
         validate_args=False,
     )
     data_seed = cfg.seed if cfg.data_seed is None else cfg.data_seed
-    training_points = _points(reference, cfg.train_samples, data_seed, "train")
+    pool = None
+    uniform_validation = None
+    if objective is None:
+        training_points = _points(reference, cfg.train_samples, data_seed, "train")
+    else:
+        verify_positive_teacher(reference)
+        pool = make_training_pool(
+            reference, cfg.train_samples, data_seed, objective, model.geometry_dtype
+        )
+        training_points = (pool.directions, pool.log_p)
+        uniform_validation = make_uniform_points(
+            reference, objective.validation_uniform_samples, data_seed,
+            "validation", model.geometry_dtype,
+        )
     validation_points = _points(reference, cfg.validation_samples, data_seed, "validation")
     split = {
         "scope": "one_fixed_condition; independent point streams; no condition holdout",
@@ -593,6 +680,13 @@ def train_single_condition(
         "training_points_sha256": _array_hash(*training_points),
         "validation_points_sha256": _array_hash(*validation_points),
     }
+    if pool is not None:
+        split["training_pool"] = pool.provenance
+        split["training_points_sha256"] = _array_hash(
+            pool.directions, pool.log_p, pool.components
+        )
+        split["validation_uniform_samples"] = objective.validation_uniform_samples
+        split["uniform_validation_points_sha256"] = _array_hash(*uniform_validation)
     if previous is not None and previous["sample_split"] != split:
         raise ValueError("regenerated training/validation points differ from checkpoint")
     # Retain one fixed pool on the device; the optimization loop has no NumPy
@@ -601,12 +695,67 @@ def train_single_condition(
         training_points[0], dtype=model.geometry_dtype, device=device
     )
     monitor_count = min(cfg.train_samples, cfg.train_monitor_samples)
+    if objective is not None and objective.sampling == "target_uniform":
+        # The pool interleaves its two source strata. Keep the prefix balanced.
+        monitor_count = max(2, monitor_count - monitor_count % 2)
     training_monitor = (
         training_directions[:monitor_count],
         torch.as_tensor(training_points[1][:monitor_count], dtype=torch.float64, device=device),
     )
     validation_device = _device_points(validation_points, device, model.geometry_dtype)
+    training_labels = None
+    uniform_validation_device = None
+    if objective is not None:
+        # No FP64 loss arithmetic or per-minibatch CPU copies: cast fixed teacher
+        # labels once, while the validation reductions retain reference precision.
+        training_labels = torch.as_tensor(training_points[1], dtype=model.dtype, device=device)
+        uniform_validation_device = _device_points(
+            uniform_validation, device, model.geometry_dtype
+        )
     del training_points, validation_points
+    del pool, uniform_validation
+
+    def validation_metrics() -> dict[str, Any]:
+        values = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
+        if objective is not None:
+            values.update(evaluate_log_shape(
+                model, reference, uniform_validation_device, cfg.eval_batch_size
+            ))
+        return values
+
+    @torch.no_grad()
+    def monitor_metrics() -> dict[str, Any]:
+        if objective is None:
+            return _likelihood_metrics(model, reference, training_monitor, cfg.eval_batch_size)
+        # This monitor uses the saved query distribution. For uniform-only
+        # queries, log MSE has unit weights and the NLL diagnostic uses p/u;
+        # neither query pool is interpreted as target-distributed samples.
+        accumulated = torch.zeros(3, dtype=torch.float64, device=device)
+        directions, labels = training_monitor
+        for start in range(0, monitor_count, cfg.eval_batch_size):
+            end = min(start + cfg.eval_batch_size, monitor_count)
+            values = loss_terms(
+                model.log_prob(directions[start:end]), labels[start:end], objective,
+                report_components=objective.sampling in ("target_uniform", "uniform"),
+            )
+            accumulated += torch.stack([
+                values["loss"], values["nll"], values["log_mse"]
+            ]).to(torch.float64) * (end - start)
+        values = (accumulated / monitor_count).cpu().tolist()
+        if not all(math.isfinite(value) for value in values):
+            raise FloatingPointError("nonfinite fixed-pool objective monitor")
+        report = dict(zip(("loss", "nll", "log_mse"), values, strict=True)) | {
+            "sample_count": monitor_count,
+            "objective": "log_density",
+            "sampling": objective.sampling,
+            "components_measured": objective.sampling in ("target_uniform", "uniform"),
+            "beta": objective.beta,
+            "nll_weight": objective.nll_weight,
+            "scope": "weighted_fixed_training_pool_subset_not_independent_validation",
+        }
+        if objective.sampling == "target":
+            report.pop("log_mse")
+        return report
     parameters = list(model.parameters())
     optimizer = torch.optim.Adam(
         parameters, lr=cfg.learning_rate, foreach=device.type == "cuda"
@@ -615,17 +764,22 @@ def train_single_condition(
     history: list[dict[str, Any]] = []
     step = best_step = 0
     best_state: dict[str, Any]
+    selections: dict[str, dict[str, Any]] = {}
     if previous is None:
-        latest = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
+        latest = validation_metrics()
         best_validation = copy.deepcopy(latest)
         best_state = copy.deepcopy(model.state_dict())
         history.append({
             "event": "initial", "global_step": 0, "examples_seen": 0,
             "effective_passes": 0.0, "validation": latest,
-            "train_monitor": _likelihood_metrics(
-                model, reference, training_monitor, cfg.eval_batch_size
-            ),
+            "train_monitor": monitor_metrics(),
         })
+        if objective is not None:
+            selections = {
+                metric: {"step": 0, "validation": copy.deepcopy(latest),
+                         "model_state": copy.deepcopy(best_state)}
+                for metric in ("nll", "log_rmse")
+            }
     else:
         model.load_state_dict(previous["model_state"], strict=True)
         _check_model_reference(model, reference)
@@ -637,16 +791,21 @@ def train_single_condition(
         best_state = copy.deepcopy(previous["best_state"])
         best_validation = copy.deepcopy(previous["best_validation"])
         latest = copy.deepcopy(previous["latest_validation"])
+        if objective is not None:
+            selections = copy.deepcopy(previous["selections"])
+            _validate_selections(selections, history, step, objective, best_step,
+                                 best_validation, best_state)
     output.mkdir(parents=True, exist_ok=True)
     checkpoint_path, best_path = output / "checkpoint.pt", output / "best.pt"
     atomic_json(
         output / "config.json",
         {
-            "schema_version": 2,
+            "schema_version": 2 if objective is None else 3,
             "family": FAMILY,
             "model": model_config.to_dict(),
             "training": cfg.to_dict(),
             "visualization": {"enabled": make_plots, **plotting.to_dict()},
+            **({"objective": objective.to_dict()} if objective is not None else {}),
         },
     )
     atomic_json(output / "data_summary.json", reference.summary())
@@ -654,7 +813,7 @@ def train_single_condition(
 
     def common() -> dict[str, Any]:
         return {
-            "checkpoint_version": CHECKPOINT_VERSION,
+            "checkpoint_version": checkpoint_version,
             "family": FAMILY,
             "model_config": model_config.to_dict(),
             "dtype": cfg.dtype,
@@ -663,6 +822,8 @@ def train_single_condition(
             "dataset_fingerprint": fingerprint,
             "code_fingerprint": code_fingerprint,
             "runtime": runtime,
+            **({"objective_config": objective.to_dict(),
+                "selection_metric": objective.selection_metric} if objective is not None else {}),
         }
 
     def save() -> None:
@@ -681,6 +842,7 @@ def train_single_condition(
             "best_step": best_step,
             "best_validation": best_validation,
             "latest_validation": latest,
+            **({"selections": selections} if objective is not None else {}),
         }
         _atomic_torch_save(checkpoint_path, payload)
         _atomic_torch_save(
@@ -693,9 +855,18 @@ def train_single_condition(
                 "validation": best_validation,
             },
         )
+        if objective is not None:
+            for metric, selection in selections.items():
+                suffix = "log" if metric == "log_rmse" else "nll"
+                _atomic_torch_save(output / f"best_by_{suffix}.pt", {
+                    **common(), "kind": "inference", "selection_metric": metric,
+                    "global_step": selection["step"],
+                    "model_state": selection["model_state"],
+                    "validation": selection["validation"],
+                })
         atomic_json(output / "history.json", history)
 
-    pending: list[tuple[int, torch.Tensor, torch.Tensor]] = []
+    pending: list[tuple[int, torch.Tensor]] = []
 
     def flush_updates() -> None:
         """Check before publication; synchronize a block, not every parameter.
@@ -705,9 +876,7 @@ def train_single_condition(
         """
         if not pending:
             return
-        summaries = torch.stack(
-            [torch.stack((loss, norm.to(loss.dtype))) for _, loss, norm in pending]
-        ).cpu().numpy()
+        summaries = torch.stack([values for _, values in pending]).cpu().numpy()
         invalid = ~np.isfinite(summaries).all(axis=-1)
         if invalid.any():
             failed_step = pending[int(np.flatnonzero(invalid)[0])][0]
@@ -721,8 +890,8 @@ def train_single_condition(
                 f"optimizer produced nonfinite parameters by update {step}; "
                 "the last valid checkpoint was retained"
             )
-        history.extend(
-            {
+        for (update, _), values in zip(pending, summaries, strict=True):
+            entry = {
                 "global_step": update,
                 "loss": float(values[0]),
                 "gradient_norm_before_clip": float(values[1]),
@@ -730,8 +899,14 @@ def train_single_condition(
                 "examples_seen": update * cfg.batch_size,
                 "effective_passes": update * cfg.batch_size / cfg.train_samples,
             }
-            for (update, _, _), values in zip(pending, summaries, strict=True)
-        )
+            if objective is not None:
+                entry.update(nll=float(values[2]),
+                             beta=objective.beta, nll_weight=objective.nll_weight,
+                             objective="log_density", sampling=objective.sampling,
+                             components_measured=objective.sampling in ("target_uniform", "uniform"))
+                if objective.sampling in ("target_uniform", "uniform"):
+                    entry["log_mse"] = float(values[3])
+            history.append(entry)
         pending.clear()
 
     if previous is None or checkpoint_path.resolve() != Path(resume).resolve():
@@ -747,6 +922,7 @@ def train_single_condition(
             "model": model_config.to_dict(), "training": cfg.to_dict(),
             "physics": physics, "dataset_fingerprint": fingerprint,
             "train_monitor_subset": "first min(train_monitor_samples, train_samples) fixed points",
+            **({"objective": objective.to_dict()} if objective is not None else {}),
         },
     ) as monitor:
         published = len(history)
@@ -759,7 +935,14 @@ def train_single_condition(
             log_q = model.log_prob(outgoing)
             if log_q.shape != (cfg.batch_size,):
                 raise FloatingPointError("malformed training log_prob")
-            loss = -log_q.mean()  # Target-distributed samples have unit loss weight.
+            if objective is None:
+                loss = -log_q.mean()  # Target-distributed samples have unit loss weight.
+            else:
+                terms = loss_terms(
+                    log_q, training_labels[indices], objective,
+                    report_components=objective.sampling in ("target_uniform", "uniform"),
+                )
+                loss = terms["loss"]
             loss.backward()
             gradient_norm = torch.nn.utils.clip_grad_norm_(
                 parameters,
@@ -769,7 +952,10 @@ def train_single_condition(
             )
             optimizer.step()
             step += 1
-            pending.append((step, loss.detach(), gradient_norm.detach()))
+            scalars = [loss.detach(), gradient_norm.detach().to(loss.dtype)]
+            if objective is not None:
+                scalars.extend([terms["nll"].detach(), terms["log_mse"].detach()])
+            pending.append((step, torch.stack(scalars)))
             evaluation_due = step % cfg.eval_every == 0 or step == cfg.steps
             checkpoint_due = step % cfg.checkpoint_every == 0 or step == cfg.steps
             logging_due = step % cfg.log_every == 0
@@ -778,14 +964,20 @@ def train_single_condition(
                 flush_updates()
             if evaluation_due:
                 entry = history[-1]
-                latest = _likelihood_metrics(
-                    model, reference, validation_device, cfg.eval_batch_size
-                )
+                latest = validation_metrics()
                 entry["validation"] = latest
-                entry["train_monitor"] = _likelihood_metrics(
-                    model, reference, training_monitor, cfg.eval_batch_size
-                )
-                if latest["nll"] < best_validation["nll"]:
+                entry["train_monitor"] = monitor_metrics()
+                if objective is not None:
+                    for metric in selections:
+                        if latest[metric] < selections[metric]["validation"][metric]:
+                            selections[metric] = {
+                                "step": step, "validation": copy.deepcopy(latest),
+                                "model_state": copy.deepcopy(model.state_dict()),
+                            }
+                    primary = selections[objective.selection_metric]
+                    best_step, best_validation = primary["step"], primary["validation"]
+                    best_state = primary["model_state"]
+                elif latest["nll"] < best_validation["nll"]:
                     best_step, best_validation = step, copy.deepcopy(latest)
                     best_state = copy.deepcopy(model.state_dict())
             if boundary:
@@ -818,6 +1010,7 @@ def train_single_condition(
             seed=data_seed,
             batch_size=cfg.eval_batch_size,
             proposal_samples=cfg.proposal_samples,
+            uniform_samples=0 if objective is None else objective.test_uniform_samples,
         )
         final_test["scope"] = "final_independent_test_points_same_condition"
     metrics = {
@@ -833,6 +1026,13 @@ def train_single_condition(
         "dataset_fingerprint": fingerprint,
         "generalization_scope": "same condition only; no claim about unseen wavelength/incidence",
     }
+    if objective is not None:
+        metrics.update(
+            objective=objective.to_dict(), selection_metric=objective.selection_metric,
+            selection=f"first minimum validation {objective.selection_metric} at scheduled evaluations",
+            selections={metric: {"step": value["step"], "validation": value["validation"]}
+                        for metric, value in selections.items()},
+        )
     atomic_json(output / "metrics.json", metrics)
     if make_plots and step == cfg.steps:
         from .plotting import plot_rainbow_comparison

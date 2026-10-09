@@ -1,0 +1,2927 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 32650e8ff682b30ac586c73a70999ea59ef1166c..52d18a42f97825e81c583579446b30c9d74f636a 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -95,6 +95,30 @@ The current primary workflow is the **single-condition Rainbow model** documente
+   C++ tests do not establish CUDA training, NVCC compilation, OptiX integration,
+   renderer correctness, or GPU sampling/evaluation speed.
+ 
++## Optional log-density objective (schema 3 / checkpoint 5)
++
++- `docs/LOG_DENSITY_OBJECTIVE.md` specifies the explicit extension authorized for
++  weak-scattering shape fidelity. Schema-2 training remains the original NLL
++  path. Never interpret a mixed query pool as samples from the target density.
++- The new objective uses target NLL plus beta times the squared log-density
++  ratio averaged under uniform solid angle. An equal target/uniform mixture
++  requires separate p/r and u/r weights, without minibatch self-normalization.
++  HG, the stored target, symmetry constraints and flow architecture are unchanged.
++- Check every stored cell for positive density before whole-sphere log metrics.
++  True zeros cause an explicit error; do not add epsilon, replace query points,
++  smooth the CDF or silently restrict the integration domain.
++- Independently evaluate target NLL/KL and uniform-solid-angle log errors.
++  Record the selected metric, preserve both NLL and log-RMSE selected weights,
++  and never compare raw composite loss across different beta values for selection.
++- Record query-source labels and both raw and actual-geometry pool identities.
++  Evaluate teacher labels at the actual geometry-cast regression points. Mixed
++  scatter plots show all entries and distinguish CDF and uniform components.
++- Minibatch total objective is not NLL. Report measured raw components even
++  when their coefficient is zero; do not display disabled placeholders as errors.
++- Read old checkpoints for inference/plots, but require matching objective,
++  version, input, code and runtime for exact continuation. The old CDF-only
++  sampling audit must explicitly reject the new pool contract.
++
+ ## Legacy v1 boundary
+ 
+ `docs/MODEL.md`, `docs/DATA_CONTRACT.md`, `docs/EXPORT_FORMAT.md`,
+diff --git a/README.md b/README.md
+index 08c05ecba2fe82be2e85a6cefab789e3b973d9e1..22c943cdfcf6c4a7aa2d3cee4f35f692f2605487 100644
+--- a/README.md
++++ b/README.md
+@@ -36,6 +36,17 @@ CDF サンプル点群，NF の PDF を同じ座標とアスペクト比で比
+ 球面全体での密度の連続性や，論文中の全構成・全実験の再現を主張するものではありません．
+ 数式，データ契約と実装の対応は [単一条件の仕様](docs/RAINBOW_SINGLE_CONDITION.md) を参照してください．
+ 
++## 弱い散乱構造のための対数密度回帰
++
++schema 3 の明示的な `objective` を使うと，球面一様平均の log PDF 二乗誤差を NLL に
++追加できます．教師 / 球面一様の固定点を半分ずつ使い，それぞれの損失に正しい重要度重みを
++掛けます．独立検証の log RMSE と NLL で選んだ重みを別々に保存します．
++従来の schema 2 の NLL 学習も保持します．
++
++[数式・設定・単一実験の実行・ゼロ密度・保存と評価の仕様](docs/LOG_DENSITY_OBJECTIVE.md)
++を参照してください．提供設定は `configs/rainbow_log_loss.json` です．CUDA / FP32 が既定で，
++教師の値は実際に NF へ渡す精度の方向で評価します．物理モデルや保存 CDF は変更しません．
++
+ ## セットアップ
+ 
+ Windows のバッチは **Python 3.14 / PyTorch 2.14.1 / CUDA 13.0 wheel** を対象とします．
+diff --git a/configs/rainbow_log_loss.json b/configs/rainbow_log_loss.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2e2483e23c535c54c01b98c91d6d69be62775d8
+--- /dev/null
++++ b/configs/rainbow_log_loss.json
+@@ -0,0 +1,55 @@
++{
++  "schema_version": 3,
++  "family": "rainbow_single_condition",
++  "model": {
++    "num_coupling_layers": 16,
++    "num_bins": 64,
++    "hidden_features": [64, 64],
++    "mirror_symmetry": true,
++    "min_bin_width": 0.00001,
++    "min_bin_height": 0.00001,
++    "min_derivative": 0.0001,
++    "activation": "silu",
++    "spline_dtype": "model",
++    "geometry_dtype": "model"
++  },
++  "training": {
++    "seed": 415,
++    "data_seed": 2026,
++    "device": "cuda",
++    "dtype": "float32",
++    "train_samples": 262144,
++    "validation_samples": 32768,
++    "test_samples": 65536,
++    "proposal_samples": 16384,
++    "batch_size": 1024,
++    "steps": 20000,
++    "learning_rate": 0.001,
++    "eval_every": 100,
++    "checkpoint_every": 100,
++    "eval_batch_size": 4096,
++    "grad_clip_norm": 10.0,
++    "deterministic": true,
++    "cpu_threads": 1,
++    "log_every": 20,
++    "tensorboard": true,
++    "train_monitor_samples": 8192
++  },
++  "objective": {
++    "schema_version": 1,
++    "nll_weight": 1.0,
++    "beta": 0.1,
++    "sampling": "target_uniform",
++    "target_fraction": 0.5,
++    "selection_metric": "log_rmse",
++    "validation_uniform_samples": 32768,
++    "test_uniform_samples": 65536,
++    "zero_policy": "error"
++  },
++  "visualization": {
++    "enabled": true,
++    "eval_batch_size": 4096,
++    "dpi": 160,
++    "write_pdf": false
++  }
++}
+diff --git a/docs/LOG_DENSITY_OBJECTIVE.md b/docs/LOG_DENSITY_OBJECTIVE.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb2e3c66b56a6eeca73a905c8182a1bd9c62acd3
+--- /dev/null
++++ b/docs/LOG_DENSITY_OBJECTIVE.md
+@@ -0,0 +1,192 @@
++# 単一 CDF の対数密度回帰
++
++この拡張は，正規化済みの位相関数の弱い角度構造を近似するための研究実装です．
++論文の実験一式を再現したものでも，実際の虹で改善が確認済みの最適設定でもありません．
++HG，円周・区間 RQS coupling，鏡映と軸入射の制約，保存 CDF の定義を維持し，
++学習点の分布・損失・検証と重みの選択を明示的に変更します．
++
++## 目的関数と測度
++
++一つの入射方向・一つの波長を固定します．`p` は保存 CDF が定めるセル内一定の
++立体角密度，`q` は NF の立体角密度，`u=1/(4*pi)` は球面一様密度です．
++
++$$
++J = w_{\mathrm{NLL}} E_p[-\log q]
++  + \beta E_u[(\log q-\log p)^2].
++$$
++
++最初の項は forward KL と教師だけに依存する定数の差です．全て自然対数を使用し，
++`log1p(pdf)` の MSLE とは区別します．`|cos(theta)|` などの追加角度重みは使いません．
++損失を変えても可逆な NF の解析的正規化は維持されます．外部 `hg.g` は固定ですが，
++最終 NF の平均余弦まで自動的に一致するわけではありません．
++
++`sampling="target_uniform"` は厳密に半々の固定 pool です．総点数 N は偶数とし，
++CDF 点 N/2 と球面一様点 N/2 を交互に並べます．学習の各 minibatch はこの pool から
++従来どおり復元抽出します．`r=(p+u)/2` に対し，
++
++$$
++\widehat J = \frac1B\sum_i
++\left[w_{\mathrm{NLL}}\frac{p_i}{r_i}(-\log q_i)
++ +\beta\frac{u_i}{r_i}(\log q_i-\log p_i)^2\right].
++$$
++
++`p/r` と `u/r` はそれぞれ 2 以下です．重みは logaddexp を使って安定に求め，
++教師値とともに勾配を流しません．minibatch 内の重みの和による再正規化はしません．
++点だけを混合して無重み NLL に渡すと `r` を学習してしまうため，この補正を省けません．
++
++`sampling="target"` は beta=0 の従来 NLL 対照だけに使います．この場合の
++`target_fraction=0.5` は混合方式用の固定設定であり，実際の pool の割合は
++provenance に `target_fraction=1.0` と記録します．
++
++## 球面一様点と教師値
++
++幾何学的な `a=(1-cos(theta))/2` と方位角を一様に生成します．HG の累積確率座標を
++一様にして HG の逆変換に渡す処理ではありません．記録された source frame で方向を
++作り，既存の source_to_nf 回転を適用します．元の CDF の非一様な u_edges と，
++セル内の正しい立体角密度を保持します．
++
++PCG64 の SeedSequence は `[data_seed, stream_id]` です．乱数は既存と同じ 52-bit
++open midpoint grid を使います．学習点の source label は CDF=0，uniform=1 です．
++
++| stream | ID | 用途 |
++|---|---:|---|
++| CDF train | 0 | 固定学習点；従来 sampler のまま |
++| CDF validation | 1 | 独立した NLL / KL 検証 |
++| minibatches | 2 | 初期化から独立した torch.Generator の seed |
++| CDF test | 3 | 完了時の独立評価 |
++| proposal | 4 | 実際の NF サンプルによる ESS と平均余弦 |
++| uniform train | 5 | 固定学習 pool の球面一様成分 |
++| uniform validation | 6 | 独立した立体角平均の対数誤差 |
++| uniform test | 7 | 完了時の独立した対数誤差 |
++
++新しい回帰用の教師値は，方向を実際の geometry dtype に変換した後の方向で再評価します．
++これにより，FP32 丸めでセル境界を越えた際に元セルの値を教師にしてしまうことを避けます．
++FP64 の変換前方向・教師値・source label と，実際の方向・教師値・source label の両方に
++SHA-256 を記録します．球面積分の不偏性は連続分布の定式化についての性質であり，
++有限精度の方向量子化が数学的な連続サンプルと同一であるという主張ではありません．
++
++## ゼロ密度を改変しない
++
++新しい経路は，beta=0 の対照も含めて全球面の log 誤差を評価します．そのため，
++開始前に保存 CDF の全セルをチャンク走査します．正の面積を持つゼロ密度セルが一つでも
++あれば，面積割合とセル数を示して停止します．サンプル点だけの検査ではありません．
++周辺 CDF のゼロ質量行も，その行全体をゼロ密度として検査します．
++
++epsilon，PDF floor，CDF の平滑化，点の再抽選，領域の除外は行いません．
++ゼロを含む教師の従来 NLL 学習は schema 2 のまま使用できます．この境界は
++`zero_policy="error"` と設定に保存します．
++
++## 設定と実行
++
++従来の schema 2 は NLL 専用のままです．拡張は top-level `schema_version=3` と
++`objective` を明示します．`model`，`training`，`visualization` は従来の設定です．
++
++```json
++"objective": {
++  "schema_version": 1,
++  "nll_weight": 1.0,
++  "beta": 0.1,
++  "sampling": "target_uniform",
++  "target_fraction": 0.5,
++  "selection_metric": "log_rmse",
++  "validation_uniform_samples": 32768,
++  "test_uniform_samples": 65536,
++  "zero_policy": "error"
++}
++```
++
++未知フィールドや半々以外の比率は拒否します．`nll_weight=0,beta>0` は純粋な log 回帰，
++`nll_weight>0,beta=0` は NLL 対照です．両方ゼロにはできません．
++
++Windows CMD で一つの候補を学習する例です．RECORD は実際の一条件に変更してください．
++
++```bat
++call environment.bat
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow train-rainbow ^
++  --record "..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800" ^
++  --config "configs\rainbow_log_loss.json" ^
++  --output "runs\rainbow_log_single_gpu" --device cuda:0
++```
++
++同じコマンドに `--resume "runs\rainbow_log_single_gpu\checkpoint.pt"` を付けて再開します．
++中断を計画する場合は `--max-steps-this-run 200` を使い，予定した steps を変更しません．
++設定を変える比較は新しい出力先で開始します．
++
++学習経路は CUDA が既定です．提供設定は MLP・方向・HG・RQS・学習損失を FP32 で計算し，
++教師値と検証の統計集計は FP64 を保持します．固定点と損失用の FP32 教師値を GPU に
++一度転送し，更新ごとの CPU 参照や点のコピーを避けます．AMP / TF32 / CPU fallback は
++自動で有効にしません．FP16 / CoopVec 推論の一致や速度は今回の実装範囲ではありません．
++
++## 検証・選択・保存
++
++NLL / forward KL は独立した CDF 点で，log MSE / RMSE と RMS 相対誤差は独立した
++球面一様点で評価します．RMS 相対誤差は次の定義です．
++
++$$
++h_{\mathrm{rel}}=\sqrt{E_u[((q-p)/p)^2]}.
++$$
++
++相対誤差は log 空間で集計します．最終結果が FP64 の範囲を超えた場合だけ，
++`relative_rmse=null` と `relative_rmse_status="overflow_float64"` を保存します．
++有効な対数誤差をこの任意の補助統計の overflow によって削除しません．
++
++| 出力 | 意味 |
++|---|---|
++| checkpoint.pt | 現在の重み，Adam，RNG，履歴，二種類の選択状態を保存する再開用 |
++| best.pt | objective.selection_metric に従って選んだ推論用 |
++| best_by_log.pt | 独立検証 log RMSE が最小の推論用 |
++| best_by_nll.pt | 独立検証 NLL が最小の推論用 |
++| sample_split.json | 全 stream・点数・pool のハッシュと生成元 |
++| history.jsonl / history.json | 総目的関数と実測成分，独立検証，確定した履歴 |
++| metrics.json | 主選択の検証・最終 test，両選択の step と検証値 |
++
++同値なら最初の検証時点を選びます．test は予定した更新を完了した主選択に対してだけ
++実施し，重み・beta の選択に使いません．異なる beta の総目的関数を候補間で比べません．
++
++新規経路は checkpoint version 5 です．version 2/3/4 は評価・再描画の互換性を維持します．
++厳密再開では元の目的関数・モデル・実装ハッシュ・入力・runtime・RNG を要求します．
++本パッチ前の実装で走らせた実験へ，新しい損失を追加してそのまま再開はできません．
++
++## 監視・図・独立した再評価
++
++`monitor.bat` で TensorBoard を開けます．総 loss は NLL と呼ばず，NLL，log MSE，
++係数を分離します．混合点の beta=0 / 純 log 対照でも，可能な両成分は実測して記録します．
++CDF-only 対照の minibatch に無効な log MSE のゼロ値は表示しません．全候補の独立検証
++log 誤差は常に測定します．混合 pool の固定監視部分は偶数点の均衡した prefix です．
++
++学習曲線には対数誤差のパネルを加えます．中断再開時には，checkpoint より先に記録された
++未確定な JSONL / TensorBoard のイベントを，確定履歴から再構成します．
++
++三種類の比較図は元と同じ source frame，軸，アスペクト比を使います．両 PDF は同じ
++対数色尺度です．混合点群は CDF / uniform を識別し，実際の全 N 点を表示します．
++training_scatter.npz は方向，教師値，生成元ラベルと，検証済みの provenance を含みます．
++
++```bat
++call environment.bat
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-rainbow ^
++  --record "YOUR_RECORD" --checkpoint "runs\rainbow_log_single_gpu\best_by_nll.pt" ^
++  --output "runs\rainbow_log_single_gpu\plots_by_nll" --device cuda:0
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow evaluate-rainbow ^
++  --record "YOUR_RECORD" --checkpoint "runs\rainbow_log_single_gpu\best.pt" ^
++  --samples 65536 --uniform-samples 65536 --seed 3026 --device cuda:0 ^
++  --output "runs\rainbow_log_single_gpu\independent_evaluation.json"
++```
++
++`evaluate-rainbow` で --uniform-samples を省略すると version-5 の保存設定を使います．
++0 を明示すれば従来の NLL / proposal 評価だけを実行します．再描画で既存の完了済み
++sweep 結果を書き換えないため，sweep では専用の replot コマンドと別の出力先を使います．
++
++角度診断に objective を渡すと，混合分布の期待点数 N*(p(R)+u(R))/2 を使います．
++旧 CDF-only の sampler audit は version 5 を明示的に拒否します．その二項分布の
++検査と旧 hash を，固定比率の混合 pool に黙って流用しません．
++
++## 文献との関係
++
++- Jendersie and d'Eon (2023), [An Approximate Mie Scattering Function for Fog and Cloud Rendering](https://research.nvidia.com/labs/rtr/approximate-mie/publications/approximate-mie.pdf): log PDF の二乗誤差を位相関数 fitting に用いる先行例．今回は追加の |cos(theta)| 重みを使わず，立体角に関する一様平均を使います．
++- Draine (2003), [Scattering by Interstellar Dust Grains. I. Optical and Ultraviolet](https://arxiv.org/abs/astro-ph/0304060): 弱い方向の相対誤差を反映する RMS 相対誤差の定義．
++- Li et al. (2025), [Normalizing Flow Regression for Bayesian Inference with Offline Likelihood Evaluations](https://arxiv.org/abs/2504.11554): 教師 log density 値による NF 回帰．未知の正規化定数や Tobit likelihood は今回の実装に含めません．
++- Schopmans et al. (2026), [Efficient Training of Boltzmann Generators Using Off-Policy Log-Dispersion Regularization](https://proceedings.mlr.press/v306/schopmans26a.html): 通常の学習目的と対数密度に関する正則化の併用．今回は既知の正規化済み教師なので，平均を引いた分散ではなく，log density 比の非中心二乗平均を使います．
++
++この組み合わせと球面上の教師への適用は，本プロジェクトの実験設計です．
++損失だけの新規性，細かな干渉縞の完全な再現，レンダリング改善は主張しません．
++実験では log RMSE / KL / 角度断面の改善と，最終的な画像の変化を別々に検証します．
+diff --git a/docs/RAINBOW_SINGLE_CONDITION.md b/docs/RAINBOW_SINGLE_CONDITION.md
+index 75e24592192c76fb7e9f5904572e31fbc98b682c..c8aa04b6c2c47be6941077caaba416deccab4a55 100644
+--- a/docs/RAINBOW_SINGLE_CONDITION.md
++++ b/docs/RAINBOW_SINGLE_CONDITION.md
+@@ -4,6 +4,13 @@
+ 旧 `docs/MODEL.md` の HG head・折り畳み座標を使うモデルとは区別します．
+ 今回固定する条件は一つの波長と一つの入射方向で，条件エンコーディングや条件間補間は学習しません．
+ 
++## 任意の対数密度回帰への拡張
++
++この文書の NLL 学習は schema 2 の既存経路です．明示的な schema 3 の `objective` による
++NLL と log PDF 二乗誤差の併用は，[対数密度回帰の仕様](LOG_DENSITY_OBJECTIVE.md) に記載します．
++混合学習点の重み，独立した球面一様評価，二種類の重み選択と checkpoint version 5 が
++追加されます．以下の HG・RQS・対称性・教師 CDF・座標契約はそのまま適用します．
++
+ ## 対応するソルバ出力
+ 
+ 入力契約は [`Somatic-Cell/rainbow` のコミット a9538941](https://github.com/Somatic-Cell/rainbow/tree/a9538941dcb9df2de6a4130fa66f625f0133c949)
+diff --git a/src/phaseflow/angular_diagnostics.py b/src/phaseflow/angular_diagnostics.py
+index 9841a8417aa911449dcaa7eab7d4662fb46d09fc..1153333550a0867a680b21ebea0f85b99a617c8f 100644
+--- a/src/phaseflow/angular_diagnostics.py
++++ b/src/phaseflow/angular_diagnostics.py
+@@ -343,6 +343,7 @@ def evaluate_angular_diagnostics(
+     batch_size: int,
+     config: AngularDiagnosticConfig | None = None,
+     checkpoint_path: str | Path | None = None,
++    objective_config=None,
+ ) -> dict[str, Any]:
+     """Save exact target band mass, expected counts, and aligned PDF cuts.
+ 
+@@ -352,6 +353,12 @@ def evaluate_angular_diagnostics(
+     the caller-supplied file; the caller must pass the file used to load ``model``.
+     """
+     config = AngularDiagnosticConfig() if config is None else config
++    if objective_config is not None:
++        from .log_objective import LogObjectiveConfig
++
++        if not isinstance(objective_config, LogObjectiveConfig):
++            raise ValueError("objective_config must be a LogObjectiveConfig or None")
++        objective_config.validate_training_count(train_samples)
+     if not isinstance(config, AngularDiagnosticConfig):
+         raise ValueError("config must be an AngularDiagnosticConfig")
+     for name, value in (("train_samples", train_samples), ("batch_size", batch_size)):
+@@ -367,11 +374,22 @@ def evaluate_angular_diagnostics(
+     low, high = _band_u(config.theta_band_degrees)
+     metrics = _reference_band_and_zeros(reference, low, high)
+     mass = metrics["reference_band_mass_exact"]
++    mixture = objective_config is not None and objective_config.sampling == "target_uniform"
++    target_fraction = 0.5 if mixture else 1.0
++    uniform_mass = high - low
++    query_mass = target_fraction * mass + (1 - target_fraction) * uniform_mass
+     metrics.update(
+-        expected_train_band_samples=train_samples * mass,
+-        expected_minibatch_band_samples=batch_size * mass,
++        expected_train_band_samples=train_samples * query_mass,
++        expected_minibatch_band_samples=batch_size * query_mass,
+         hg_band_probability_width=_hg_band_probability(reference.g, low, high),
+     )
++    if objective_config is not None:
++        metrics.update(
++            uniform_band_mass_exact=uniform_mass,
++            training_query_band_mass=query_mass,
++            expected_cdf_train_band_samples=train_samples * target_fraction * mass,
++            expected_uniform_train_band_samples=train_samples * (1 - target_fraction) * uniform_mass,
++        )
+     if not all(math.isfinite(value) for value in metrics.values()):
+         raise FloatingPointError("nonfinite angular diagnostic statistic")
+     profiles = _profiles(model, reference, config)
+@@ -402,7 +420,8 @@ def evaluate_angular_diagnostics(
+     serialized = json.dumps(configuration, sort_keys=True, separators=(",", ":"), allow_nan=False)
+     model_config = getattr(model, "config", None)
+     report: dict[str, Any] = {
+-        "schema": ANGULAR_DIAGNOSTICS_SCHEMA,
++        "schema": (ANGULAR_DIAGNOSTICS_SCHEMA if objective_config is None
++                   else "phaseflow.angular_diagnostics.v2"),
+         **metrics,
+         "scope": "report_only_same_condition_no_model_selection",
+         "source_kind": "synthetic_fixture" if synthetic else "rainbow_cdf_record",
+@@ -450,8 +469,17 @@ def evaluate_angular_diagnostics(
+         "expected_counts": {
+             "train_samples": train_samples,
+             "batch_size": batch_size,
+-            "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
++            "method": (
++                "N*(0.5*p(R)+0.5*u(R)) and B*(0.5*p(R)+0.5*u(R)); "
++                "unconditional expectations, not observed counts" if mixture else
++                "N*p(R) and B*p(R), not observed counts in a fixed pool"
++            ),
+             "observed_train_band_samples": None,
++            **({"sampling": objective_config.sampling,
++                "target_fraction": target_fraction,
++                "cdf_samples": int(train_samples * target_fraction),
++                "uniform_samples": int(train_samples * (1 - target_fraction))}
++               if objective_config is not None else {}),
+         },
+         "profiles": {
+             "requested_source_phi_degrees": profiles["requested_source_phi_degrees"].tolist(),
+diff --git a/src/phaseflow/cli.py b/src/phaseflow/cli.py
+index 4da5d7b1d7bb45c1a778f5725f8ca25a5f85a16c..947988c853470aa2c2b2c02fc7a56f7ab04874b1 100644
+--- a/src/phaseflow/cli.py
++++ b/src/phaseflow/cli.py
+@@ -135,6 +135,10 @@ def _parser() -> argparse.ArgumentParser:
+     rainbow_eval.add_argument("--checkpoint", required=True, type=Path)
+     rainbow_eval.add_argument("--samples", type=int, default=65536)
+     rainbow_eval.add_argument("--proposal-samples", type=int)
++    rainbow_eval.add_argument(
++        "--uniform-samples", type=int,
++        help="independent solid-angle log-error queries; version-5 default from objective",
++    )
+     rainbow_eval.add_argument("--seed", type=int, default=2026)
+     rainbow_eval.add_argument("--batch-size", type=int, default=4096)
+     rainbow_eval.add_argument("--device", default="cuda")
+@@ -332,22 +336,32 @@ def main(argv: list[str] | None = None) -> int:
+     return 2
+ 
+ 
+-def _read_rainbow_config(path: Path, device: str | None = None):
++def _read_rainbow_config(
++    path: Path, device: str | None = None, *, include_objective: bool = False,
++):
++    from .log_objective import LogObjectiveConfig
+     from .plotting import RainbowPlotConfig
+     from .single_condition import FAMILY, SingleTrainingConfig
+     from .sphere_model import SphereFlowConfig
+ 
+-    with path.open(encoding="utf-8") as handle:
++    with path.open(encoding="utf-8-sig") as handle:
+         config = json.load(handle)
++    allowed = {"schema_version", "family", "model", "training", "visualization"}
++    objective = None
++    version = config.get("schema_version") if isinstance(config, dict) else None
++    if include_objective and version == 3:
++        allowed.add("objective")
++        objective = LogObjectiveConfig.from_dict(config.get("objective"))
+     if (
+         not isinstance(config, dict)
+         or not {"schema_version", "family", "model", "training"} <= set(config)
+-        or set(config) - {"schema_version", "family", "model", "training", "visualization"}
+-        or config["schema_version"] != 2
++        or set(config) - allowed
++        or (version != 2 and not (include_objective and version == 3))
+         or config["family"] != FAMILY
+     ):
+         raise ValueError(
+-            "Rainbow config requires schema_version=2, family="
++            "Rainbow config requires schema_version=2 (NLL), or an explicitly supported "
++            "schema_version=3 objective workflow, family="
+             + FAMILY
+             + ", and explicit model/training objects"
+         )
+@@ -365,7 +379,8 @@ def _read_rainbow_config(path: Path, device: str | None = None):
+     enabled = visualization.pop("enabled", True)
+     if type(enabled) is not bool:
+         raise ValueError("visualization.enabled must be boolean")
+-    return model_config, training_config, enabled, RainbowPlotConfig.from_dict(visualization)
++    values = (model_config, training_config, enabled, RainbowPlotConfig.from_dict(visualization))
++    return (*values, objective) if include_objective else values
+ 
+ 
+ def _read_sweep_config(path: Path):
+@@ -421,11 +436,14 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+ 
+     def progress(entry: dict[str, Any]) -> None:
+         value = {key: entry[key] for key in (
+-            "global_step", "loss", "gradient_norm_before_clip", "examples_seen", "effective_passes"
++            "global_step", "loss", "nll", "log_mse", "beta", "nll_weight",
++            "gradient_norm_before_clip", "examples_seen", "effective_passes"
+         ) if key in entry}
+         if "validation" in entry:
+             value["validation_nll"] = entry["validation"]["nll"]
+             value["validation_forward_kl"] = entry["validation"]["forward_kl_estimate"]
++            if "log_rmse" in entry["validation"]:
++                value["validation_log_rmse"] = entry["validation"]["log_rmse"]
+         if "train_monitor" in entry:
+             value["train_fixed_subset_nll"] = entry["train_monitor"]["nll"]
+         print(json.dumps(value, sort_keys=True, allow_nan=False), flush=True)
+@@ -573,9 +591,11 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+             ))
+             return 0
+         if arguments.command in ("train-rainbow", "sweep-rainbow"):
+-            model_config, training_config, enabled, plot_config = _read_rainbow_config(
++            parsed = _read_rainbow_config(
+                 arguments.config, arguments.device,
++                include_objective=arguments.command == "train-rainbow",
+             )
++            model_config, training_config, enabled, plot_config = parsed[:4]
+             make_plots = enabled and not arguments.no_plots
+             if arguments.command == "sweep-rainbow":
+                 from . import angular_diagnostics
+@@ -636,6 +656,7 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+                 callback=None if arguments.quiet else progress,
+                 make_plots=make_plots,
+                 plot_config=plot_config,
++                objective_config=parsed[4],
+             )
+             _print_json(
+                 {
+@@ -656,8 +677,8 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+ 
+             from .angular_diagnostics import evaluate_angular_diagnostics
+ 
+-            model_config, training_config, _, _ = _read_rainbow_config(
+-                arguments.run / "config.json",
++            model_config, training_config, _, _, objective = _read_rainbow_config(
++                arguments.run / "config.json", include_objective=True,
+             )
+             _, _, diagnostic_config = _read_sweep_config(arguments.sweep_config)
+             torch.set_num_threads(training_config.cpu_threads)
+@@ -677,6 +698,7 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+                 batch_size=training_config.batch_size,
+                 config=diagnostic_config,
+                 checkpoint_path=checkpoint_path,
++                objective_config=objective,
+             ))
+             return 0
+         import torch
+@@ -732,6 +754,9 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+             )
+             _print_json(report)
+             return 0
++        uniform_samples = arguments.uniform_samples
++        if uniform_samples is None:
++            uniform_samples = checkpoint.get("objective_config", {}).get("test_uniform_samples", 0)
+         report = evaluate_single_condition(
+             model,
+             reference,
+@@ -739,6 +764,7 @@ def _rainbow_main(arguments: argparse.Namespace) -> int:
+             seed=arguments.seed,
+             batch_size=arguments.batch_size,
+             proposal_samples=arguments.proposal_samples,
++            uniform_samples=uniform_samples,
+         )
+         report["checkpoint"] = str(arguments.checkpoint.resolve())
+         report["checkpoint_step"] = checkpoint["global_step"]
+diff --git a/src/phaseflow/log_objective.py b/src/phaseflow/log_objective.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f97ac29dee7e0c20a01fbda500bc50a08c57e429
+--- /dev/null
++++ b/src/phaseflow/log_objective.py
+@@ -0,0 +1,384 @@
++"""Versioned, solid-angle log-density regression for a fixed Rainbow record.
++
++The training query distribution is either the target (NLL control only) or an
++equal mixture of the target and spherical uniform. Importance weights recover
++the original target NLL and the *uniform-solid-angle* squared log-PDF error.
++The target, HG coefficient, flow architecture and normalization are unchanged.
++"""
++
++from __future__ import annotations
++
++import math
++from dataclasses import asdict, dataclass, fields
++from typing import Any
++
++import numpy as np
++import torch
++
++from .rainbow import RainbowReference
++
++LOG_UNIFORM = -math.log(4 * math.pi)
++_UNIFORM_STREAMS = {"train": 5, "validation": 6, "test": 7}
++_ZERO_SCAN_ELEMENTS = 1_000_000
++
++
++@dataclass(frozen=True)
++class LogObjectiveConfig:
++    schema_version: int = 1
++    nll_weight: float = 1.0
++    beta: float = 0.1
++    sampling: str = "target_uniform"
++    target_fraction: float = 0.5
++    selection_metric: str = "log_rmse"
++    validation_uniform_samples: int = 32768
++    test_uniform_samples: int = 65536
++    zero_policy: str = "error"
++
++    def __post_init__(self) -> None:
++        if type(self.schema_version) is not int or self.schema_version != 1:
++            raise ValueError("log objective schema_version must be 1")
++        for name in ("nll_weight", "beta", "target_fraction"):
++            value = getattr(self, name)
++            if isinstance(value, bool) or not isinstance(value, (int, float)) or (
++                not math.isfinite(value) or value < 0
++            ):
++                raise ValueError(f"log objective {name} must be finite and nonnegative")
++            object.__setattr__(self, name, float(value))
++        if self.nll_weight == 0 and self.beta == 0:
++            raise ValueError("at least one log objective coefficient must be positive")
++        if self.target_fraction != 0.5:
++            raise ValueError("log objective target_fraction must be exactly 0.5")
++        if self.sampling not in ("target", "target_uniform"):
++            raise ValueError("log objective sampling must be target or target_uniform")
++        if self.sampling == "target" and self.beta != 0:
++            raise ValueError("target sampling is an NLL control and requires beta=0")
++        if self.selection_metric not in ("nll", "log_rmse"):
++            raise ValueError("log objective selection_metric must be nll or log_rmse")
++        for name in ("validation_uniform_samples", "test_uniform_samples"):
++            if type(getattr(self, name)) is not int or getattr(self, name) < 2:
++                raise ValueError(f"log objective {name} must be an integer of at least two")
++        if self.zero_policy != "error":
++            raise ValueError("log objective zero_policy must be error; no density floor is used")
++
++    @classmethod
++    def from_dict(cls, values: dict[str, Any]) -> LogObjectiveConfig:
++        if not isinstance(values, dict):
++            raise ValueError("log objective must be a JSON object")
++        unknown = set(values) - {field.name for field in fields(cls)}
++        if unknown:
++            raise ValueError(f"unknown log objective fields: {sorted(unknown)}")
++        return cls(**values)
++
++    def to_dict(self) -> dict[str, Any]:
++        return asdict(self)
++
++    def validate_training_count(self, count: int) -> None:
++        _count_and_seed(count)
++        if self.sampling == "target_uniform" and count % 2:
++            raise ValueError("target_uniform requires an even train_samples for the half mixture")
++
++
++@dataclass(frozen=True)
++class TrainingPool:
++    """Actual geometry-cast query points and teacher values evaluated there."""
++
++    directions: np.ndarray
++    log_p: np.ndarray
++    components: np.ndarray
++    provenance: dict[str, Any]
++
++
++def _count_and_seed(count: int, seed: int | None = None) -> None:
++    if type(count) is not int or count < 1:
++        raise ValueError("point count must be a positive integer")
++    if seed is not None and (type(seed) is not int or not 0 <= seed < 2**63):
++        raise ValueError("point seed must be an integer in [0,2^63)")
++
++
++def _numpy_dtype(geometry_dtype: Any) -> np.dtype:
++    if geometry_dtype == torch.float32:
++        return np.dtype(np.float32)
++    if geometry_dtype == torch.float64:
++        return np.dtype(np.float64)
++    try:
++        dtype = np.dtype(geometry_dtype)
++    except TypeError as error:
++        raise ValueError("geometry_dtype must be float32 or float64") from error
++    if dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
++        raise ValueError("geometry_dtype must be float32 or float64")
++    return dtype
++
++
++def verify_positive_teacher(reference: RainbowReference) -> dict[str, Any]:
++    """Scan every stored cell before the whole-sphere log workflow starts.
++
++    Checking only queried points cannot prove positivity. A zero marginal makes
++    all cells in that azimuth row zero even if its unused conditional is positive.
++    Temporaries contain at most ``_ZERO_SCAN_ELEMENTS`` cell differences.
++    """
++    reference._require_open()
++    marginal = np.diff(reference.phi_cdf)
++    delta_u = np.diff(reference.u_edges.astype(np.longdouble))
++    zero_area = np.longdouble(0)
++    zero_cells = 0
++    columns = min(reference.n_theta, _ZERO_SCAN_ELEMENTS)
++    rows = max(1, _ZERO_SCAN_ELEMENTS // columns)
++    for j in range(0, reference.n_phi, rows):
++        end_j = min(j + rows, reference.n_phi)
++        zero_marginal = marginal[j:end_j] == 0
++        for i in range(0, reference.n_theta, columns):
++            end_i = min(i + columns, reference.n_theta)
++            difference = np.diff(reference.theta_cdf[j:end_j, i : end_i + 1], axis=1)
++            zeros = (difference == 0) | zero_marginal[:, None]
++            counts = zeros.sum(axis=0, dtype=np.int64)
++            zero_cells += int(counts.sum())
++            zero_area += np.sum(counts * delta_u[i:end_i], dtype=np.longdouble)
++    fraction = float(zero_area / reference.n_phi)
++    report = {
++        "density_measure": "solid_angle_sr",
++        "zero_policy": "error",
++        "reference_zero_solid_angle_fraction": fraction,
++        "zero_cell_count": zero_cells,
++        "scanned_cell_count": reference.n_phi * reference.n_theta,
++        "scope": "all_stored_cdf_cells",
++    }
++    if zero_cells:
++        raise ValueError(
++            "whole-sphere log-PDF error requires a positive teacher in every cell; "
++            f"zero_solid_angle_fraction={fraction:.17g}, zero_cell_count={zero_cells}. "
++            "True zeros are not floored, discarded or resampled. Use the legacy NLL "
++            "workflow for a teacher containing zero-density cells."
++        )
++    return report
++
++
++def _uniform_directions(reference: RainbowReference, count: int, seed: int, stream: str | int):
++    _count_and_seed(count, seed)
++    if isinstance(stream, str):
++        if stream not in _UNIFORM_STREAMS:
++            raise ValueError("uniform stream must be train, validation or test")
++        stream_id = _UNIFORM_STREAMS[stream]
++    elif type(stream) is int and stream in _UNIFORM_STREAMS.values():
++        stream_id = stream
++    else:
++        raise ValueError("uniform stream ID must be 5, 6 or 7")
++    reference._require_open()
++    generator = np.random.Generator(np.random.PCG64(np.random.SeedSequence([seed, stream_id])))
++    # Same specified open midpoint grid as CDF queries. These coordinates are
++    # geometric spherical area and azimuth, NOT the HG probability coordinate.
++    uniforms = (generator.integers(0, 2**52, size=(count, 2), dtype=np.int64) + 0.5) / 2**52
++    u, phi = uniforms[:, 0], 2 * np.pi * uniforms[:, 1] - np.pi
++    radius = 2 * np.sqrt(u) * np.sqrt(1 - u)
++    source = np.stack((radius * np.cos(phi), radius * np.sin(phi), 1 - 2 * u), axis=-1)
++    return source @ reference.source_to_nf.T
++
++
++def _teacher_at_cast(reference: RainbowReference, raw_directions: np.ndarray, geometry_dtype):
++    directions = np.asarray(raw_directions, dtype=_numpy_dtype(geometry_dtype))
++    log_p = np.asarray(reference.log_prob(directions), dtype=np.float64)
++    if not np.isfinite(directions).all() or not np.isfinite(log_p).all():
++        raise FloatingPointError(
++            "log workflow query points must have finite directions and positive finite "
++            "teacher PDFs at the actual geometry-cast directions; no points are replaced"
++        )
++    return directions, log_p
++
++
++def make_uniform_points(
++    reference: RainbowReference,
++    count: int,
++    seed: int,
++    stream: str | int,
++    geometry_dtype: Any,
++) -> tuple[np.ndarray, np.ndarray]:
++    """Independent uniform-solid-angle queries, labelled after geometry casting.
++
++    Call ``verify_positive_teacher`` once before preparing the new workflow.
++    The stream IDs are 5 (training), 6 (validation), and 7 (final test).
++    """
++    raw = _uniform_directions(reference, count, seed, stream)
++    return _teacher_at_cast(reference, raw, geometry_dtype)
++
++
++def make_training_pool(
++    reference: RainbowReference,
++    count: int,
++    seed: int,
++    objective: LogObjectiveConfig,
++    geometry_dtype: Any,
++) -> TrainingPool:
++    """Build the complete fixed pool; all beta candidates share its identity.
++
++    Call ``verify_positive_teacher`` once before preparing the new workflow.
++    CDF and spherical-uniform points are interleaved, starting with CDF, so every
++    even prefix is balanced. Labels are always evaluated at the returned points.
++    """
++    # Delayed import avoids a trainer/objective import cycle and deliberately
++    # reuses the existing CDF RNG stream without changing its historical bytes.
++    from .single_condition import _array_hash, _points
++
++    if not isinstance(objective, LogObjectiveConfig):
++        raise ValueError("objective must be a LogObjectiveConfig")
++    objective.validate_training_count(count)
++    _count_and_seed(count, seed)
++    mixture = objective.sampling == "target_uniform"
++    target_count = count // 2 if mixture else count
++    uniform_count = count - target_count
++    raw_p, label_p = _points(reference, target_count, seed, "train")
++    components = np.zeros(count, dtype=np.uint8)
++    if mixture:
++        raw_u = _uniform_directions(reference, uniform_count, seed, "train")
++        label_u = reference.log_prob(raw_u)
++        raw = np.empty((count, 3), dtype=np.float64)
++        raw_labels = np.empty(count, dtype=np.float64)
++        raw[0::2], raw[1::2] = raw_p, raw_u
++        raw_labels[0::2], raw_labels[1::2] = label_p, label_u
++        components[1::2] = 1
++    else:
++        raw, raw_labels = raw_p, label_p
++    if not np.isfinite(raw_labels).all():
++        raise FloatingPointError("log workflow requires positive teacher PDF at every raw query")
++    directions, log_p = _teacher_at_cast(reference, raw, geometry_dtype)
++    provenance = {
++        "schema": "phaseflow.training_pool.v1",
++        "sampling": objective.sampling,
++        "target_fraction": 0.5 if mixture else 1.0,
++        "density_measure": "solid_angle_sr",
++        "sample_count": count,
++        "component_counts": {"cdf": target_count, "uniform": uniform_count},
++        "component_codes": {"cdf": 0, "uniform": 1},
++        "order": "interleaved_cdf_uniform" if mixture else "cdf",
++        "data_seed": seed,
++        "source_streams": {"cdf": 0, "uniform": 5 if mixture else None},
++        "rng": "numpy.PCG64(SeedSequence([data_seed,stream_id]))",
++        "uniforms": "52-bit open midpoint grid",
++        "geometry_dtype": directions.dtype.name,
++        "raw_points_sha256": _array_hash(raw, raw_labels, components),
++        "runtime_points_sha256": _array_hash(directions, log_p, components),
++        "raw_hash_covers": "FP64 directions_nf, FP64 teacher_log_pdf, uint8 components",
++        "runtime_hash_covers": "geometry-cast directions_nf, FP64 teacher_log_pdf, uint8 components",
++        "teacher_value_query": "actual_geometry_cast_directions_nf",
++        "dataset_fingerprint": reference.fingerprint(),
++    }
++    return TrainingPool(directions, log_p, components, provenance)
++
++
++def loss_terms(
++    log_q: torch.Tensor,
++    log_p: torch.Tensor,
++    objective: LogObjectiveConfig,
++    *,
++    report_components: bool = False,
++) -> dict[str, torch.Tensor]:
++    """Compute the unbiased mixed-query objective in the model's log-PDF dtype.
++
++    Teacher labels/importance weights are detached. There is no minibatch weight
++    renormalization or device-to-host synchronization. The caller validates the
++    fixed teacher pool once and checks finite optimization blocks before saving.
++    Disabled terms return zero and are not evaluated (in particular, no 0*inf).
++    ``report_components=True`` evaluates both raw terms for mixed positive
++    teacher pools, including terms whose coefficient is zero. Such diagnostics
++    never enter the loss through an inactive multiplication by zero.
++    """
++    if not isinstance(objective, LogObjectiveConfig):
++        raise ValueError("objective must be a LogObjectiveConfig")
++    if type(report_components) is not bool:
++        raise ValueError("report_components must be boolean")
++    if log_q.ndim != 1 or log_q.numel() == 0 or log_p.shape != log_q.shape:
++        raise ValueError("log_q and log_p must be matching nonempty vectors")
++    if log_q.dtype not in (torch.float32, torch.float64):
++        raise ValueError("training log_q must be float32 or float64")
++    teacher = log_p.detach().to(dtype=log_q.dtype, device=log_q.device)
++    zero = log_q.new_zeros(())
++    if objective.sampling == "target":
++        nll = -log_q.mean() if objective.nll_weight else zero
++        return {"loss": objective.nll_weight * nll, "nll": nll, "log_mse": zero}
++    log_u = teacher.new_full((), LOG_UNIFORM)
++    # Shift each logaddexp to avoid cancellation in log p - log r when the
++    # density spans an extreme range. These are exactly p/r and u/r for the
++    # same r=(p+u)/2; neither weights nor minibatches are renormalized.
++    weight_p = torch.exp(math.log(2.0) - torch.logaddexp(zero, log_u - teacher))
++    weight_u = torch.exp(math.log(2.0) - torch.logaddexp(zero, teacher - log_u))
++    nll = (
++        -(weight_p * log_q).mean() if objective.nll_weight or report_components else zero
++    )
++    log_mse = (
++        (weight_u * (log_q - teacher).square()).mean()
++        if objective.beta or report_components else zero
++    )
++    loss = objective.nll_weight * nll if objective.nll_weight else zero
++    if objective.beta:
++        loss = loss + objective.beta * log_mse
++    return {
++        "loss": loss,
++        "nll": nll,
++        "log_mse": log_mse,
++    }
++
++
++@torch.no_grad()
++def evaluate_log_shape(
++    model,
++    reference: RainbowReference,
++    points: tuple[np.ndarray, np.ndarray] | tuple[torch.Tensor, torch.Tensor],
++    batch_size: int,
++) -> dict[str, Any]:
++    """Log-shape and RMS relative error on independent spherical-uniform points.
++
++    NF calls use the explicit model geometry dtype. Teacher values and all
++    statistical reductions use FP64 on the selected device. No evaluation point
++    is clipped or omitted. Relative RMS is accumulated in log space, and only
++    overflow of the final FP64 value is represented by null plus a status.
++    """
++    reference._require_open()
++    if model.hg_g != reference.g or model.incident_cosine != float(reference.condition[1]):
++        raise ValueError("model HG g / incidence does not match the supplied Rainbow record")
++    if type(batch_size) is not int or batch_size < 1:
++        raise ValueError("evaluation batch_size must be a positive integer")
++    directions = torch.as_tensor(points[0], device=model.device, dtype=model.geometry_dtype)
++    teacher = torch.as_tensor(points[1], device=model.device, dtype=torch.float64).detach()
++    if directions.ndim != 2 or directions.shape[1] != 3 or teacher.shape != (len(directions),):
++        raise ValueError("uniform points require directions [N,3] and log_p [N]")
++    count = len(directions)
++    if count < 2:
++        raise ValueError("uniform log-shape evaluation requires at least two points")
++    log_q = torch.empty_like(teacher)
++    for start in range(0, count, batch_size):
++        outgoing = directions[start : start + batch_size]
++        values = model.log_prob(outgoing)
++        if values.shape != (len(outgoing),):
++            raise FloatingPointError("model log_prob has the wrong shape")
++        log_q[start : start + len(outgoing)] = values
++    error = log_q - teacher
++    squared = error.square()
++    # log|exp(error)-1|, stable for either sign and even error > log(DBL_MAX).
++    # An exact zero error has log absolute relative error = -inf, as required.
++    log_relative = torch.where(
++        error > 0,
++        error + torch.log(-torch.expm1(-error)),
++        torch.log(-torch.expm1(error)),
++    )
++    log_relative_rmse = 0.5 * (torch.logsumexp(2 * log_relative, dim=0) - math.log(count))
++    statistics = torch.stack((
++        squared.mean(), squared.std(correction=1) / math.sqrt(count), log_relative_rmse,
++    )).cpu().numpy()
++    log_mse, log_mse_se, log_relative_rms = statistics.tolist()
++    if not math.isfinite(log_mse) or not math.isfinite(log_mse_se):
++        raise FloatingPointError("nonfinite uniform log-PDF statistic; no points are omitted")
++    if math.isnan(log_relative_rms):
++        raise FloatingPointError("invalid uniform relative-error statistic")
++    try:
++        relative_rmse = math.exp(log_relative_rms)
++    except OverflowError:
++        relative_rmse = math.inf
++    relative_finite = math.isfinite(relative_rmse)
++    return {
++        "log_mse": log_mse,
++        "log_rmse": math.sqrt(log_mse),
++        "log_mse_standard_error": log_mse_se,
++        "relative_rmse": relative_rmse if relative_finite else None,
++        "relative_rmse_status": "finite" if relative_finite else "overflow_float64",
++        "uniform_sample_count": count,
++        "log_shape_measure": "uniform_solid_angle",
++        "log_base": "natural",
++    }
+diff --git a/src/phaseflow/monitoring.py b/src/phaseflow/monitoring.py
+index 345813c455981417cd007e0dd6bba2a26bbcc683..880131e51b05fcb71037d6f890df6874b1dc535b 100644
+--- a/src/phaseflow/monitoring.py
++++ b/src/phaseflow/monitoring.py
+@@ -26,8 +26,20 @@ def check_tensorboard() -> None:
+ 
+ def _scalar_values(entry: dict[str, Any]) -> dict[str, float]:
+     values = {}
++    log_objective = entry.get("objective") == "log_density" or "log_mse" in entry
++    if log_objective:
++        for key, tag in (
++            ("loss", "loss/total"),
++            ("nll", "nll/train_minibatch"),
++            ("log_mse", "log_mse/train_minibatch"),
++            ("beta", "objective/beta"),
++            ("nll_weight", "objective/nll_weight"),
++        ):
++            if key in entry:
++                values[tag] = entry[key]
++    elif "loss" in entry:
++        values["nll/train_minibatch"] = entry["loss"]
+     for key, tag in (
+-        ("loss", "nll/train_minibatch"),
+         ("gradient_norm_before_clip", "optimizer/gradient_norm_before_clip"),
+         ("learning_rate", "optimizer/learning_rate"),
+         ("examples_seen", "budget/examples_seen"),
+@@ -39,13 +51,25 @@ def _scalar_values(entry: dict[str, Any]) -> dict[str, float]:
+         if key not in entry:
+             continue
+         metric = entry[key]
+-        values[f"nll/{prefix}"] = metric["nll"]
+-        values[f"kl/{prefix}"] = metric["forward_kl_estimate"]
+-        values[f"kl_standard_error/{prefix}"] = metric["forward_kl_standard_error"]
+-        values[f"nll_improvement_over_hg/{prefix}"] = metric["nll_improvement_over_hg"]
++        for name, tag in (
++            ("nll", "nll"),
++            ("forward_kl_estimate", "kl"),
++            ("forward_kl_standard_error", "kl_standard_error"),
++            ("nll_improvement_over_hg", "nll_improvement_over_hg"),
++            ("log_mse", "log_mse"),
++            ("log_rmse", "log_rmse"),
++            ("relative_rmse", "relative_rmse"),
++            ("loss", "loss"),
++        ):
++            if name in metric and metric[name] is not None:
++                values[f"{tag}/{prefix}"] = metric[name]
+         if key == "validation":
+-            values["nll/hg_validation"] = metric["hg_nll"]
+-            values["kl/hg_validation"] = metric["hg_forward_kl_estimate"]
++            for name, tag in (
++                ("hg_nll", "nll"), ("hg_forward_kl_estimate", "kl"),
++                ("hg_log_mse", "log_mse"), ("hg_log_rmse", "log_rmse"),
++            ):
++                if name in metric:
++                    values[f"{tag}/hg_validation"] = metric[name]
+     return values
+ 
+ 
+@@ -170,13 +194,19 @@ def plot_training_history(
+     history = read_history(history_path)
+     output = Path(output)
+     output.parent.mkdir(parents=True, exist_ok=True)
+-    fig = Figure(figsize=(11, 8), layout="constrained")
++    log_objective = any(
++        entry.get("objective") == "log_density" or "log_mse" in entry
++        or "log_mse" in entry.get("validation", {})
++        for entry in history
++    )
++    fig = Figure(figsize=(11, 12 if log_objective else 8), layout="constrained")
+     FigureCanvasAgg(fig)
+-    axes = fig.subplots(2, 2)
++    axes = fig.subplots(3 if log_objective else 2, 2)
+     updates = [entry for entry in history if "loss" in entry]
+     if updates:
+         axes[0, 0].plot(
+-            [e["global_step"] for e in updates], [e["loss"] for e in updates],
++            [e["global_step"] for e in updates],
++            [e["nll"] if log_objective else e["loss"] for e in updates],
+             color="0.65", alpha=0.55, linewidth=0.6, label="Training minibatch (raw)",
+         )
+     for key, label, color in (
+@@ -188,25 +218,63 @@ def plot_training_history(
+             continue
+         steps = [e["global_step"] for e in entries]
+         axes[0, 0].plot(steps, [e[key]["nll"] for e in entries], color=color, label=label)
+-        axes[0, 1].errorbar(
+-            steps, [e[key]["forward_kl_estimate"] for e in entries],
+-            yerr=[1.96 * e[key]["forward_kl_standard_error"] for e in entries],
+-            color=color, marker=".", capsize=2, label=label,
+-        )
++        kl_entries = [
++            e for e in entries
++            if {"forward_kl_estimate", "forward_kl_standard_error"} <= e[key].keys()
++        ]
++        if kl_entries:
++            axes[0, 1].errorbar(
++                [e["global_step"] for e in kl_entries],
++                [e[key]["forward_kl_estimate"] for e in kl_entries],
++                yerr=[1.96 * e[key]["forward_kl_standard_error"] for e in kl_entries],
++                color=color, marker=".", capsize=2, label=label,
++            )
+     validation = [entry for entry in history if "validation" in entry]
+     if validation:
+         first = validation[0]["validation"]
+-        axes[0, 0].axhline(first["hg_nll"], color="#7570b3", ls="--", label="HG validation")
+-        axes[0, 1].axhline(
+-            first["hg_forward_kl_estimate"], color="#7570b3", ls="--", label="HG validation",
+-        )
++        if "hg_nll" in first:
++            axes[0, 0].axhline(first["hg_nll"], color="#7570b3", ls="--", label="HG validation")
++        if "hg_forward_kl_estimate" in first:
++            axes[0, 1].axhline(
++                first["hg_forward_kl_estimate"], color="#7570b3", ls="--", label="HG validation",
++            )
+     axes[0, 0].set_ylabel("NLL (nats / sample, density per sr)")
+     axes[0, 1].set_ylabel("Forward KL estimate (nats)")
+     axes[0, 1].set_title("Error bars: +/- 1.96 Monte Carlo SE")
+     axes[0, 1].axhline(0, color="0.5", linewidth=0.5)
++    if log_objective:
++        if updates:
++            steps = [e["global_step"] for e in updates]
++            axes[1, 0].plot(
++                steps, [e["loss"] for e in updates], color="0.3", alpha=0.65,
++                linewidth=0.6, label="Total minibatch objective",
++            )
++            if all({"beta", "nll_weight", "nll", "log_mse"} <= e.keys() for e in updates):
++                axes[1, 0].plot(
++                    steps, [e["nll_weight"] * e["nll"] for e in updates],
++                    alpha=0.6, linewidth=0.6, label="Weighted NLL term",
++                )
++                axes[1, 0].plot(
++                    steps, [e["beta"] * e["log_mse"] for e in updates],
++                    alpha=0.6, linewidth=0.6, label="Weighted log MSE term",
++                )
++        axes[1, 0].set_ylabel("Composite objective (not NLL)")
++        for key, label, color in (
++            ("train_monitor", "Fixed training subset", "#1f77b4"),
++            ("validation", "Independent spherical-uniform validation", "#d95f02"),
++        ):
++            entries = [e for e in history if "log_mse" in e.get(key, {})]
++            if entries:
++                axes[1, 1].plot(
++                    [e["global_step"] for e in entries],
++                    [e[key].get("log_rmse", e[key]["log_mse"] ** 0.5) for e in entries],
++                    color=color, label=label,
++                )
++        axes[1, 1].set_ylabel("Solid-angle log PDF RMSE (nats)")
++        axes[1, 1].set_title("Uniform-sphere measure; no density floor")
+     for key, ax, label in (
+-        ("gradient_norm_before_clip", axes[1, 0], "Gradient norm before clipping"),
+-        ("learning_rate", axes[1, 1], "Learning rate"),
++        ("gradient_norm_before_clip", axes[-1, 0], "Gradient norm before clipping"),
++        ("learning_rate", axes[-1, 1], "Learning rate"),
+     ):
+         entries = [entry for entry in history if key in entry]
+         if entries:
+@@ -217,12 +285,19 @@ def plot_training_history(
+         ax.grid(alpha=0.2)
+         if ax.get_legend_handles_labels()[0]:
+             ax.legend(fontsize=8)
+-    fig.suptitle("Single CDF training history")
++    fig.suptitle("Single CDF log-density training history" if log_objective else (
++        "Single CDF training history"
++    ))
+     fig.savefig(output, dpi=dpi)
+     fig.clear()
+-    return {
++    result = {
+         "history": str(Path(history_path).resolve()), "output": str(output.resolve()),
+         "last_step": history[-1]["global_step"], "events": len(history),
+         "loss_axis": "linear; no clipping or smoothing",
+         "error_bars": "1.96 Monte Carlo SE, not variability across training seeds",
+     }
++    if log_objective:
++        result["objective"] = "log_density"
++        result["loss_components"] = ["nll", "log_mse", "total_composite_objective"]
++        result["log_error_measure"] = "uniform_solid_angle; natural logarithms"
++    return result
+diff --git a/src/phaseflow/plotting.py b/src/phaseflow/plotting.py
+index 3b225ca7684edef91c8ef44740c29528b108598b..7990500380ea8e47e0589c1298c8f092dbafa1c1 100644
+--- a/src/phaseflow/plotting.py
++++ b/src/phaseflow/plotting.py
+@@ -342,6 +342,7 @@ def plot_rainbow_comparison(
+     checkpoint = None
+     training_scatter = None
+     checkpoint_step = None
++    scatter_components = None
+     if scatter_mode == "training":
+         from .training_scatter import resolve_training_scatter
+ 
+@@ -350,6 +351,7 @@ def plot_rainbow_comparison(
+         )
+         scatter_phi = training_scatter.source_phi_degrees
+         scatter_theta = training_scatter.theta_degrees
++        scatter_components = training_scatter.components
+         scatter_metadata = {"mode": "training", **training_scatter.provenance}
+         checkpoint = scatter_metadata["plotted_checkpoint"]
+         checkpoint_step = checkpoint["global_step"]
+@@ -358,6 +360,8 @@ def plot_rainbow_comparison(
+         if checkpoint["kind"] == "inference":
+             selected_step = checkpoint_step
+         scatter_title = f"Fixed training pool (N = {scatter_metadata['sample_count']:,})"
++        if scatter_components is not None and np.any(scatter_components == 1):
++            scatter_title = f"Mixed training pool (N = {scatter_metadata['sample_count']:,})"
+     else:
+         scatter_phi, scatter_theta = cdf_scatter_coordinates(
+             reference, samples=config.cdf_samples, seed=config.seed
+@@ -402,7 +406,17 @@ def plot_rainbow_comparison(
+     elif training_scatter is not None and checkpoint["kind"] == "training":
+         heading += f"\nTraining checkpoint (step {checkpoint_step})"
+     elif selected_step is not None:
+-        heading += f"\nValidation-selected model (step {selected_step})"
++        metric = checkpoint.get("selection_metric") if checkpoint is not None else None
++        if metric is not None:
++            metric_label = {"nll": "NLL", "log_rmse": "log RMSE"}[metric]
++            heading += f"\nValidation {metric_label}-selected model (step {selected_step})"
++        else:
++            heading += f"\nValidation-selected model (step {selected_step})"
++    mixed_scatter = scatter_components is not None and np.any(scatter_components == 1)
++    chart_note = _CHART_NOTE if not mixed_scatter else (
++        "Equal angular scaling; this chart is not equal area. "
++        "Colored CDF and spherical-uniform groups form training queries from r."
++    )
+     panel_titles = (
+         "Reference PDF from the stored CDF",
+         scatter_title,
+@@ -411,15 +425,29 @@ def plot_rainbow_comparison(
+ 
+     def draw_panel(ax: Axes, panel: int):
+         if panel == 1:
+-            artist = ax.scatter(
+-                scatter_phi,
+-                scatter_theta,
+-                s=1.3,
+-                c="#172a3a",
+-                alpha=0.3,
+-                linewidths=0,
+-                rasterized=True,
+-            )
++            if scatter_components is None:
++                artist = ax.scatter(
++                    scatter_phi,
++                    scatter_theta,
++                    s=1.3,
++                    c="#172a3a",
++                    alpha=0.3,
++                    linewidths=0,
++                    rasterized=True,
++                )
++            else:
++                for code, label, color in (
++                    (0, "CDF", "#172a3a"), (1, "Spherical uniform", "#d95f02"),
++                ):
++                    mask = scatter_components == code
++                    count = int(np.count_nonzero(mask))
++                    if count:
++                        artist = ax.scatter(
++                            scatter_phi[mask], scatter_theta[mask], s=1.3,
++                            c=color, alpha=0.3, linewidths=0, rasterized=True,
++                            label=f"{label} (N = {count:,})",
++                        )
++                ax.legend(loc="lower right", fontsize=8, markerscale=3, framealpha=0.9)
+             ax.set_facecolor("#fafbfd")
+         else:
+             values = grid.reference_pdf if panel == 0 else grid.nf_pdf
+@@ -443,14 +471,17 @@ def plot_rainbow_comparison(
+     if training_scatter is not None:
+         array_path = output / "training_scatter.npz"
+         temporary_array = output / "training_scatter.npz.tmp"
++        saved_arrays = {
++            "directions_nf": training_scatter.directions_nf,
++            "source_phi_degrees": scatter_phi,
++            "theta_degrees": scatter_theta,
++            "provenance_json": np.array(json.dumps(scatter_metadata, allow_nan=False)),
++        }
++        if scatter_components is not None:
++            saved_arrays["components"] = scatter_components
++            saved_arrays["teacher_log_pdf"] = training_scatter.teacher_log_pdf
+         with temporary_array.open("wb") as stream:
+-            np.savez_compressed(
+-                stream,
+-                directions_nf=training_scatter.directions_nf,
+-                source_phi_degrees=scatter_phi,
+-                theta_degrees=scatter_theta,
+-                provenance_json=np.array(json.dumps(scatter_metadata, allow_nan=False)),
+-            )
++            np.savez_compressed(stream, **saved_arrays)
+         temporary_array.replace(array_path)
+         arrays["training_scatter"] = {
+             "path": array_path.name,
+@@ -480,7 +511,7 @@ def plot_rainbow_comparison(
+                 frameon=False,
+                 fontsize=10,
+             )
+-        fig.text(0.5, 0.038, _CHART_NOTE, ha="center", fontsize=9)
++        fig.text(0.5, 0.038, chart_note, ha="center", fontsize=9)
+         files[stem] = _save_figure(
+             fig, output / f"{stem}.png", dpi=config.dpi, write_pdf=config.write_pdf
+         )
+@@ -501,7 +532,7 @@ def plot_rainbow_comparison(
+     colorbar_axis = fig.add_axes([0.26, 0.12, 0.48, 0.025])
+     fig.colorbar(image_artist, cax=colorbar_axis, orientation="horizontal", label=_DENSITY_LABEL)
+     fig.suptitle(heading, x=0.5, y=0.925, fontsize=16)
+-    fig.text(0.5, 0.021, _CHART_NOTE, ha="center", fontsize=11)
++    fig.text(0.5, 0.021, chart_note, ha="center", fontsize=11)
+     if np.any(grid.reference_pdf == 0):
+         fig.legend(
+             handles=[Patch(facecolor=_ZERO_COLOR, label="Zero reference PDF")],
+@@ -516,7 +547,7 @@ def plot_rainbow_comparison(
+ 
+     config_value = getattr(model, "config", None)
+     manifest: dict[str, Any] = {
+-        "schema": PLOT_SCHEMA,
++        "schema": "phaseflow.rainbow_plots.v3" if scatter_components is not None else PLOT_SCHEMA,
+         "source_kind": "synthetic_fixture" if synthetic else "rainbow_cdf_record",
+         "title": heading,
+         "configuration": config.to_dict(),
+@@ -553,7 +584,10 @@ def plot_rainbow_comparison(
+             "equal_area": False,
+             "density_measure": "solid_angle_sr",
+             "source_to_nf": reference.source_to_nf.tolist(),
+-            "scatter_chart_density": "p_per_sr * sin(theta); not p_per_sr alone",
++            "scatter_chart_density": (
++                "r_per_sr * sin(theta); mixed training queries, not CDF-distributed samples"
++                if mixed_scatter else "p_per_sr * sin(theta); not p_per_sr alone"
++            ),
+         },
+         "grid": {
+             "resolution": "full_native_cdf_cells_no_angular_downsampling",
+@@ -596,6 +630,9 @@ def plot_rainbow_comparison(
+         "files": files,
+         "arrays": arrays,
+     }
++    if scatter_components is not None:
++        manifest["objective"] = scatter_metadata["objective"]
++        manifest["selection_metric"] = checkpoint.get("selection_metric")
+     temporary = output / "plots.json.tmp"
+     temporary.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+     temporary.replace(output / "plots.json")
+diff --git a/src/phaseflow/sampling_audit.py b/src/phaseflow/sampling_audit.py
+index 15a49005b2668c8e3cbe4976a70331b110309527..4d50ec0ce1e2c37a62f54fd7f31ab49007d2069e 100644
+--- a/src/phaseflow/sampling_audit.py
++++ b/src/phaseflow/sampling_audit.py
+@@ -171,7 +171,14 @@ audit to retry without treating incomplete output as a completed measurement.
+     run, output = Path(run_directory).resolve(), Path(output_directory).resolve()
+     if output == run or run.is_relative_to(output) or output.is_relative_to(run):
+         raise ValueError("Audit output must be a separate directory with a disjoint tree from the run")
+-    model, _ = load_single_checkpoint(run / "best.pt", device=device)
++    model, checkpoint = load_single_checkpoint(run / "best.pt", device=device)
++    if checkpoint["checkpoint_version"] == 5:
++        raise ValueError(
++            "The legacy sampling audit requires a version-4 CDF-only pool. "
++            "Version-5 pools have geometry-cast teacher labels and explicit component "
++            "identities; use their component-labelled training plots and objective-aware "
++            "angular diagnostics. No CDF-only binomial test is applied to a mixed pool."
++        )
+     pool = resolve_training_scatter(model, reference, run / "best.pt", run_directory=run)
+     count, data_seed = pool.provenance["sample_count"], pool.provenance["data_seed"]
+     points = _points(reference, count, data_seed, "train")
+diff --git a/src/phaseflow/single_condition.py b/src/phaseflow/single_condition.py
+index bbae10c94577291443ae5e6b120862c525b9b669..8f28961ff155d0bbc9d24ab7bdd313478186082c 100644
+--- a/src/phaseflow/single_condition.py
++++ b/src/phaseflow/single_condition.py
+@@ -20,6 +20,14 @@ import torch
+ import zuko
+ 
+ from . import __version__
++from .log_objective import (
++    LogObjectiveConfig,
++    evaluate_log_shape,
++    loss_terms,
++    make_training_pool,
++    make_uniform_points,
++    verify_positive_teacher,
++)
+ from .monitoring import TrainingMonitor, check_tensorboard, plot_training_history
+ from .rainbow import RainbowReference
+ from .sphere_model import SingleConditionSphereFlow, SphereFlowConfig
+@@ -38,7 +46,8 @@ if TYPE_CHECKING:
+ 
+ FAMILY = "rainbow_single_condition"
+ CHECKPOINT_VERSION = 4
+-READABLE_CHECKPOINT_VERSIONS = (2, 3, 4)
++LOG_CHECKPOINT_VERSION = 5
++READABLE_CHECKPOINT_VERSIONS = (2, 3, 4, 5)
+ _STREAMS = {"train": 0, "validation": 1, "minibatches": 2, "test": 3, "proposal": 4}
+ 
+ 
+@@ -210,6 +219,7 @@ def _code_hash() -> str:
+         "geometry.py",
+         "training.py",
+         "monitoring.py",
++        "log_objective.py",
+     ):
+         digest.update(name.encode("ascii"))
+         digest.update((root / name).read_bytes())
+@@ -359,6 +369,7 @@ def evaluate_single_condition(
+     seed: int = 2026,
+     batch_size: int = 4096,
+     proposal_samples: int | None = None,
++    uniform_samples: int = 0,
+ ) -> dict[str, Any]:
+     """Independent same-condition likelihood/KL and proposal-weight diagnostics.
+ 
+@@ -375,6 +386,10 @@ def evaluate_single_condition(
+         proposal_samples = samples
+     if type(proposal_samples) is not int or (proposal_samples != 0 and proposal_samples < 2):
+         raise ValueError("proposal_samples must be zero or at least two")
++    if type(uniform_samples) is not int or (uniform_samples != 0 and uniform_samples < 2):
++        raise ValueError("uniform_samples must be zero or at least two")
++    if uniform_samples:
++        verify_positive_teacher(reference)
+     _check_model_reference(model, reference)
+     previous_mode = model.training
+     previous_validation = model.validate_args
+@@ -404,6 +419,12 @@ def evaluate_single_condition(
+             },
+             proposal=_proposal_metrics(model, reference, proposal_samples, seed, batch_size),
+         )
++        if uniform_samples:
++            uniform_points = make_uniform_points(
++                reference, uniform_samples, seed, "test", model.geometry_dtype
++            )
++            result.update(evaluate_log_shape(model, reference, uniform_points, batch_size))
++            result["uniform_test_points_sha256"] = _array_hash(*uniform_points)
+         return result
+     finally:
+         model.train(previous_mode)
+@@ -417,7 +438,7 @@ def read_single_checkpoint(path: str | Path) -> dict[str, Any]:
+         or payload.get("checkpoint_version") not in READABLE_CHECKPOINT_VERSIONS
+         or (payload.get("family") != FAMILY)
+     ):
+-        raise ValueError("not a supported version-2/3/4 Rainbow single-condition checkpoint")
++        raise ValueError("not a supported version-2/3/4/5 Rainbow single-condition checkpoint")
+     required = {
+         "kind",
+         "model_config",
+@@ -430,6 +451,10 @@ def read_single_checkpoint(path: str | Path) -> dict[str, Any]:
+     }
+     if not required <= payload.keys() or payload["kind"] not in ("training", "inference"):
+         raise ValueError("malformed Rainbow single-condition checkpoint")
++    if payload["checkpoint_version"] == LOG_CHECKPOINT_VERSION:
++        LogObjectiveConfig.from_dict(payload.get("objective_config"))
++        if payload.get("selection_metric") not in ("nll", "log_rmse"):
++            raise ValueError("version-5 checkpoint requires an explicit selection metric")
+     return payload
+ 
+ 
+@@ -465,6 +490,39 @@ class SingleTrainResult:
+     complete: bool
+ 
+ 
++def _validate_selections(
++    selections: dict[str, Any], history: list[dict[str, Any]], step: int,
++    objective: LogObjectiveConfig, best_step: int, best_validation: dict[str, Any],
++    best_state: dict[str, Any],
++) -> None:
++    """Reject inconsistent dual-selection metadata before a resumed run writes."""
++    from .training_scatter import _state_equal
++
++    events = [entry for entry in history if "validation" in entry]
++    if not events or set(selections) != {"nll", "log_rmse"}:
++        raise ValueError("invalid version-5 selection history")
++    for metric in ("nll", "log_rmse"):
++        if any(
++            type(entry.get("global_step")) is not int
++            or not 0 <= entry["global_step"] <= step
++            or not isinstance(entry["validation"].get(metric), (float, int))
++            or not math.isfinite(entry["validation"][metric])
++            for entry in events
++        ):
++            raise ValueError("invalid validation event in version-5 selection history")
++        chosen = min(events, key=lambda entry: entry["validation"][metric])
++        saved = selections[metric]
++        if not isinstance(saved, dict) or set(saved) != {"step", "validation", "model_state"}:
++            raise ValueError("malformed version-5 selection state")
++        if (saved["step"] != chosen["global_step"]
++                or saved["validation"] != chosen["validation"]):
++            raise ValueError("saved selection does not match first minimum validation history")
++    primary = selections[objective.selection_metric]
++    if (best_step != primary["step"] or best_validation != primary["validation"]
++            or not _state_equal(best_state, primary["model_state"])):
++        raise ValueError("primary best checkpoint differs from its explicit selection state")
++
++
+ def train_single_condition(
+     reference: RainbowReference,
+     model_config: SphereFlowConfig,
+@@ -476,10 +534,14 @@ def train_single_condition(
+     callback: Callable[[dict[str, Any]], None] | None = None,
+     make_plots: bool = True,
+     plot_config: RainbowPlotConfig | None = None,
++    objective_config: LogObjectiveConfig | None = None,
+ ) -> SingleTrainResult:
+-    """Train a fixed point pool; choose the best checkpoint only by validation NLL.
++    """Train a fixed pool with an explicitly versioned density objective.
+ 
+     ``checkpoint.pt`` resumes optimization; ``best.pt`` is inference-only.
++    Without ``objective_config``, the legacy NLL/version-4 contract is unchanged.
++    The optional version-5 workflow supervises log density under solid angle,
++    retains independent target NLL/KL validation, and saves both selections.
+     The final independent test set is evaluated only when the planned steps are
+     complete. A controlled interruption does not add checkpoint-selection events.
+     """
+@@ -489,12 +551,18 @@ def train_single_condition(
+         raise ValueError("max_steps_this_run must be a nonnegative integer")
+     if type(make_plots) is not bool:
+         raise ValueError("make_plots must be boolean")
++    if objective_config is not None and not isinstance(objective_config, LogObjectiveConfig):
++        raise ValueError("objective_config must be a LogObjectiveConfig or None")
++    objective = objective_config
++    checkpoint_version = CHECKPOINT_VERSION if objective is None else LOG_CHECKPOINT_VERSION
+     from .plotting import RainbowPlotConfig
+ 
+     plotting = plot_config if plot_config is not None else RainbowPlotConfig()
+     if not isinstance(plotting, RainbowPlotConfig):
+         raise ValueError("plot_config must be a RainbowPlotConfig")
+     cfg = training_config
++    if objective is not None:
++        objective.validate_training_count(cfg.train_samples)
+     if cfg.tensorboard:
+         check_tensorboard()  # Fail before expensive data preparation or optimization.
+     output = Path(output_directory)
+@@ -517,10 +585,10 @@ def train_single_condition(
+     if previous is not None:
+         if previous["kind"] != "training":
+             raise ValueError("best.pt is inference-only; resume from checkpoint.pt")
+-        if previous["checkpoint_version"] != CHECKPOINT_VERSION:
++        if previous["checkpoint_version"] != checkpoint_version:
+             raise ValueError(
+-                "exact resume requires a version-4 checkpoint from this implementation; "
+-                "version-2/3 checkpoints remain readable for evaluation/plotting"
++                f"exact resume requires a version-{checkpoint_version} checkpoint from this "
++                "objective and implementation; older checkpoints remain readable for evaluation"
+             )
+         required = {
+             "training_config",
+@@ -537,6 +605,12 @@ def train_single_condition(
+         }
+         if not required <= previous.keys():
+             raise ValueError("training checkpoint is missing resume state")
++        if objective is not None and (
++            previous.get("objective_config") != objective.to_dict()
++            or previous.get("selection_metric") != objective.selection_metric
++            or not isinstance(previous.get("selections"), dict)
++        ):
++            raise ValueError("exact resume requires the original objective and selection state")
+         if previous["model_config"] != model_config.to_dict() or (
+             previous["training_config"] != cfg.to_dict()
+         ):
+@@ -573,7 +647,20 @@ def train_single_condition(
+         validate_args=False,
+     )
+     data_seed = cfg.seed if cfg.data_seed is None else cfg.data_seed
+-    training_points = _points(reference, cfg.train_samples, data_seed, "train")
++    pool = None
++    uniform_validation = None
++    if objective is None:
++        training_points = _points(reference, cfg.train_samples, data_seed, "train")
++    else:
++        verify_positive_teacher(reference)
++        pool = make_training_pool(
++            reference, cfg.train_samples, data_seed, objective, model.geometry_dtype
++        )
++        training_points = (pool.directions, pool.log_p)
++        uniform_validation = make_uniform_points(
++            reference, objective.validation_uniform_samples, data_seed,
++            "validation", model.geometry_dtype,
++        )
+     validation_points = _points(reference, cfg.validation_samples, data_seed, "validation")
+     split = {
+         "scope": "one_fixed_condition; independent point streams; no condition holdout",
+@@ -593,6 +680,13 @@ def train_single_condition(
+         "training_points_sha256": _array_hash(*training_points),
+         "validation_points_sha256": _array_hash(*validation_points),
+     }
++    if pool is not None:
++        split["training_pool"] = pool.provenance
++        split["training_points_sha256"] = _array_hash(
++            pool.directions, pool.log_p, pool.components
++        )
++        split["validation_uniform_samples"] = objective.validation_uniform_samples
++        split["uniform_validation_points_sha256"] = _array_hash(*uniform_validation)
+     if previous is not None and previous["sample_split"] != split:
+         raise ValueError("regenerated training/validation points differ from checkpoint")
+     # Retain one fixed pool on the device; the optimization loop has no NumPy
+@@ -601,12 +695,65 @@ def train_single_condition(
+         training_points[0], dtype=model.geometry_dtype, device=device
+     )
+     monitor_count = min(cfg.train_samples, cfg.train_monitor_samples)
++    if objective is not None and objective.sampling == "target_uniform":
++        # The pool interleaves its two source strata. Keep the prefix balanced.
++        monitor_count = max(2, monitor_count - monitor_count % 2)
+     training_monitor = (
+         training_directions[:monitor_count],
+         torch.as_tensor(training_points[1][:monitor_count], dtype=torch.float64, device=device),
+     )
+     validation_device = _device_points(validation_points, device, model.geometry_dtype)
++    training_labels = None
++    uniform_validation_device = None
++    if objective is not None:
++        # No FP64 loss arithmetic or per-minibatch CPU copies: cast fixed teacher
++        # labels once, while the validation reductions retain reference precision.
++        training_labels = torch.as_tensor(training_points[1], dtype=model.dtype, device=device)
++        uniform_validation_device = _device_points(
++            uniform_validation, device, model.geometry_dtype
++        )
+     del training_points, validation_points
++    del pool, uniform_validation
++
++    def validation_metrics() -> dict[str, Any]:
++        values = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
++        if objective is not None:
++            values.update(evaluate_log_shape(
++                model, reference, uniform_validation_device, cfg.eval_batch_size
++            ))
++        return values
++
++    @torch.no_grad()
++    def monitor_metrics() -> dict[str, Any]:
++        if objective is None:
++            return _likelihood_metrics(model, reference, training_monitor, cfg.eval_batch_size)
++        # This is a weighted mixed-pool monitor, not target-distributed NLL/KL.
++        accumulated = torch.zeros(3, dtype=torch.float64, device=device)
++        directions, labels = training_monitor
++        for start in range(0, monitor_count, cfg.eval_batch_size):
++            end = min(start + cfg.eval_batch_size, monitor_count)
++            values = loss_terms(
++                model.log_prob(directions[start:end]), labels[start:end], objective,
++                report_components=objective.sampling == "target_uniform",
++            )
++            accumulated += torch.stack([
++                values["loss"], values["nll"], values["log_mse"]
++            ]).to(torch.float64) * (end - start)
++        values = (accumulated / monitor_count).cpu().tolist()
++        if not all(math.isfinite(value) for value in values):
++            raise FloatingPointError("nonfinite fixed-pool objective monitor")
++        report = dict(zip(("loss", "nll", "log_mse"), values, strict=True)) | {
++            "sample_count": monitor_count,
++            "objective": "log_density",
++            "sampling": objective.sampling,
++            "components_measured": objective.sampling == "target_uniform",
++            "beta": objective.beta,
++            "nll_weight": objective.nll_weight,
++            "scope": "weighted_fixed_training_pool_subset_not_independent_validation",
++        }
++        if objective.sampling == "target":
++            report.pop("log_mse")
++        return report
+     parameters = list(model.parameters())
+     optimizer = torch.optim.Adam(
+         parameters, lr=cfg.learning_rate, foreach=device.type == "cuda"
+@@ -615,17 +762,22 @@ def train_single_condition(
+     history: list[dict[str, Any]] = []
+     step = best_step = 0
+     best_state: dict[str, Any]
++    selections: dict[str, dict[str, Any]] = {}
+     if previous is None:
+-        latest = _likelihood_metrics(model, reference, validation_device, cfg.eval_batch_size)
++        latest = validation_metrics()
+         best_validation = copy.deepcopy(latest)
+         best_state = copy.deepcopy(model.state_dict())
+         history.append({
+             "event": "initial", "global_step": 0, "examples_seen": 0,
+             "effective_passes": 0.0, "validation": latest,
+-            "train_monitor": _likelihood_metrics(
+-                model, reference, training_monitor, cfg.eval_batch_size
+-            ),
++            "train_monitor": monitor_metrics(),
+         })
++        if objective is not None:
++            selections = {
++                metric: {"step": 0, "validation": copy.deepcopy(latest),
++                         "model_state": copy.deepcopy(best_state)}
++                for metric in ("nll", "log_rmse")
++            }
+     else:
+         model.load_state_dict(previous["model_state"], strict=True)
+         _check_model_reference(model, reference)
+@@ -637,16 +789,21 @@ def train_single_condition(
+         best_state = copy.deepcopy(previous["best_state"])
+         best_validation = copy.deepcopy(previous["best_validation"])
+         latest = copy.deepcopy(previous["latest_validation"])
++        if objective is not None:
++            selections = copy.deepcopy(previous["selections"])
++            _validate_selections(selections, history, step, objective, best_step,
++                                 best_validation, best_state)
+     output.mkdir(parents=True, exist_ok=True)
+     checkpoint_path, best_path = output / "checkpoint.pt", output / "best.pt"
+     atomic_json(
+         output / "config.json",
+         {
+-            "schema_version": 2,
++            "schema_version": 2 if objective is None else 3,
+             "family": FAMILY,
+             "model": model_config.to_dict(),
+             "training": cfg.to_dict(),
+             "visualization": {"enabled": make_plots, **plotting.to_dict()},
++            **({"objective": objective.to_dict()} if objective is not None else {}),
+         },
+     )
+     atomic_json(output / "data_summary.json", reference.summary())
+@@ -654,7 +811,7 @@ def train_single_condition(
+ 
+     def common() -> dict[str, Any]:
+         return {
+-            "checkpoint_version": CHECKPOINT_VERSION,
++            "checkpoint_version": checkpoint_version,
+             "family": FAMILY,
+             "model_config": model_config.to_dict(),
+             "dtype": cfg.dtype,
+@@ -663,6 +820,8 @@ def train_single_condition(
+             "dataset_fingerprint": fingerprint,
+             "code_fingerprint": code_fingerprint,
+             "runtime": runtime,
++            **({"objective_config": objective.to_dict(),
++                "selection_metric": objective.selection_metric} if objective is not None else {}),
+         }
+ 
+     def save() -> None:
+@@ -681,6 +840,7 @@ def train_single_condition(
+             "best_step": best_step,
+             "best_validation": best_validation,
+             "latest_validation": latest,
++            **({"selections": selections} if objective is not None else {}),
+         }
+         _atomic_torch_save(checkpoint_path, payload)
+         _atomic_torch_save(
+@@ -693,9 +853,18 @@ def train_single_condition(
+                 "validation": best_validation,
+             },
+         )
++        if objective is not None:
++            for metric, selection in selections.items():
++                suffix = "log" if metric == "log_rmse" else "nll"
++                _atomic_torch_save(output / f"best_by_{suffix}.pt", {
++                    **common(), "kind": "inference", "selection_metric": metric,
++                    "global_step": selection["step"],
++                    "model_state": selection["model_state"],
++                    "validation": selection["validation"],
++                })
+         atomic_json(output / "history.json", history)
+ 
+-    pending: list[tuple[int, torch.Tensor, torch.Tensor]] = []
++    pending: list[tuple[int, torch.Tensor]] = []
+ 
+     def flush_updates() -> None:
+         """Check before publication; synchronize a block, not every parameter.
+@@ -705,9 +874,7 @@ def train_single_condition(
+         """
+         if not pending:
+             return
+-        summaries = torch.stack(
+-            [torch.stack((loss, norm.to(loss.dtype))) for _, loss, norm in pending]
+-        ).cpu().numpy()
++        summaries = torch.stack([values for _, values in pending]).cpu().numpy()
+         invalid = ~np.isfinite(summaries).all(axis=-1)
+         if invalid.any():
+             failed_step = pending[int(np.flatnonzero(invalid)[0])][0]
+@@ -721,8 +888,8 @@ def train_single_condition(
+                 f"optimizer produced nonfinite parameters by update {step}; "
+                 "the last valid checkpoint was retained"
+             )
+-        history.extend(
+-            {
++        for (update, _), values in zip(pending, summaries, strict=True):
++            entry = {
+                 "global_step": update,
+                 "loss": float(values[0]),
+                 "gradient_norm_before_clip": float(values[1]),
+@@ -730,8 +897,14 @@ def train_single_condition(
+                 "examples_seen": update * cfg.batch_size,
+                 "effective_passes": update * cfg.batch_size / cfg.train_samples,
+             }
+-            for (update, _, _), values in zip(pending, summaries, strict=True)
+-        )
++            if objective is not None:
++                entry.update(nll=float(values[2]),
++                             beta=objective.beta, nll_weight=objective.nll_weight,
++                             objective="log_density", sampling=objective.sampling,
++                             components_measured=objective.sampling == "target_uniform")
++                if objective.sampling == "target_uniform":
++                    entry["log_mse"] = float(values[3])
++            history.append(entry)
+         pending.clear()
+ 
+     if previous is None or checkpoint_path.resolve() != Path(resume).resolve():
+@@ -747,6 +920,7 @@ def train_single_condition(
+             "model": model_config.to_dict(), "training": cfg.to_dict(),
+             "physics": physics, "dataset_fingerprint": fingerprint,
+             "train_monitor_subset": "first min(train_monitor_samples, train_samples) fixed points",
++            **({"objective": objective.to_dict()} if objective is not None else {}),
+         },
+     ) as monitor:
+         published = len(history)
+@@ -759,7 +933,14 @@ def train_single_condition(
+             log_q = model.log_prob(outgoing)
+             if log_q.shape != (cfg.batch_size,):
+                 raise FloatingPointError("malformed training log_prob")
+-            loss = -log_q.mean()  # Target-distributed samples have unit loss weight.
++            if objective is None:
++                loss = -log_q.mean()  # Target-distributed samples have unit loss weight.
++            else:
++                terms = loss_terms(
++                    log_q, training_labels[indices], objective,
++                    report_components=objective.sampling == "target_uniform",
++                )
++                loss = terms["loss"]
+             loss.backward()
+             gradient_norm = torch.nn.utils.clip_grad_norm_(
+                 parameters,
+@@ -769,7 +950,10 @@ def train_single_condition(
+             )
+             optimizer.step()
+             step += 1
+-            pending.append((step, loss.detach(), gradient_norm.detach()))
++            scalars = [loss.detach(), gradient_norm.detach().to(loss.dtype)]
++            if objective is not None:
++                scalars.extend([terms["nll"].detach(), terms["log_mse"].detach()])
++            pending.append((step, torch.stack(scalars)))
+             evaluation_due = step % cfg.eval_every == 0 or step == cfg.steps
+             checkpoint_due = step % cfg.checkpoint_every == 0 or step == cfg.steps
+             logging_due = step % cfg.log_every == 0
+@@ -778,14 +962,20 @@ def train_single_condition(
+                 flush_updates()
+             if evaluation_due:
+                 entry = history[-1]
+-                latest = _likelihood_metrics(
+-                    model, reference, validation_device, cfg.eval_batch_size
+-                )
++                latest = validation_metrics()
+                 entry["validation"] = latest
+-                entry["train_monitor"] = _likelihood_metrics(
+-                    model, reference, training_monitor, cfg.eval_batch_size
+-                )
+-                if latest["nll"] < best_validation["nll"]:
++                entry["train_monitor"] = monitor_metrics()
++                if objective is not None:
++                    for metric in selections:
++                        if latest[metric] < selections[metric]["validation"][metric]:
++                            selections[metric] = {
++                                "step": step, "validation": copy.deepcopy(latest),
++                                "model_state": copy.deepcopy(model.state_dict()),
++                            }
++                    primary = selections[objective.selection_metric]
++                    best_step, best_validation = primary["step"], primary["validation"]
++                    best_state = primary["model_state"]
++                elif latest["nll"] < best_validation["nll"]:
+                     best_step, best_validation = step, copy.deepcopy(latest)
+                     best_state = copy.deepcopy(model.state_dict())
+             if boundary:
+@@ -818,6 +1008,7 @@ def train_single_condition(
+             seed=data_seed,
+             batch_size=cfg.eval_batch_size,
+             proposal_samples=cfg.proposal_samples,
++            uniform_samples=0 if objective is None else objective.test_uniform_samples,
+         )
+         final_test["scope"] = "final_independent_test_points_same_condition"
+     metrics = {
+@@ -833,6 +1024,13 @@ def train_single_condition(
+         "dataset_fingerprint": fingerprint,
+         "generalization_scope": "same condition only; no claim about unseen wavelength/incidence",
+     }
++    if objective is not None:
++        metrics.update(
++            objective=objective.to_dict(), selection_metric=objective.selection_metric,
++            selection=f"first minimum validation {objective.selection_metric} at scheduled evaluations",
++            selections={metric: {"step": value["step"], "validation": value["validation"]}
++                        for metric, value in selections.items()},
++        )
+     atomic_json(output / "metrics.json", metrics)
+     if make_plots and step == cfg.steps:
+         from .plotting import plot_rainbow_comparison
+diff --git a/src/phaseflow/training_scatter.py b/src/phaseflow/training_scatter.py
+index ab3fbd48254ac60af7f1e3073f263532486266cd..203949e30014e6d2a12c6dc5308f445f2e4bd83e 100644
+--- a/src/phaseflow/training_scatter.py
++++ b/src/phaseflow/training_scatter.py
+@@ -5,6 +5,10 @@ not the device tensor itself. Regeneration is accepted only when that complete
+ pool hash agrees. Directions are then cast exactly as in the saved training
+ configuration. This is verified regeneration, not a claim to read archived GPU
+ memory. It neither changes training state nor requires the old runtime to run.
++
++Version-5 log-density runs additionally record component labels and the teacher
++log PDF evaluated at the actual dtype-cast points. Their raw and runtime pool
++identities are both checked before any point is displayed.
+ """
+ 
+ from __future__ import annotations
+@@ -41,6 +45,8 @@ class TrainingScatter:
+     source_phi_degrees: NDArray[np.float64]
+     theta_degrees: NDArray[np.float64]
+     provenance: dict[str, Any]
++    components: NDArray[np.uint8] | None = None
++    teacher_log_pdf: NDArray[np.float64] | None = None
+ 
+ 
+ def _file_hash(path: Path) -> str:
+@@ -86,7 +92,7 @@ def _state_equal(left: Any, right: Any) -> bool:
+ 
+ 
+ def _identity(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+-    return {
++    identity = {
+         "path": str(path),
+         "sha256": _file_hash(path),
+         "kind": payload["kind"],
+@@ -94,6 +100,9 @@ def _identity(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+         "global_step": payload["global_step"],
+         "code_fingerprint": payload["code_fingerprint"],
+     }
++    if payload["checkpoint_version"] == 5 and payload["kind"] == "inference":
++        identity["selection_metric"] = payload["selection_metric"]
++    return identity
+ 
+ 
+ def resolve_training_scatter(
+@@ -128,15 +137,30 @@ def resolve_training_scatter(
+             raise ValueError(f"Training scatter requires the saved checkpoint: {path}")
+     plotted = read_single_checkpoint(plotted_path)
+     training = plotted if plotted_path == training_path else read_single_checkpoint(training_path)
+-    if training["kind"] != "training" or training["checkpoint_version"] != 4:
+-        raise ValueError("Training scatter requires a version-4 training checkpoint.pt")
++    version = training["checkpoint_version"]
++    if training["kind"] != "training" or version not in (4, 5):
++        raise ValueError("Training scatter requires a version-4 or version-5 training checkpoint.pt")
+     required = {"training_config", "sample_split", "best_state", "best_step", "best_validation"}
+     if not required <= training.keys():
+         raise ValueError("Training checkpoint is missing fixed-pool or selection provenance")
+     config_path, split_path = run / "config.json", run / "sample_split.json"
+     saved_config, saved_split = _read_object(config_path), _read_object(split_path)
+-    if saved_config.get("schema_version") != 2 or saved_config.get("family") != FAMILY:
+-        raise ValueError("Training scatter requires a saved schema-2 single-condition config")
++    expected_schema = 3 if version == 5 else 2
++    if saved_config.get("schema_version") != expected_schema or saved_config.get("family") != FAMILY:
++        raise ValueError(
++            f"Training scatter requires a saved schema-{expected_schema} single-condition config"
++        )
++    objective = None
++    if version == 5:
++        from .log_objective import LogObjectiveConfig
++
++        if not {"objective_config", "selections"} <= training.keys():
++            raise ValueError("Log-density checkpoint is missing objective or selection provenance")
++        if saved_config.get("objective") != training["objective_config"] or (
++            plotted.get("objective_config") != training["objective_config"]
++        ):
++            raise ValueError("Saved log-density objective differs from the plotted checkpoint")
++        objective = LogObjectiveConfig.from_dict(training["objective_config"])
+     if saved_config.get("training") != training["training_config"]:
+         raise ValueError("Saved training configuration differs from checkpoint.pt")
+     if saved_split != training["sample_split"]:
+@@ -176,11 +200,25 @@ def resolve_training_scatter(
+     ):
+         raise ValueError("Invalid saved best checkpoint step")
+     if plotted["kind"] == "inference":
+-        if plotted["global_step"] != training["best_step"] or not _state_equal(
+-            plotted["model_state"], training["best_state"]
++        if version == 5:
++            selection_metric = plotted.get("selection_metric")
++            selection = training["selections"].get(selection_metric)
++            if selection_metric not in ("nll", "log_rmse") or not isinstance(selection, dict):
++                raise ValueError("Inference checkpoint has no matching recorded selection metric")
++            if not {"model_state", "step", "validation"} <= selection.keys():
++                raise ValueError("Recorded selection is missing state, step or validation")
++            best_state, best_step = selection["model_state"], selection["step"]
++            best_validation = selection["validation"]
++        else:
++            best_state, best_step = training["best_state"], training["best_step"]
++            best_validation = training["best_validation"]
++        if type(best_step) is not int or not 0 <= best_step <= training["global_step"]:
++            raise ValueError("Invalid saved selection checkpoint step")
++        if plotted["global_step"] != best_step or not _state_equal(
++            plotted["model_state"], best_state
+         ):
+             raise ValueError("Inference checkpoint differs from the recorded best state or step")
+-        if plotted.get("validation") != training["best_validation"]:
++        if plotted.get("validation") != best_validation:
+             raise ValueError("Inference checkpoint differs from the recorded best validation")
+         scope = "validation_selected_checkpoint"
+     else:
+@@ -204,8 +242,23 @@ def resolve_training_scatter(
+     recorded_hash = saved_split.get("training_points_sha256")
+     if not isinstance(recorded_hash, str) or len(recorded_hash) != 64:
+         raise ValueError("Saved training pool is missing its SHA-256 identity")
+-    directions, log_pdf = _points(reference, cfg.train_samples, data_seed, "train")
+-    regenerated_hash = _array_hash(directions, log_pdf)
++    components, teacher_log_pdf, pool_provenance = None, None, None
++    if version == 5:
++        from .log_objective import make_training_pool
++
++        pool = make_training_pool(
++            reference, cfg.train_samples, data_seed, objective,
++            geometry_dtype=model.geometry_dtype,
++        )
++        if pool.provenance != saved_split.get("training_pool"):
++            raise ValueError("Regenerated training pool differs from saved component provenance")
++        directions, log_pdf = pool.directions, pool.log_p
++        components, teacher_log_pdf = pool.components, pool.log_p
++        pool_provenance = pool.provenance
++        regenerated_hash = _array_hash(directions, log_pdf, components)
++    else:
++        directions, log_pdf = _points(reference, cfg.train_samples, data_seed, "train")
++        regenerated_hash = _array_hash(directions, log_pdf)
+     if regenerated_hash != recorded_hash:
+         raise ValueError(
+             "Regenerated fixed training pool does not match training_points_sha256; "
+@@ -263,4 +316,33 @@ def resolve_training_scatter(
+             "count_scope": "actual dtype-cast fixed pool; not an expected count",
+         },
+     }
+-    return TrainingScatter(cast_directions, source_phi_degrees, theta_degrees, provenance)
++    if version == 5:
++        provenance.update({
++            "schema": "phaseflow.training_scatter.v2",
++            "sampling_distribution": pool_provenance["sampling"],
++            "training_pool": pool_provenance,
++            "component_counts": pool_provenance["component_counts"],
++            "component_codes": pool_provenance["component_codes"],
++            "source_streams": pool_provenance["source_streams"],
++            "pool_hash_covers": (
++                "actual training geometry directions, FP64 teacher_log_pdf evaluated at "
++                "those directions, and uint8 component labels; raw FP64 pool hash is also verified"
++            ),
++            "components_sha256": _array_hash(components),
++            "teacher_log_pdf_sha256": _array_hash(teacher_log_pdf),
++            "precision_provenance": (
++                "Regenerated raw and runtime pool hashes agree with the saved run. Each "
++                "plotted direction and teacher label matches the actual training geometry dtype."
++            ),
++            "objective": objective.to_dict(),
++        })
++        # A mixed pool has two independent input streams, not one CDF stream.
++        provenance.pop("stream_id")
++        provenance["band"]["observed_component_samples"] = {
++            name: int(np.count_nonzero(in_band & (components == code)))
++            for name, code in pool_provenance["component_codes"].items()
++        }
++    return TrainingScatter(
++        cast_directions, source_phi_degrees, theta_degrees, provenance,
++        components=components, teacher_log_pdf=teacher_log_pdf,
++    )
+diff --git a/tests/test_log_monitoring.py b/tests/test_log_monitoring.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..692e2194aa18678e993c93ca34aab4dce5b6afde
+--- /dev/null
++++ b/tests/test_log_monitoring.py
+@@ -0,0 +1,113 @@
++"""Composite-loss labels and replay use true quantities, not legacy NLL aliases."""
++
++from __future__ import annotations
++
++import json
++
++import pytest
++
++from phaseflow.monitoring import (
++    TrainingMonitor,
++    _scalar_values,
++    plot_training_history,
++    read_history,
++)
++
++
++def _history():
++    validation = {
++        "nll": -0.5, "forward_kl_estimate": 0.1,
++        "forward_kl_standard_error": 0.01, "nll_improvement_over_hg": 0.2,
++        "hg_nll": -0.3, "hg_forward_kl_estimate": 0.3,
++        "log_mse": 0.36, "log_rmse": 0.6, "relative_rmse": 0.8,
++    }
++    return [
++        {"global_step": 0, "validation": validation},
++        {
++            "global_step": 1, "objective": "log_density", "loss": 1.0,
++            "nll": -1.0, "log_mse": 4.0, "beta": 0.5, "nll_weight": 1.0,
++            "gradient_norm_before_clip": 2.0, "learning_rate": 0.001,
++            "validation": validation,
++            "train_monitor": {"nll": -0.8, "log_mse": 0.81, "loss": -0.395},
++        },
++    ]
++
++
++def test_composite_total_is_never_published_as_nll():
++    values = _scalar_values(_history()[1])
++    assert values["loss/total"] == 1.0
++    assert values["nll/train_minibatch"] == -1.0
++    assert values["log_mse/train_minibatch"] == 4.0
++    assert values["nll/train_fixed_subset"] == -0.8
++    assert "kl/train_fixed_subset" not in values
++    assert values["log_rmse/validation"] == 0.6
++    assert values["objective/beta"] == 0.5
++    legacy = _scalar_values({"global_step": 1, "loss": -2.0})
++    assert legacy == {"nll/train_minibatch": -2.0}
++
++
++def test_unrepresentable_relative_rmse_does_not_publish_a_false_finite_scalar():
++    row = _history()[0]
++    row["validation"]["relative_rmse"] = None
++    row["validation"]["relative_rmse_status"] = "overflow_float64"
++    values = _scalar_values(row)
++    assert "relative_rmse/validation" not in values
++    assert values["log_rmse/validation"] == 0.6
++
++
++def test_composite_curves_separate_nll_objective_and_uniform_log_error(tmp_path, monkeypatch):
++    from matplotlib.figure import Figure
++
++    history = tmp_path / "history.json"
++    history.write_text(json.dumps(_history()))
++    figures = []
++    original = Figure.savefig
++
++    def inspect(fig, *args, **kwargs):
++        figures.append([
++            {"ylabel": ax.get_ylabel(), "series": {
++                line.get_label(): list(line.get_ydata()) for line in ax.lines
++            }}
++            for ax in fig.axes
++        ])
++        return original(fig, *args, **kwargs)
++
++    monkeypatch.setattr(Figure, "savefig", inspect)
++    result = plot_training_history(history, tmp_path / "curves.png", dpi=25)
++    axes = figures[0]
++    assert len(axes) == 6
++    assert axes[0]["series"]["Training minibatch (raw)"] == [-1.0]
++    assert axes[2]["series"]["Total minibatch objective"] == [1.0]
++    assert axes[2]["ylabel"] == "Composite objective (not NLL)"
++    assert axes[3]["series"]["Independent spherical-uniform validation"] == [0.6, 0.6]
++    assert axes[3]["series"]["Fixed training subset"] == [0.9]
++    assert result["objective"] == "log_density"
++    assert (tmp_path / "curves.png").is_file()
++
++
++def test_composite_history_replay_removes_future_jsonl_and_tensorboard_events(tmp_path):
++    pytest.importorskip("tensorboard")
++    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
++    from torch.utils.tensorboard import SummaryWriter
++
++    history = _history()
++    with TrainingMonitor(
++        tmp_path, history, tensorboard=True, start_step=0, batch_size=16, metadata={},
++    ):
++        pass
++    future = dict(history[-1], global_step=99)
++    with (tmp_path / "history.jsonl").open("a") as stream:
++        stream.write(json.dumps(future) + "\n")
++    with SummaryWriter(str(tmp_path / "tensorboard")) as writer:
++        for name, value in _scalar_values(future).items():
++            writer.add_scalar(name, value, 99)
++    with TrainingMonitor(
++        tmp_path, history, tensorboard=True, start_step=1, batch_size=16, metadata={},
++    ) as monitor:
++        monitor.publish([dict(history[-1], global_step=2)])
++    assert [row["global_step"] for row in read_history(tmp_path)] == [0, 1, 2]
++    events = EventAccumulator(str(tmp_path / "tensorboard"), size_guidance={"scalars": 0})
++    events.Reload()
++    for tag in ("loss/total", "nll/train_minibatch", "log_mse/train_minibatch"):
++        assert [event.step for event in events.Scalars(tag)] == [1, 2]
++    assert [event.step for event in events.Scalars("log_rmse/validation")] == [0, 1, 2]
+diff --git a/tests/test_log_objective.py b/tests/test_log_objective.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc38fed06adf1b993ac37c336e078cebf678afa8
+--- /dev/null
++++ b/tests/test_log_objective.py
+@@ -0,0 +1,334 @@
++"""Analytic arithmetic and synthetic-cell checks, not Rainbow optical validation."""
++
++from __future__ import annotations
++
++import math
++from dataclasses import replace
++
++import numpy as np
++import pytest
++import torch
++from test_rainbow import write_rainbow_fixture
++
++from phaseflow.log_objective import (
++    LOG_UNIFORM,
++    LogObjectiveConfig,
++    evaluate_log_shape,
++    loss_terms,
++    make_training_pool,
++    make_uniform_points,
++    verify_positive_teacher,
++)
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import _array_hash
++
++
++def positive_teacher(path, *, rotation=0.37):
++    edges = np.array([0.0, 0.005, 0.2, 0.9, 1.0])
++    masses = np.arange(1, 25, dtype=np.float64).reshape(6, 4)
++    masses /= masses.sum()
++    write_rainbow_fixture(path, masses=masses, u_edges=edges, frame_rotation=rotation)
++    return path, masses, edges
++
++
++@pytest.mark.parametrize("changes", [
++    {"schema_version": True}, {"schema_version": 2}, {"nll_weight": -1},
++    {"beta": float("nan")}, {"beta": float("inf")}, {"beta": True}, {"beta": "0.1"},
++    {"nll_weight": 0, "beta": 0}, {"sampling": "uniform"},
++    {"sampling": "target", "beta": 0.1}, {"target_fraction": 0.4},
++    {"target_fraction": True}, {"selection_metric": "test_log_rmse"},
++    {"validation_uniform_samples": 1}, {"test_uniform_samples": True},
++    {"zero_policy": "floor"},
++])
++def test_config_rejects_unsupported_or_ambiguous_experiments(changes):
++    with pytest.raises(ValueError):
++        LogObjectiveConfig.from_dict(changes)
++
++
++def test_config_roundtrip_and_exact_half_pool_count():
++    config = LogObjectiveConfig()
++    assert LogObjectiveConfig.from_dict(config.to_dict()) == config
++    with pytest.raises(ValueError, match="unknown"):
++        LogObjectiveConfig.from_dict({"epsilon": 1e-8})
++    with pytest.raises(ValueError, match="JSON object"):
++        LogObjectiveConfig.from_dict([])
++    config.validate_training_count(262144)
++    for count in (1, 137, 262145):
++        with pytest.raises(ValueError, match="even"):
++            config.validate_training_count(count)
++    for count in (0, True, 4.0):
++        with pytest.raises(ValueError, match="positive integer"):
++            config.validate_training_count(count)
++    replace(config, sampling="target", beta=0).validate_training_count(137)
++
++
++def _analytic_two_region_check(device, dtype, tolerance):
++    # Region solid-angle fractions are unequal. Their p/u half mixture assigns
++    # mass exactly 1/2 to each region, so one point per region is exact quadrature.
++    area = torch.tensor([0.1, 0.9], device=device, dtype=dtype)
++    target_mass = torch.tensor([0.9, 0.1], device=device, dtype=dtype)
++    logits = torch.tensor([math.log(0.8), math.log(0.2)], device=device, dtype=dtype,
++                          requires_grad=True)
++    log_q = logits.log_softmax(0) - area.log() + LOG_UNIFORM
++    log_p = (target_mass.log() - area.log() + LOG_UNIFORM).detach().requires_grad_()
++    config = LogObjectiveConfig(beta=0.37)
++    actual = loss_terms(log_q, log_p, config)
++    direct_nll = -(target_mass * log_q).sum()
++    direct_log = (area * (logits.log_softmax(0) - target_mass.log()).square()).sum()
++    direct = direct_nll + config.beta * direct_log
++    torch.testing.assert_close(actual["nll"], direct_nll, rtol=tolerance, atol=tolerance)
++    torch.testing.assert_close(actual["log_mse"], direct_log, rtol=tolerance, atol=tolerance)
++    torch.testing.assert_close(actual["loss"], direct, rtol=tolerance, atol=tolerance)
++    gradient, label_gradient = torch.autograd.grad(
++        actual["loss"], (logits, log_p), allow_unused=True, retain_graph=True
++    )
++    expected_gradient, = torch.autograd.grad(direct, logits)
++    torch.testing.assert_close(gradient, expected_gradient, rtol=tolerance, atol=tolerance)
++    assert label_gradient is None
++    assert actual["loss"].dtype == dtype
++    # An unweighted average over r would instead fit the mixture distribution.
++    assert abs(float((actual["nll"] + log_q.mean()).detach())) > 0.5
++
++
++def test_weighted_loss_and_gradient_match_analytic_solid_angle_integrals():
++    _analytic_two_region_check("cpu", torch.float64, 2e-14)
++
++
++def test_training_arithmetic_stays_fp32_with_fp64_teacher_labels():
++    q = torch.tensor([-4.0, -1.0], dtype=torch.float32, requires_grad=True)
++    teacher = torch.tensor([-3.0, -2.0], dtype=torch.float64, requires_grad=True)
++    terms = loss_terms(q, teacher, LogObjectiveConfig())
++    assert all(value.dtype == torch.float32 for value in terms.values())
++    terms["loss"].backward()
++    assert q.grad is not None and torch.isfinite(q.grad).all()
++    assert teacher.grad is None
++
++
++def test_extreme_log_labels_and_disabled_terms_are_finite_without_density_clipping():
++    q = torch.tensor([-2.0, -3.0], dtype=torch.float32, requires_grad=True)
++    teacher = torch.tensor([-1000.0, 1000.0], dtype=torch.float64)
++    terms = loss_terms(q, teacher, LogObjectiveConfig(beta=0.1))
++    # For these extremes each ratio is saturated at either 0 or 2.
++    assert float(terms["nll"].detach()) == pytest.approx(3.0, rel=1e-4)
++    assert float(terms["log_mse"].detach()) == pytest.approx(998.0**2, rel=1e-5)
++    terms["loss"].backward()
++    assert torch.isfinite(q.grad).all()
++
++    q2 = torch.tensor([-2.0, -3.0], dtype=torch.float32, requires_grad=True)
++    zero_teacher = torch.full((2,), -math.inf, dtype=torch.float64)
++    inactive = loss_terms(q2, zero_teacher, LogObjectiveConfig(beta=0))
++    assert float(inactive["loss"].detach()) == 0
++    assert float(inactive["log_mse"]) == 0
++    inactive["loss"].backward()
++    assert torch.isfinite(q2.grad).all()
++    assert torch.equal(q2.grad, torch.zeros_like(q2))
++    target = loss_terms(q2, zero_teacher, LogObjectiveConfig(sampling="target", beta=0))
++    assert float(target["nll"].detach()) == 2.5
++
++
++def test_normalized_exact_teacher_is_stationary_for_both_losses():
++    area = torch.tensor([0.1, 0.9], dtype=torch.float64)
++    target = torch.tensor([0.9, 0.1], dtype=torch.float64)
++    logits = target.log().requires_grad_()
++    q = logits.log_softmax(0) - area.log() + LOG_UNIFORM
++    p = target.log() - area.log() + LOG_UNIFORM
++    result = loss_terms(q, p, LogObjectiveConfig(beta=3.0))
++    assert float(result["log_mse"].detach()) < 1e-28
++    result["loss"].backward()
++    torch.testing.assert_close(logits.grad, torch.zeros_like(logits), rtol=0, atol=2e-14)
++
++
++def test_optional_reporting_measures_inactive_components_without_adding_them_to_loss():
++    q = torch.tensor([-2.0, -3.0], dtype=torch.float32, requires_grad=True)
++    p = torch.tensor([-4.0, -2.0], dtype=torch.float64)
++    both = loss_terms(q, p, LogObjectiveConfig(beta=1.0))
++    nll_only = loss_terms(q, p, LogObjectiveConfig(beta=0), report_components=True)
++    log_only = loss_terms(q, p, LogObjectiveConfig(nll_weight=0, beta=1), report_components=True)
++    torch.testing.assert_close(nll_only["log_mse"], both["log_mse"])
++    torch.testing.assert_close(nll_only["loss"], both["nll"])
++    torch.testing.assert_close(log_only["nll"], both["nll"])
++    torch.testing.assert_close(log_only["loss"], both["log_mse"])
++    assert float(nll_only["log_mse"].detach()) > 0
++    # Even if a caller requests diagnostics outside the positive-teacher
++    # contract, an inactive infinite log term must not corrupt the NLL loss.
++    zero = loss_terms(q, torch.full_like(p, -math.inf), LogObjectiveConfig(beta=0),
++                      report_components=True)
++    assert torch.isinf(zero["log_mse"])
++    assert float(zero["loss"].detach()) == 0
++
++
++def test_global_zero_scan_finds_unsampled_cells_and_zero_marginal_rows(tmp_path, monkeypatch):
++    import phaseflow.log_objective as module
++
++    masses, edges, _ = write_rainbow_fixture(tmp_path / "zero")
++    area = np.broadcast_to(np.diff(edges) / len(masses), masses.shape)
++    expected_zero_fraction = area[masses == 0].sum()
++    # Deliberately small chunks force both axes to cross scan boundaries.
++    monkeypatch.setattr(module, "_ZERO_SCAN_ELEMENTS", 2)
++    with RainbowReference(tmp_path / "zero") as reference:
++        with pytest.raises(ValueError, match="whole-sphere log-PDF") as caught:
++            verify_positive_teacher(reference)
++        assert f"zero_solid_angle_fraction={expected_zero_fraction:.17g}" in str(caught.value)
++        assert f"zero_cell_count={np.count_nonzero(masses == 0)}" in str(caught.value)
++        # Existing target sampling remains valid; the new workflow does not alter p.
++        from phaseflow.single_condition import _points
++
++        _, labels = _points(reference, 128, 18, "train")
++        assert np.isfinite(labels).all()
++
++    path, masses, _ = positive_teacher(tmp_path / "positive")
++    with RainbowReference(path) as reference:
++        report = verify_positive_teacher(reference)
++        assert report["reference_zero_solid_angle_fraction"] == 0
++        assert report["zero_cell_count"] == 0
++        assert report["scanned_cell_count"] == masses.size
++
++
++def test_spherical_uniform_points_follow_area_on_rotated_nonuniform_table(tmp_path):
++    path, masses, edges = positive_teacher(tmp_path / "record", rotation=0.41)
++    with RainbowReference(path) as reference:
++        directions, labels = make_uniform_points(reference, 80000, 182, "validation", torch.float64)
++        source = directions @ reference.source_to_nf
++        np.testing.assert_allclose(np.linalg.norm(source, axis=1), 1, atol=5e-16, rtol=0)
++        mu = source[:, 2]
++        assert abs(mu.mean()) < 0.008
++        assert abs(np.square(mu).mean() - 1 / 3) < 0.005
++        u = (1 - mu) / 2
++        phi = np.arctan2(source[:, 1], source[:, 0])
++        histogram, _, _ = np.histogram2d(
++            phi, u, bins=(np.linspace(-np.pi, np.pi, len(masses) + 1), edges)
++        )
++        expected = np.broadcast_to(len(directions) * np.diff(edges) / len(masses), masses.shape)
++        chi_squared = np.sum(np.square(histogram - expected) / expected)
++        assert chi_squared < 65
++        # The same samples cannot plausibly be target-distributed on this fixture.
++        assert np.max(np.abs(histogram / len(directions) - masses)) > 0.04
++        np.testing.assert_array_equal(labels, reference.log_prob(directions))
++
++
++def test_uniform_queries_respect_recorded_frame_and_independent_prefix_streams(tmp_path):
++    path_a, _, _ = positive_teacher(tmp_path / "a", rotation=-0.23)
++    path_b, _, _ = positive_teacher(tmp_path / "b", rotation=1.17)
++    before_numpy = np.random.get_state()
++    before_torch = torch.get_rng_state().clone()
++    with RainbowReference(path_a) as a, RainbowReference(path_b) as b:
++        first = make_uniform_points(a, 96, 93, "validation", torch.float64)
++        rotated = make_uniform_points(b, 96, 93, 6, torch.float64)
++        np.testing.assert_allclose(first[0] @ a.source_to_nf, rotated[0] @ b.source_to_nf,
++                                   rtol=0, atol=6e-16)
++        np.testing.assert_array_equal(first[1], rotated[1])
++        prefix = make_uniform_points(a, 24, 93, "validation", torch.float64)
++        np.testing.assert_array_equal(prefix[0], first[0][:24])
++        np.testing.assert_array_equal(prefix[1], first[1][:24])
++        hashes = {
++            _array_hash(*make_uniform_points(a, 96, 93, stream, torch.float64))
++            for stream in ("train", "validation", "test")
++        }
++        assert len(hashes) == 3
++    after_numpy = np.random.get_state()
++    assert before_numpy[0] == after_numpy[0]
++    np.testing.assert_array_equal(before_numpy[1], after_numpy[1])
++    assert before_numpy[2:] == after_numpy[2:]
++    assert torch.equal(before_torch, torch.get_rng_state())
++
++
++def test_pool_identity_is_shared_across_beta_and_tracks_actual_runtime_values(tmp_path):
++    path, _, _ = positive_teacher(tmp_path / "record")
++    with RainbowReference(path) as reference:
++        base = LogObjectiveConfig(beta=0)
++        pool = make_training_pool(reference, 128, 527, base, torch.float32)
++        other = make_training_pool(reference, 128, 527, replace(base, beta=3), torch.float32)
++        assert pool.directions.dtype == np.float32 and pool.log_p.dtype == np.float64
++        assert pool.components.dtype == np.uint8
++        assert pool.provenance == other.provenance
++        np.testing.assert_array_equal(pool.directions, other.directions)
++        np.testing.assert_array_equal(pool.log_p, reference.log_prob(pool.directions))
++        np.testing.assert_array_equal(pool.components, np.tile([0, 1], 64))
++        assert pool.provenance["component_counts"] == {"cdf": 64, "uniform": 64}
++        assert pool.provenance["runtime_points_sha256"] == _array_hash(
++            pool.directions, pool.log_p, pool.components
++        )
++        raw_precision = make_training_pool(reference, 128, 527, base, torch.float64)
++        assert raw_precision.provenance["raw_points_sha256"] == pool.provenance["raw_points_sha256"]
++        assert raw_precision.provenance["runtime_points_sha256"] != pool.provenance["runtime_points_sha256"]
++        prefix = make_training_pool(reference, 32, 527, base, torch.float32)
++        np.testing.assert_array_equal(prefix.directions, pool.directions[:32])
++        np.testing.assert_array_equal(prefix.log_p, pool.log_p[:32])
++        target = make_training_pool(reference, 137, 527, replace(base, sampling="target"), torch.float32)
++        assert target.provenance["component_counts"] == {"cdf": 137, "uniform": 0}
++        assert not target.components.any()
++
++
++def test_teacher_labels_are_requeried_after_rounding_across_cell_edge(tmp_path, monkeypatch):
++    import phaseflow.single_condition as trainer
++
++    write_rainbow_fixture(tmp_path / "record", masses=np.array([[0.8, 0.2]]),
++                          u_edges=np.array([0.0, 0.1, 1.0]))
++    with RainbowReference(tmp_path / "record") as reference:
++        u = 0.1 - 1e-10
++        raw = np.tile([2 * math.sqrt(u * (1 - u)), 0.0, 1 - 2 * u], (2, 1))
++        original_labels = reference.log_prob(raw)
++        runtime_labels = reference.log_prob(raw.astype(np.float32))
++        assert np.all(original_labels != runtime_labels)
++        monkeypatch.setattr(trainer, "_points", lambda *args: (raw, original_labels))
++        pool = make_training_pool(reference, 2, 12,
++                                  LogObjectiveConfig(sampling="target", beta=0), torch.float32)
++        np.testing.assert_array_equal(pool.log_p, runtime_labels)
++
++
++class _ConstantOffsetModel:
++    """Analytic evaluation probe; it is not an NF or an optical reference."""
++
++    def __init__(self, reference, offset, dtype=torch.float64):
++        self.hg_g = reference.g
++        self.incident_cosine = float(reference.condition[1])
++        self.device = torch.device("cpu")
++        self.geometry_dtype = dtype
++        self.reference = reference
++        self.offset = offset
++        self.batch_sizes = []
++
++    def log_prob(self, directions):
++        assert directions.dtype == self.geometry_dtype
++        self.batch_sizes.append(len(directions))
++        return torch.as_tensor(self.reference.log_prob(directions.numpy()), dtype=self.geometry_dtype) + self.offset
++
++
++@pytest.mark.parametrize("offset", [0.0, math.log(2.0), -math.log(2.0), 400.0, 900.0])
++def test_shape_metrics_have_known_log_error_and_stable_relative_rms(tmp_path, offset):
++    path, _, _ = positive_teacher(tmp_path / "record")
++    with RainbowReference(path) as reference:
++        points = make_uniform_points(reference, 101, 54, "test", torch.float64)
++        model = _ConstantOffsetModel(reference, offset)
++        result = evaluate_log_shape(model, reference, points, 29)
++        assert result["log_mse"] == pytest.approx(offset**2, rel=2e-14, abs=1e-25)
++        assert result["log_rmse"] == pytest.approx(abs(offset), abs=1e-14)
++        assert result["log_mse_standard_error"] < 1e-9
++        assert result["uniform_sample_count"] == 101
++        assert model.batch_sizes == [29, 29, 29, 14]
++        if offset == 900:
++            assert result["relative_rmse"] is None
++            assert result["relative_rmse_status"] == "overflow_float64"
++        else:
++            assert result["relative_rmse"] == pytest.approx(abs(math.expm1(offset)), abs=1e-15)
++            assert result["relative_rmse_status"] == "finite"
++
++
++def test_shape_metrics_use_float64_reductions_and_reject_bad_values(tmp_path):
++    path, _, _ = positive_teacher(tmp_path / "record")
++    with RainbowReference(path) as reference:
++        points = make_uniform_points(reference, 31, 81, "validation", torch.float32)
++        model = _ConstantOffsetModel(reference, 0.5, torch.float32)
++        actual = evaluate_log_shape(model, reference, points, 7)
++        with torch.no_grad():
++            raw = model.log_prob(torch.as_tensor(points[0])).double().numpy() - points[1]
++        assert actual["log_mse"] == np.square(raw).mean()
++        assert actual["log_mse_standard_error"] == pytest.approx(np.square(raw).std(ddof=1) / math.sqrt(31))
++        with pytest.raises(FloatingPointError, match="nonfinite"):
++            evaluate_log_shape(_ConstantOffsetModel(reference, math.nan), reference, points, 7)
++
++
++@pytest.mark.cuda
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable; CPU is not GPU validation")
++def test_cuda_fp32_analytic_loss_and_gradient():
++    _analytic_two_region_check("cuda", torch.float32, 3e-6)
+diff --git a/tests/test_log_training.py b/tests/test_log_training.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca28da682588ef763bb2cdeb4fe299baa2294ccb
+--- /dev/null
++++ b/tests/test_log_training.py
+@@ -0,0 +1,323 @@
++"""Version-5 training contracts on synthetic teachers; no optical or speed claim."""
++
++from __future__ import annotations
++
++import copy
++import hashlib
++import json
++import math
++from dataclasses import replace
++
++import numpy as np
++import pytest
++import torch
++from test_rainbow import write_rainbow_fixture
++from test_single_condition import smooth_teacher
++
++from phaseflow.cli import main
++from phaseflow.log_objective import LogObjectiveConfig
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import (
++    FAMILY,
++    SingleTrainingConfig,
++    load_single_checkpoint,
++    read_single_checkpoint,
++    train_single_condition,
++)
++from phaseflow.sphere_model import SphereFlowConfig
++
++
++def _training(**changes):
++    return replace(SingleTrainingConfig(
++        device="cpu", dtype="float32", seed=41, data_seed=713,
++        train_samples=256, validation_samples=128, test_samples=128,
++        proposal_samples=0, batch_size=64, steps=6, learning_rate=0.003,
++        eval_every=2, checkpoint_every=2, log_every=2,
++        eval_batch_size=64, train_monitor_samples=65,
++    ), **changes)
++
++
++def _objective(**changes):
++    return replace(LogObjectiveConfig(
++        beta=0.3, validation_uniform_samples=128, test_uniform_samples=128,
++    ), **changes)
++
++
++def _model(**changes):
++    return replace(SphereFlowConfig(
++        num_coupling_layers=2, num_bins=8, hidden_features=(8,),
++        geometry_dtype="model", spline_dtype="model",
++    ), **changes)
++
++
++def _train(reference, config, objective, directory, **kwargs):
++    return train_single_condition(
++        reference, _model(), config, directory, objective_config=objective,
++        make_plots=False, **kwargs,
++    )
++
++
++def _assert_equal(left, right):
++    if isinstance(left, torch.Tensor):
++        assert isinstance(right, torch.Tensor)
++        assert left.dtype == right.dtype
++        assert torch.equal(left.cpu(), right.cpu())
++    elif isinstance(left, np.ndarray):
++        np.testing.assert_array_equal(left, right)
++    elif isinstance(left, dict):
++        assert left.keys() == right.keys()
++        for key in left:
++            _assert_equal(left[key], right[key])
++    elif isinstance(left, (list, tuple)):
++        assert type(left) is type(right) and len(left) == len(right)
++        for a, b in zip(left, right, strict=True):
++            _assert_equal(a, b)
++    else:
++        assert left == right
++
++
++def _file_hashes(directory):
++    return {
++        path.relative_to(directory).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
++        for path in directory.rglob("*") if path.is_file()
++    }
++
++
++def test_positive_beta_learns_log_shape_on_independent_smooth_teacher_points(tmp_path):
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        config = _training(
++            train_samples=4096, validation_samples=2048, test_samples=2048,
++            batch_size=256, steps=100, eval_every=20, checkpoint_every=20,
++            eval_batch_size=512,
++        )
++        objective = _objective(beta=1.0, validation_uniform_samples=2048, test_uniform_samples=2048)
++        result = _train(reference, config, objective, tmp_path / "run")
++        initial, test = result.metrics["initial_validation"], result.metrics["test"]
++        assert result.complete
++        assert test["log_mse"] < initial["log_mse"] * 0.65
++        assert test["forward_kl_estimate"] < initial["forward_kl_estimate"] - 0.02
++        assert test["base_g"] == reference.g
++        assert test["scope"] == "final_independent_test_points_same_condition"
++        checkpoint = read_single_checkpoint(result.checkpoint_path)
++        assert checkpoint["checkpoint_version"] == 5
++        assert checkpoint["objective_config"] == objective.to_dict()
++        assert checkpoint["selection_metric"] == "log_rmse"
++        assert set(checkpoint["selections"]) == {"nll", "log_rmse"}
++        assert checkpoint["sample_split"]["training_pool"]["component_counts"] == {
++            "cdf": 2048, "uniform": 2048,
++        }
++        assert checkpoint["history"][0]["train_monitor"]["sample_count"] == 64
++        assert len(test["uniform_test_points_sha256"]) == 64
++
++
++def _resume_check(tmp_path, monkeypatch, device):
++    import phaseflow.single_condition as trainer
++
++    real_points, real_uniform = trainer._points, trainer.make_uniform_points
++    queried = []
++
++    def tracked_points(reference, count, seed, stream):
++        queried.append(("cdf", stream))
++        return real_points(reference, count, seed, stream)
++
++    def tracked_uniform(reference, count, seed, stream, geometry_dtype):
++        queried.append(("uniform", stream))
++        return real_uniform(reference, count, seed, stream, geometry_dtype)
++
++    monkeypatch.setattr(trainer, "_points", tracked_points)
++    monkeypatch.setattr(trainer, "make_uniform_points", tracked_uniform)
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        config, objective = _training(device=device), _objective()
++        full = _train(reference, config, objective, tmp_path / "full")
++        queried.clear()
++        partial = _train(reference, config, objective, tmp_path / "resumed", max_steps_this_run=3)
++        assert not partial.complete and partial.metrics["test"] is None
++        assert not any(stream == "test" for _, stream in queried)
++        checkpoint = read_single_checkpoint(partial.checkpoint_path)
++        assert [event["global_step"] for event in checkpoint["history"] if "validation" in event] == [0, 2]
++        queried.clear()
++        continued = _train(reference, config, objective, tmp_path / "resumed",
++                           resume=partial.checkpoint_path)
++        assert ("cdf", "test") in queried and ("uniform", "test") in queried
++        a = read_single_checkpoint(full.checkpoint_path)
++        b = read_single_checkpoint(continued.checkpoint_path)
++        # Includes model, both selections, optimizer, RNG, point hashes and the
++        # complete numerical history. Wall-clock telemetry is intentionally separate.
++        _assert_equal(a, b)
++        assert full.metrics == continued.metrics
++        for name in ("best.pt", "best_by_nll.pt", "best_by_log.pt"):
++            _assert_equal(read_single_checkpoint(tmp_path / "full" / name),
++                          read_single_checkpoint(tmp_path / "resumed" / name))
++        restored, payload = load_single_checkpoint(continued.best_path, device=device)
++        assert restored.device.type == torch.device(device).type
++        _assert_equal(restored.state_dict(), payload["model_state"])
++        jsonl = [json.loads(line) for line in (tmp_path / "resumed/history.jsonl").read_text().splitlines()]
++        assert jsonl == b["history"]
++
++
++def test_version5_resume_is_exact_and_never_queries_test_before_completion(tmp_path, monkeypatch):
++    _resume_check(tmp_path, monkeypatch, "cpu")
++
++
++@pytest.mark.parametrize("change", [
++    {"beta": 0.7}, {"selection_metric": "nll"}, {"sampling": "target", "beta": 0},
++])
++def test_resume_rejects_changed_objective_before_writing(tmp_path, change):
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        config, objective = _training(), _objective()
++        result = _train(reference, config, objective, tmp_path / "run", max_steps_this_run=3)
++        before = _file_hashes(tmp_path / "run")
++        with pytest.raises(ValueError, match="original objective"):
++            _train(reference, config, replace(objective, **change), tmp_path / "run",
++                   resume=result.checkpoint_path)
++        assert _file_hashes(tmp_path / "run") == before
++
++
++@pytest.mark.parametrize("tamper", ["pool_hash", "primary_selection"])
++def test_resume_rejects_corrupted_pool_or_selection_without_further_writes(tmp_path, tamper):
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        config, objective = _training(), _objective()
++        result = _train(reference, config, objective, tmp_path / "run", max_steps_this_run=3)
++        payload = read_single_checkpoint(result.checkpoint_path)
++        if tamper == "pool_hash":
++            payload["sample_split"]["training_pool"]["runtime_points_sha256"] = "0" * 64
++            expected = "regenerated training/validation"
++        else:
++            payload["selections"]["log_rmse"]["step"] = config.steps
++            expected = "selection"
++        torch.save(payload, result.checkpoint_path)
++        before = _file_hashes(tmp_path / "run")
++        with pytest.raises(ValueError, match=expected):
++            _train(reference, config, objective, tmp_path / "run", resume=result.checkpoint_path)
++        assert _file_hashes(tmp_path / "run") == before
++
++
++@pytest.mark.parametrize("primary,expected_step", [("log_rmse", 4), ("nll", 2)])
++def test_scheduled_dual_minima_select_corresponding_weights_and_keep_first_ties(
++    tmp_path, monkeypatch, primary, expected_step
++):
++    import phaseflow.single_condition as trainer
++
++    actual_likelihood, actual_shape = trainer._likelihood_metrics, trainer.evaluate_log_shape
++    nll_values = iter((3.0, 1.0, 2.0, 1.0))  # step 2 and 6 tie; first is 2.
++    shape_values = iter((3.0, 2.0, 1.0, 1.0))  # step 4 and 6 tie; first is 4.
++    visited_states = []
++
++    def scheduled_likelihood(model, reference, points, batch_size):
++        result = actual_likelihood(model, reference, points, batch_size)
++        result["nll"] = next(nll_values)
++        return result
++
++    def scheduled_shape(model, reference, points, batch_size):
++        result = actual_shape(model, reference, points, batch_size)
++        value = next(shape_values)
++        result.update(log_rmse=value, log_mse=value**2)
++        visited_states.append(copy.deepcopy(model.state_dict()))
++        return result
++
++    monkeypatch.setattr(trainer, "_likelihood_metrics", scheduled_likelihood)
++    monkeypatch.setattr(trainer, "evaluate_log_shape", scheduled_shape)
++    # This test injects only the validation ordering. A separate integration test
++    # checks real independent test evaluation and learned accuracy.
++    monkeypatch.setattr(trainer, "evaluate_single_condition", lambda *args, **kwargs: {})
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        objective = _objective(selection_metric=primary)
++        result = _train(reference, _training(), objective, tmp_path / "run")
++        assert result.metrics["selected_step"] == expected_step
++        checkpoint = read_single_checkpoint(result.checkpoint_path)
++        assert checkpoint["selections"]["nll"]["step"] == 2
++        assert checkpoint["selections"]["log_rmse"]["step"] == 4
++        _assert_equal(checkpoint["selections"]["nll"]["model_state"], visited_states[1])
++        _assert_equal(checkpoint["selections"]["log_rmse"]["model_state"], visited_states[2])
++        _assert_equal(checkpoint["best_state"], visited_states[expected_step // 2])
++        for metric, filename, event_index in (("nll", "best_by_nll.pt", 1),
++                                            ("log_rmse", "best_by_log.pt", 2)):
++            saved = read_single_checkpoint(tmp_path / "run" / filename)
++            assert saved["selection_metric"] == metric
++            _assert_equal(saved["model_state"], visited_states[event_index])
++        _assert_equal(read_single_checkpoint(result.best_path)["model_state"],
++                      checkpoint["best_state"])
++
++
++def test_schema3_cli_train_and_uniform_evaluation_override(tmp_path, capsys):
++    record = smooth_teacher(tmp_path / "record")
++    config, objective = _training(steps=2), _objective(test_uniform_samples=73)
++    path = tmp_path / "config.json"
++    path.write_text(json.dumps({
++        "schema_version": 3, "family": FAMILY, "model": _model().to_dict(),
++        "training": config.to_dict(), "objective": objective.to_dict(),
++        "visualization": {"enabled": False},
++    }))
++    run = tmp_path / "run"
++    assert main(["train-rainbow", "--record", str(record), "--config", str(path),
++                 "--output", str(run), "--quiet"]) == 0
++    trained = json.loads(capsys.readouterr().out)
++    assert trained["metrics"]["objective"] == objective.to_dict()
++    assert trained["metrics"]["test"]["uniform_sample_count"] == 73
++    saved = json.loads((run / "config.json").read_text())
++    assert saved["schema_version"] == 3 and saved["objective"] == objective.to_dict()
++    for args, count in (([], 73), (["--uniform-samples", "41"], 41),
++                        (["--uniform-samples", "0"], 0)):
++        output = tmp_path / f"evaluation_{count}.json"
++        assert main(["evaluate-rainbow", "--record", str(record), "--checkpoint", str(run / "best.pt"),
++                     "--device", "cpu", "--samples", "67", "--proposal-samples", "0",
++                     "--batch-size", "32", "--output", str(output), *args]) == 0
++        result = json.loads(capsys.readouterr().out)
++        assert json.loads(output.read_text()) == result
++        assert result["sample_count"] == 67
++        if count:
++            assert result["uniform_sample_count"] == count
++            assert math.isfinite(result["log_rmse"])
++            assert result["log_shape_measure"] == "uniform_solid_angle"
++        else:
++            assert "uniform_sample_count" not in result and "log_rmse" not in result
++
++
++def test_true_zero_preflight_writes_nothing_and_legacy_nll_still_trains(tmp_path):
++    write_rainbow_fixture(tmp_path / "record")
++    with RainbowReference(tmp_path / "record") as reference:
++        output = tmp_path / "log_run"
++        with pytest.raises(ValueError, match="positive teacher"):
++            _train(reference, _training(steps=1), _objective(), output)
++        assert not output.exists()
++        legacy = _train(reference, _training(steps=1), None, tmp_path / "nll_run")
++        assert legacy.complete
++        checkpoint = read_single_checkpoint(legacy.checkpoint_path)
++        assert checkpoint["checkpoint_version"] == 4
++        assert "objective_config" not in checkpoint
++        assert "log_rmse" not in legacy.metrics["best_validation"]
++
++
++@pytest.mark.parametrize("objective", [
++    _objective(sampling="target", beta=0),
++    _objective(beta=0),
++    _objective(nll_weight=0, beta=1),
++])
++def test_reported_components_are_actual_and_target_control_omits_unmeasured_log_error(
++    tmp_path, objective
++):
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        result = _train(reference, _training(steps=2), objective, tmp_path / "run")
++        history = read_single_checkpoint(result.checkpoint_path)["history"]
++        events = [entry for entry in history if "loss" in entry]
++        assert events
++        for event in events:
++            assert event["nll"] != 0
++            if objective.sampling == "target":
++                assert "log_mse" not in event
++                assert "log_mse" not in event["train_monitor"] if "train_monitor" in event else True
++            else:
++                assert event["log_mse"] > 0
++                expected = objective.nll_weight * event["nll"] + objective.beta * event["log_mse"]
++                assert event["loss"] == pytest.approx(expected, rel=2e-6, abs=2e-6)
++                if "train_monitor" in event:
++                    assert event["train_monitor"]["log_mse"] > 0
++                    assert event["train_monitor"]["nll"] != 0
++        assert history[0]["validation"]["log_mse"] > 0
++        assert result.metrics["test"]["log_mse"] > 0
++
++
++@pytest.mark.cuda
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable; CPU is not GPU validation")
++def test_cuda_version5_small_training_and_exact_resume(tmp_path, monkeypatch):
++    _resume_check(tmp_path, monkeypatch, "cuda:0")
+diff --git a/tests/test_log_training_scatter.py b/tests/test_log_training_scatter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..902d0e8e71fd89aeb6c156608d6e9bcd282aadbb
+--- /dev/null
++++ b/tests/test_log_training_scatter.py
+@@ -0,0 +1,152 @@
++"""Actual mixed-pool coverage and independently selected v5 inference identity."""
++
++from __future__ import annotations
++
++import json
++from dataclasses import replace
++
++import numpy as np
++import pytest
++import torch
++from test_rainbow import write_rainbow_fixture
++from test_training_scatter import _configuration, _model_config
++
++from phaseflow.log_objective import LogObjectiveConfig, make_training_pool
++from phaseflow.plotting import RainbowPlotConfig, plot_rainbow_comparison
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import (
++    load_single_checkpoint,
++    read_single_checkpoint,
++    train_single_condition,
++)
++from phaseflow.training_scatter import resolve_training_scatter
++
++
++def _positive_record(path):
++    masses = np.array([[1, 2, 3], [2, 1, 1], [3, 1, 2], [1, 2, 4]], dtype=np.float64)
++    masses /= masses.sum()
++    write_rainbow_fixture(path, masses=masses, frame_rotation=0.37)
++
++
++def _objective(**changes):
++    return replace(
++        LogObjectiveConfig(validation_uniform_samples=32, test_uniform_samples=32),
++        **changes,
++    )
++
++
++@pytest.fixture
++def log_trained(tmp_path):
++    _positive_record(tmp_path / "record")
++    with RainbowReference(tmp_path / "record") as reference:
++        cfg = _configuration(train_samples=138)
++        objective = _objective()
++        run = tmp_path / "run"
++        result = train_single_condition(
++            reference, _model_config(), cfg, run,
++            objective_config=objective, make_plots=False,
++        )
++        yield reference, cfg, objective, run, result
++
++
++@pytest.mark.parametrize("count", [138, 262144])
++def test_mixed_plot_displays_every_component_point_and_archives_actual_labels(
++    tmp_path, monkeypatch, count,
++):
++    from matplotlib.axes import Axes
++
++    _positive_record(tmp_path / "record")
++    seen = []
++    original = Axes.scatter
++
++    def observe(ax, x, y, *args, **kwargs):
++        seen.append((np.asarray(x).copy(), np.asarray(y).copy(), kwargs["label"]))
++        return original(ax, x, y, *args, **kwargs)
++
++    monkeypatch.setattr(Axes, "scatter", observe)
++    with RainbowReference(tmp_path / "record") as reference:
++        cfg = _configuration(train_samples=count, steps=0)
++        objective = _objective()
++        result = train_single_condition(
++            reference, _model_config(), cfg, tmp_path / "run",
++            objective_config=objective, make_plots=False,
++        )
++        manifest = plot_rainbow_comparison(
++            result.model, reference, tmp_path / "plots", checkpoint_path=result.best_path,
++            config=RainbowPlotConfig(cdf_samples=1, dpi=20),
++        )
++        pool = make_training_pool(
++            reference, count, cfg.data_seed, objective, result.model.geometry_dtype,
++        )
++        assert manifest["schema"] == "phaseflow.rainbow_plots.v3"
++        assert manifest["scatter"]["component_counts"] == {"cdf": count // 2, "uniform": count // 2}
++        assert manifest["scatter"]["sample_count"] == count
++        assert manifest["scatter"]["displayed_sample_count"] == count
++        assert manifest["scatter"]["downsampling"] is False
++        assert manifest["scatter"]["training_pool"] == pool.provenance
++        assert "mixed training queries" in manifest["coordinates"]["scatter_chart_density"]
++        assert manifest["selection_metric"] == "log_rmse"
++        assert len(seen) == 4
++        with np.load(tmp_path / "plots/training_scatter.npz", allow_pickle=False) as archive:
++            np.testing.assert_array_equal(archive["directions_nf"], pool.directions)
++            np.testing.assert_array_equal(archive["components"], pool.components)
++            np.testing.assert_array_equal(archive["teacher_log_pdf"], pool.log_p)
++            np.testing.assert_array_equal(archive["teacher_log_pdf"], reference.log_prob(pool.directions))
++            assert archive["directions_nf"].dtype == np.float32
++            assert archive["components"].dtype == np.uint8
++            for index, (x, y, label) in enumerate(seen):
++                code = index % 2
++                mask = archive["components"] == code
++                np.testing.assert_array_equal(x, archive["source_phi_degrees"][mask])
++                np.testing.assert_array_equal(y, archive["theta_degrees"][mask])
++                assert len(x) == count // 2
++                assert ("CDF" if code == 0 else "Spherical uniform") in label
++
++
++def test_dual_selection_is_verified_against_its_own_saved_state(log_trained):
++    reference, _, _, run, _ = log_trained
++    training = read_single_checkpoint(run / "checkpoint.pt")
++    for filename, metric in (("best.pt", "log_rmse"), ("best_by_log.pt", "log_rmse"),
++                             ("best_by_nll.pt", "nll")):
++        path = run / filename
++        model, payload = load_single_checkpoint(path, device="cpu")
++        points = resolve_training_scatter(model, reference, path)
++        assert points.provenance["plotted_checkpoint"]["selection_metric"] == metric
++        assert payload["global_step"] == training["selections"][metric]["step"]
++
++    # A damaged secondary selection must be caught even if the primary remains
++    # valid and the passed inference model matches its own file exactly.
++    secondary = training["selections"]["nll"]
++    state_key = next(
++        key for key, value in secondary["model_state"].items() if isinstance(value, torch.Tensor)
++    )
++    secondary["model_state"][state_key] = secondary["model_state"][state_key] + 1
++    torch.save(training, run / "checkpoint.pt")
++    model, _ = load_single_checkpoint(run / "best_by_nll.pt", device="cpu")
++    with pytest.raises(ValueError, match="best state"):
++        resolve_training_scatter(model, reference, run / "best_by_nll.pt")
++
++
++@pytest.mark.parametrize("damage", ["raw_hash", "runtime_hash", "components", "objective", "selection"])
++def test_mixed_identity_damage_is_rejected_before_creating_plots(log_trained, tmp_path, damage):
++    reference, _, _, run, result = log_trained
++    training = read_single_checkpoint(run / "checkpoint.pt")
++    inference = read_single_checkpoint(result.best_path)
++    split = json.loads((run / "sample_split.json").read_text())
++    if damage in ("raw_hash", "runtime_hash"):
++        split["training_pool"][f"{damage.removesuffix('_hash')}_points_sha256"] = "0" * 64
++    elif damage == "components":
++        split["training_pool"]["component_counts"]["uniform"] += 1
++    elif damage == "objective":
++        inference["objective_config"]["beta"] += 1
++    else:
++        metric = inference["selection_metric"]
++        training["selections"][metric]["validation"]["log_rmse"] += 1
++    training["sample_split"] = split
++    (run / "sample_split.json").write_text(json.dumps(split))
++    torch.save(training, run / "checkpoint.pt")
++    torch.save(inference, result.best_path)
++    output = tmp_path / "rejected"
++    with pytest.raises(ValueError):
++        plot_rainbow_comparison(result.model, reference, output, checkpoint_path=result.best_path)
++    assert not output.exists()

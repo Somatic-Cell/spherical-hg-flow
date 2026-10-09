@@ -342,6 +342,9 @@ def plot_rainbow_comparison(
     checkpoint = None
     training_scatter = None
     checkpoint_step = None
+    scatter_components = None
+    mixed_scatter = False
+    uniform_scatter = False
     if scatter_mode == "training":
         from .training_scatter import resolve_training_scatter
 
@@ -350,6 +353,7 @@ def plot_rainbow_comparison(
         )
         scatter_phi = training_scatter.source_phi_degrees
         scatter_theta = training_scatter.theta_degrees
+        scatter_components = training_scatter.components
         scatter_metadata = {"mode": "training", **training_scatter.provenance}
         checkpoint = scatter_metadata["plotted_checkpoint"]
         checkpoint_step = checkpoint["global_step"]
@@ -358,6 +362,13 @@ def plot_rainbow_comparison(
         if checkpoint["kind"] == "inference":
             selected_step = checkpoint_step
         scatter_title = f"Fixed training pool (N = {scatter_metadata['sample_count']:,})"
+        if scatter_components is not None and np.any(scatter_components == 1):
+            mixed_scatter = bool(np.any(scatter_components == 0))
+            uniform_scatter = not mixed_scatter
+            pool_label = "Mixed" if mixed_scatter else "Spherical-uniform"
+            scatter_title = (
+                f"{pool_label} training pool (N = {scatter_metadata['sample_count']:,})"
+            )
     else:
         scatter_phi, scatter_theta = cdf_scatter_coordinates(
             reference, samples=config.cdf_samples, seed=config.seed
@@ -402,24 +413,60 @@ def plot_rainbow_comparison(
     elif training_scatter is not None and checkpoint["kind"] == "training":
         heading += f"\nTraining checkpoint (step {checkpoint_step})"
     elif selected_step is not None:
-        heading += f"\nValidation-selected model (step {selected_step})"
+        metric = checkpoint.get("selection_metric") if checkpoint is not None else None
+        if metric is not None:
+            metric_label = {"nll": "NLL", "log_rmse": "log RMSE"}[metric]
+            heading += f"\nValidation {metric_label}-selected model (step {selected_step})"
+        else:
+            heading += f"\nValidation-selected model (step {selected_step})"
+    chart_note = _CHART_NOTE if not mixed_scatter else (
+        "Equal angular scaling; this chart is not equal area. "
+        "Colored CDF and spherical-uniform groups form training queries from r."
+    )
     panel_titles = (
         "Reference PDF from the stored CDF",
         scatter_title,
         "NF PDF evaluated at source cell centers",
     )
+    scatter_chart_density = (
+        "r_per_sr * sin(theta); mixed training queries, not CDF-distributed samples"
+        if mixed_scatter else "p_per_sr * sin(theta); not p_per_sr alone"
+    )
+    if uniform_scatter:
+        chart_note = (
+            "Equal angular scaling; this chart is not equal area. "
+            "Every shown point is an actual spherical-uniform training query."
+        )
+        scatter_chart_density = (
+            "u_per_sr * sin(theta), u_per_sr=1/(4*pi); "
+            "spherical-uniform training queries, not CDF-distributed samples"
+        )
 
     def draw_panel(ax: Axes, panel: int):
         if panel == 1:
-            artist = ax.scatter(
-                scatter_phi,
-                scatter_theta,
-                s=1.3,
-                c="#172a3a",
-                alpha=0.3,
-                linewidths=0,
-                rasterized=True,
-            )
+            if scatter_components is None:
+                artist = ax.scatter(
+                    scatter_phi,
+                    scatter_theta,
+                    s=1.3,
+                    c="#172a3a",
+                    alpha=0.3,
+                    linewidths=0,
+                    rasterized=True,
+                )
+            else:
+                for code, label, color in (
+                    (0, "CDF", "#172a3a"), (1, "Spherical uniform", "#d95f02"),
+                ):
+                    mask = scatter_components == code
+                    count = int(np.count_nonzero(mask))
+                    if count:
+                        artist = ax.scatter(
+                            scatter_phi[mask], scatter_theta[mask], s=1.3,
+                            c=color, alpha=0.3, linewidths=0, rasterized=True,
+                            label=f"{label} (N = {count:,})",
+                        )
+                ax.legend(loc="lower right", fontsize=8, markerscale=3, framealpha=0.9)
             ax.set_facecolor("#fafbfd")
         else:
             values = grid.reference_pdf if panel == 0 else grid.nf_pdf
@@ -443,14 +490,17 @@ def plot_rainbow_comparison(
     if training_scatter is not None:
         array_path = output / "training_scatter.npz"
         temporary_array = output / "training_scatter.npz.tmp"
+        saved_arrays = {
+            "directions_nf": training_scatter.directions_nf,
+            "source_phi_degrees": scatter_phi,
+            "theta_degrees": scatter_theta,
+            "provenance_json": np.array(json.dumps(scatter_metadata, allow_nan=False)),
+        }
+        if scatter_components is not None:
+            saved_arrays["components"] = scatter_components
+            saved_arrays["teacher_log_pdf"] = training_scatter.teacher_log_pdf
         with temporary_array.open("wb") as stream:
-            np.savez_compressed(
-                stream,
-                directions_nf=training_scatter.directions_nf,
-                source_phi_degrees=scatter_phi,
-                theta_degrees=scatter_theta,
-                provenance_json=np.array(json.dumps(scatter_metadata, allow_nan=False)),
-            )
+            np.savez_compressed(stream, **saved_arrays)
         temporary_array.replace(array_path)
         arrays["training_scatter"] = {
             "path": array_path.name,
@@ -463,7 +513,10 @@ def plot_rainbow_comparison(
     # as either PDF canvas, including the space reserved for their colorbars.
     single_size = (12.0, 7.4)
     rect = [0.09, 0.19, 0.77, 0.77 * single_size[0] / 2 / single_size[1]]
-    for panel, stem in enumerate(("reference_pdf", "cdf_samples", "nf_pdf")):
+    # Preserve historical CDF/mixed filenames for old runs. An all-uniform
+    # training pool must not acquire a filename claiming it contains CDF samples.
+    scatter_stem = "training_samples" if uniform_scatter else "cdf_samples"
+    for panel, stem in enumerate(("reference_pdf", scatter_stem, "nf_pdf")):
         fig = Figure(figsize=single_size)
         FigureCanvasAgg(fig)
         ax = fig.add_axes(rect)
@@ -480,7 +533,7 @@ def plot_rainbow_comparison(
                 frameon=False,
                 fontsize=10,
             )
-        fig.text(0.5, 0.038, _CHART_NOTE, ha="center", fontsize=9)
+        fig.text(0.5, 0.038, chart_note, ha="center", fontsize=9)
         files[stem] = _save_figure(
             fig, output / f"{stem}.png", dpi=config.dpi, write_pdf=config.write_pdf
         )
@@ -501,7 +554,7 @@ def plot_rainbow_comparison(
     colorbar_axis = fig.add_axes([0.26, 0.12, 0.48, 0.025])
     fig.colorbar(image_artist, cax=colorbar_axis, orientation="horizontal", label=_DENSITY_LABEL)
     fig.suptitle(heading, x=0.5, y=0.925, fontsize=16)
-    fig.text(0.5, 0.021, _CHART_NOTE, ha="center", fontsize=11)
+    fig.text(0.5, 0.021, chart_note, ha="center", fontsize=11)
     if np.any(grid.reference_pdf == 0):
         fig.legend(
             handles=[Patch(facecolor=_ZERO_COLOR, label="Zero reference PDF")],
@@ -516,7 +569,7 @@ def plot_rainbow_comparison(
 
     config_value = getattr(model, "config", None)
     manifest: dict[str, Any] = {
-        "schema": PLOT_SCHEMA,
+        "schema": "phaseflow.rainbow_plots.v3" if scatter_components is not None else PLOT_SCHEMA,
         "source_kind": "synthetic_fixture" if synthetic else "rainbow_cdf_record",
         "title": heading,
         "configuration": config.to_dict(),
@@ -553,7 +606,7 @@ def plot_rainbow_comparison(
             "equal_area": False,
             "density_measure": "solid_angle_sr",
             "source_to_nf": reference.source_to_nf.tolist(),
-            "scatter_chart_density": "p_per_sr * sin(theta); not p_per_sr alone",
+            "scatter_chart_density": scatter_chart_density,
         },
         "grid": {
             "resolution": "full_native_cdf_cells_no_angular_downsampling",
@@ -587,6 +640,8 @@ def plot_rainbow_comparison(
             "density_floor": None,
         },
         "figures": {
+            "panel_titles": list(panel_titles),
+            "scatter_chart_note": chart_note,
             "individual_size_inches": list(single_size),
             "individual_axes_rectangle": rect,
             "comparison_size_inches": [21.0, 6.2],
@@ -596,6 +651,9 @@ def plot_rainbow_comparison(
         "files": files,
         "arrays": arrays,
     }
+    if scatter_components is not None:
+        manifest["objective"] = scatter_metadata["objective"]
+        manifest["selection_metric"] = checkpoint.get("selection_metric")
     temporary = output / "plots.json.tmp"
     temporary.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     temporary.replace(output / "plots.json")

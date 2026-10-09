@@ -4,6 +4,13 @@
 旧 `docs/MODEL.md` の HG head・折り畳み座標を使うモデルとは区別します．
 今回固定する条件は一つの波長と一つの入射方向で，条件エンコーディングや条件間補間は学習しません．
 
+## 任意の対数密度回帰への拡張
+
+この文書の NLL 学習は schema 2 の既存経路です．明示的な schema 3 の `objective` による
+NLL と log PDF 二乗誤差の併用は，[対数密度回帰の仕様](LOG_DENSITY_OBJECTIVE.md) に記載します．
+混合学習点の重み，独立した球面一様評価，二種類の重み選択と checkpoint version 5 が
+追加されます．以下の HG・RQS・対称性・教師 CDF・座標契約はそのまま適用します．
+
 ## 対応するソルバ出力
 
 入力契約は [`Somatic-Cell/rainbow` のコミット a9538941](https://github.com/Somatic-Cell/rainbow/tree/a9538941dcb9df2de6a4130fa66f625f0133c949)

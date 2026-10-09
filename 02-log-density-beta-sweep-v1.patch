@@ -1,0 +1,1427 @@
+diff --git a/configs/rainbow_log_sweep.json b/configs/rainbow_log_sweep.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..accff2925ffe59782a0ec73a9e30979f3bc44045
+--- /dev/null
++++ b/configs/rainbow_log_sweep.json
+@@ -0,0 +1,15 @@
++{
++  "schema_version": 1,
++  "sweep": {
++    "betas": [0.0, 0.01, 0.03, 0.1, 0.3, 1.0],
++    "include_target_nll_control": true,
++    "include_pure_log_control": false
++  },
++  "diagnostics": {
++    "enabled": true,
++    "theta_band_degrees": [120.0, 150.0],
++    "source_phi_degrees": [-90.0, 0.0, 90.0],
++    "eval_batch_size": 4096,
++    "dpi": 140
++  }
++}
+diff --git a/docs/LOG_LOSS_SWEEP.md b/docs/LOG_LOSS_SWEEP.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e5b0bbc03db9cf3f60dc0c3b7f7e45280a030f18
+--- /dev/null
++++ b/docs/LOG_LOSS_SWEEP.md
+@@ -0,0 +1,154 @@
++# Log PDF の二乗誤差と beta の比較
++
++この実験は，一つの Rainbow CDF の位相関数を **値の評価にも使える形で近似する**ため，
++従来の NLL と，立体角について平均した対数密度誤差を比較します．
++過去の NLL 選択による sweep とは出力・設定・checkpoint 形式を分けます．
++条件間補間，OptiX 実装，実データでの有効性を検証済みとするものではありません．
++
++## 損失と学習点
++
++教師を `p`，NF を `q`，球面一様を `u=1/(4*pi)` とすると，学習目的は次です．
++
++```math
++J_\beta=E_p[-\log q]+\beta E_u[(\log q-\log p)^2].
++```
++
++既定では `r=0.5*p+0.5*u` から固定学習点を作ります．その点での推定は，
++
++```math
++\widehat J_\beta=\frac1B\sum_i\left[
++\frac{p_i}{r_i}(-\log q_i)+\beta\frac{u_i}{r_i}(\log q_i-\log p_i)^2\right]
++```
++
++です．両重みは 2 以下です．バッチ内の自己正規化を行わず，教師値と重みは固定します．
++一様点を混ぜて無重みの NLL を適用すると教師分布が変わるため，その処理は行いません．
++球面一様は `cos(theta)` と azimuth についての一様です．HG CDF 座標の一様とは異なります．
++密度は立体角当たりであり，画像の等間隔行・列や theta を等重みにする目的ではありません．
++
++`log` は自然対数です．`log1p` による MSLE，教師 PDF の floor，平滑化は使用しません．
++正の面積を持つ教師のゼロ密度セルでは log 誤差が有限にならないため，`zero_policy="error"`
++によって学習前に停止します．正の教師に対する現在の比較の仕様です．
++HG の `g`，source/NF の座標契約，全周・鏡映の RQS 構成は維持します．
++
++## バッチから開始する
++
++まず log 損失の core patch，次に sweep patch を適用してください．
++`sweep_log_loss.bat` の `RECORD` を，動作している `execute.bat` と同じ値にします．
++`environment.bat` の Python を共用し，GPU での forward/backward 検査後に開始します．
++CUDA が利用できなくても CPU へ自動的に切り替わることはありません．
++
++```bat
++call sweep_log_loss.bat plan
++call sweep_log_loss.bat
++```
++
++`plan` は設定と更新数を表示するだけで，CDF の読み込み，GPU の確保，学習，出力先の作成を
++行いません．`run` は同じ設定で再度実行すると，完了した結果を検証して再利用し，
++未完了の trial を `checkpoint.pt` から再開します．
++
++別の CMD で監視できます．
++
++```bat
++call monitor.bat "runs\rainbow_log_loss_gpu"
++```
++
++新しい config は `schema_version=3`，最上位に `objective` を持ちます．
++従来の `schema_version=2` で `objective` のない設定も sweep の基礎設定として読めます．
++保存された互換な実験の `config.json` を `CONFIG` に指定すれば，そのモデルと学習設定を
++そのまま使用できます．未対応のモデル・encoding フィールドを黙って取り除くことはしません．
++この sweep は beta と control の損失・sampling 軸を明示的に設定し，全候補の
++`selection_metric` を `log_rmse` に揃えます．基礎設定の beta は sweep の候補値に置換されます．
++
++## 既定の比較条件
++
++| 要素 | 設定 |
++|---|---|
++| beta | 0，0.01，0.03，0.1，0.3，1 |
++| 共通の混合比 | CDF 1/2，球面一様 1/2 |
++| 追加の対照実験 | CDF 点のみ・NLL 学習を 1 本 |
++| 任意の対照実験 | `include_pure_log_control=true` で NLL 係数 0，beta 1 を追加 |
++| モデル | L=16，K=64，hidden=[64,64]，既存の conditioner |
++| 学習率・optimizer | 0.001・既存の Adam |
++| 学習点数 | 合計 262,144；混合 trial は各 131,072 点 |
++| 更新数・minibatch | 20,000 更新・1,024 点 |
++| 精度 | MLP・HG・RQS・方向は FP32；教師参照と統計集計は FP64 |
++| seed / data seed | 415 / 2026 |
++| 教師分布の validation / test | 32,768 / 65,536 点 |
++| 球面一様の validation / test | 別 stream の 32,768 / 65,536 点 |
++| 評価・checkpoint 間隔 | 100 更新 |
++
++既定は 7 本，合計 140,000 更新です．pure-log 対照を追加すると 8 本・160,000 更新です．
++実時間は，GPU，モデル，評価と図の出力に依存します．夜間に終わるという実測保証はありません．
++beta と学習率を同時に変更せず，まずこの条件で対数形状と KL の変化を確認します．
++beta が大きいほど必ず有利という前提はありません．
++
++混合 trial と pure-log 対照では，方向・教師値・成分ラベルを含む pool の SHA-256 が一致します．
++CDF のみの対照は意図的に異なる pool ですが，同じ総点数・初期化 seed・更新数・holdout を使います．
++これは「昔の NLL 最良 checkpoint をそのまま再使用する」対照ではありません．
++全 trial で同じ validation log RMSE を使って checkpoint を選び直す，比較可能な新規実験です．
++
++## 結果と選択規則
++
++| 出力 | 内容 |
++|---|---|
++| `manifest.json` | 全設定，入力とコード・実行環境，独立 stream と共通 pool の識別情報 |
++| `summary.json` / `summary.csv` | 全 trial の状態，beta，log RMSE，KL，step，時間，pool hash |
++| `summary.md` / `summary.png` | beta 比較，KL と log RMSE の関係，検証曲線 |
++| `selection.json` | 全 trial 完了後の validation log RMSE による選択 |
++| `trials/beta_*/best.pt` | validation log RMSE で選ばれた推論用重み |
++| `best_by_log.pt` / `best_by_nll.pt` | 同じ学習履歴で各基準により選ばれた二種類の重み |
++| `checkpoint.pt` | optimizer，RNG と途中状態を含む厳密な再開用状態 |
++| `plots/` | 教師 PDF，全学習点，NF PDF の共通座標の可視化 |
++| `diagnostics/` | 保存 source 座標での角度断面；報告用でモデル選択には使わない |
++| `log_sweep_completed.json` | 完了 trial の変更を検出する成果物の hash |
++
++すべての候補で **同じ独立 validation log RMSE** を最小にする checkpoint を比較します．
++同値なら小さい beta，さらに trial ID の辞書順で選びます．総 loss は beta により定義が
++変わるので，その大小で順位を決めません．test も選択や停止には使用しません．
++検証 KL と検証 log RMSE の Pareto 候補も記録します．NLL 選択時の step・NLL・log RMSE は
++別列で残し，形状重視により前方の確率質量をどれだけ犠牲にしているかを確認できます．
++負の連続 NLL や，有限標本でわずかに負となる KL は，表示のためにゼロへ切り上げません．
++
++全点の散布図は実際の学習 pool を使い，CDF と一様の点を区別します．混合点全体は `r` の
++点群であり，教師 `p` からの点群とは呼びません．過去の固定 32,768 点への置換は行いません．
++
++## 制御された途中停止と再描画
++
++一つの trial の最初の 500 更新だけを確認する場合の例です．予定の 20,000 更新は維持します．
++
++```bat
++call environment.bat
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow.log_sweep run ^
++  --record "YOUR_RECORD" ^
++  --config "configs\rainbow_log_loss.json" ^
++  --sweep-config "configs\rainbow_log_sweep.json" ^
++  --output "runs\rainbow_log_loss_gpu" ^
++  --device cuda:0 --max-steps-this-trial 500
++```
++
++次は制限を外し，同じ設定・同じ出力先で実行します．設定・コード・データ・記録した実行環境が
++違う場合は，別実験として新しい出力先を指定してください．過去の完了済み trial は上書きしません．
++CSV は LF 改行で出力し，CRLF を含む生成 CSV の patch による whitespace 警告を避けます．
++
++```bat
++call sweep_log_loss.bat replot
++```
++
++完了した `best.pt` を検証し，全学習点と角度断面を `OUTPUT/replots/日時/` に再描画します．
++元の trial の重み・数値・図は変えません．一部だけ完了した sweep にも使えます．
++再描画は追加の最適化や test を行いません．
++
++## 文献との対応と主張の範囲
++
++- Jendersie and d'Eon (2023), *An Approximate Mie Scattering Function for Fog and Cloud Rendering*，
++  [§1.1](https://research.nvidia.com/labs/rtr/approximate-mie/publications/approximate-mie.pdf)．
++  log PDF の二乗誤差を使う先行例です．この実験では追加の `abs(cos(theta))` を採用しません．
++- Draine (2003), *Scattering by Interstellar Dust Grains. I. Optical and Ultraviolet*，
++  [§4](https://arxiv.org/abs/astro-ph/0304060)．立体角に関する RMS 相対誤差を評価にも記録します．
++- Li et al. (2025), *Normalizing Flow Regression for Bayesian Inference with Offline Likelihood
++  Evaluations*，[論文](https://arxiv.org/abs/2504.11554)．NF を教師 log density に回帰する先行例です．
++
++上の複合目的・混合 query・現在の HG 球面モデルの組合せは，今回明示的に設計した実験です．
++いずれかの論文の実装・全実験をそのまま再現したとは扱いません．
++形状の誤差が減るか，レンダリングの虹が改善するか，FP16 重みで維持できるかは，
++実際の CDF と GPU・レンダラで別途測定する必要があります．
+diff --git a/src/phaseflow/log_sweep.py b/src/phaseflow/log_sweep.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ebd94c4f6ffb2659040dfa316945b11563438c0
+--- /dev/null
++++ b/src/phaseflow/log_sweep.py
+@@ -0,0 +1,851 @@
++"""Controlled beta experiments for solid-angle log-density regression.
++
++Every candidate uses the same validation log RMSE for checkpoint and sweep
++selection. The total objective and final tests never select the winner. This is
++separate from the historical NLL-selected capacity/sample sweeps.
++"""
++
++from __future__ import annotations
++
++import argparse
++import csv
++import io
++import json
++import math
++import os
++import time
++from dataclasses import asdict, dataclass, replace
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any, Callable
++
++import torch
++
++from .angular_diagnostics import AngularDiagnosticConfig, evaluate_angular_diagnostics
++from .log_objective import (
++    LogObjectiveConfig,
++    make_training_pool,
++    make_uniform_points,
++    verify_positive_teacher,
++)
++from .monitoring import check_tensorboard
++from .plotting import RainbowPlotConfig, plot_rainbow_comparison
++from .rainbow import RainbowReference
++from .single_condition import (
++    FAMILY,
++    SingleTrainingConfig,
++    _array_hash,
++    _code_hash,
++    _points,
++    _resolve_device,
++    _runtime,
++    _validate_selections,
++    load_single_checkpoint,
++    read_single_checkpoint,
++    train_single_condition,
++)
++from .sphere_model import SphereFlowConfig
++from .sweep import _atomic_bytes, _file_hash, _manifest_hash, _read_json, _state_equal
++from .training import _setup_runtime, atomic_json
++
++LOG_SWEEP_SCHEMA = "phaseflow.log_loss_sweep.v1"
++_RECEIPT = "log_sweep_completed.json"
++_SELECTION = (
++    "minimum validation log_rmse; exact ties use lower beta, then trial_id; "
++    "all candidates use validation-log-RMSE-selected checkpoints"
++)
++
++
++@dataclass(frozen=True)
++class LogSweepConfig:
++    betas: tuple[float, ...] = (0.0, 0.01, 0.03, 0.1, 0.3, 1.0)
++    include_target_nll_control: bool = True
++    include_pure_log_control: bool = False
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.betas, (list, tuple)) or not self.betas:
++            raise ValueError("betas must be a nonempty list or tuple")
++        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in self.betas):
++            raise ValueError("betas must contain finite nonnegative numbers")
++        object.__setattr__(self, "betas", tuple(float(v) for v in self.betas))
++        if len(set(self.betas)) != len(self.betas):
++            raise ValueError("betas must be unique")
++        for name in ("include_target_nll_control", "include_pure_log_control"):
++            if type(getattr(self, name)) is not bool:
++                raise ValueError(f"{name} must be boolean")
++
++    def to_dict(self) -> dict[str, Any]:
++        return {**asdict(self), "betas": list(self.betas)}
++
++    @classmethod
++    def from_dict(cls, value: dict[str, Any]) -> LogSweepConfig:
++        if not isinstance(value, dict):
++            raise ValueError("log sweep configuration must be an object")
++        try:
++            return cls(**value)
++        except TypeError as error:
++            raise ValueError(f"Invalid log sweep configuration: {error}") from error
++
++
++def _trial_plan(
++    cfg: SingleTrainingConfig, objective: LogObjectiveConfig, sweep: LogSweepConfig,
++) -> list[dict[str, Any]]:
++    # A supplied saved config controls architecture, precision, data, optimizer
++    # and evaluation counts. These explicit experiment axes replace its loss.
++    common = replace(objective, nll_weight=1.0, sampling="target_uniform",
++                     selection_metric="log_rmse")
++    common.validate_training_count(cfg.train_samples)
++    choices = []
++    if sweep.include_target_nll_control:
++        choices.append(("target_nll", "target_nll_control", replace(common, beta=0.0,
++                                                                   sampling="target")))
++    # Round-trip float text keeps distinct accepted beta values in distinct
++    # trial directories; :g's default six digits can silently collide.
++    choices.extend((f"beta_{str(beta).removesuffix('.0')}", "beta", replace(common, beta=beta))
++                   for beta in sweep.betas)
++    if sweep.include_pure_log_control:
++        choices.append(("pure_log", "pure_log_control", replace(common, nll_weight=0.0, beta=1.0)))
++    return [{
++        "trial_id": name, "kind": kind, "status": "pending",
++        "run_directory": f"trials/{name}", "beta": loss.beta,
++        "nll_weight": loss.nll_weight, "sampling": loss.sampling,
++        "selection_metric": loss.selection_metric, "objective_config": loss.to_dict(),
++        "learning_rate": cfg.learning_rate, "train_samples": cfg.train_samples,
++        "planned_steps": cfg.steps, "batch_size": cfg.batch_size,
++    } for name, kind, loss in choices]
++
++
++def _geometry_dtype(model: SphereFlowConfig, cfg: SingleTrainingConfig) -> torch.dtype:
++    return torch.float64 if model.geometry_dtype == "float64" else getattr(torch, cfg.dtype)
++
++
++def _fixed_streams(
++    reference: RainbowReference, model: SphereFlowConfig, cfg: SingleTrainingConfig,
++    objective: LogObjectiveConfig, rows: list[dict[str, Any]],
++) -> dict[str, Any]:
++    seed = cfg.seed if cfg.data_seed is None else cfg.data_seed
++    geometry_dtype = _geometry_dtype(model, cfg)
++    pools = {}
++    for row in rows:
++        sampling = row["sampling"]
++        if sampling in pools:
++            continue
++        loss = LogObjectiveConfig.from_dict(row["objective_config"])
++        pool = make_training_pool(reference, cfg.train_samples, seed, loss, geometry_dtype)
++        pools[sampling] = {
++            "training_points_sha256": _array_hash(pool.directions, pool.log_p, pool.components),
++            "training_pool": pool.provenance,
++        }
++    return {
++        "data_seed": seed, "training_pools": pools,
++        "validation_points_sha256": _array_hash(
++            *_points(reference, cfg.validation_samples, seed, "validation")
++        ),
++        "validation_uniform_points_sha256": _array_hash(*make_uniform_points(
++            reference, objective.validation_uniform_samples, seed, "validation", geometry_dtype,
++        )),
++        "validation_samples": cfg.validation_samples,
++        "validation_uniform_samples": objective.validation_uniform_samples,
++        "test_samples": cfg.test_samples,
++        "test_uniform_samples": objective.test_uniform_samples,
++        "test_policy": "independent test streams materialized only for completed trial reporting",
++        "sharing": "all mixture betas and pure-log control share identical fixed training queries",
++    }
++
++
++def _check_checkpoint(
++    payload: dict[str, Any], row: dict[str, Any], manifest: dict[str, Any],
++) -> None:
++    for key, expected in {
++        "checkpoint_version": 5, "kind": "training", "model_config": manifest["model"],
++        "training_config": manifest["base_training"],
++        "objective_config": row["objective_config"],
++        "dataset_fingerprint": manifest["dataset_fingerprint"],
++        "code_fingerprint": manifest["training_code_fingerprint"],
++        "runtime": manifest["runtime"],
++    }.items():
++        if payload.get(key) != expected:
++            raise ValueError(f"log sweep checkpoint differs in {key}; use a new output directory")
++    step = payload.get("global_step")
++    if type(step) is not int or not 0 <= step <= manifest["base_training"]["steps"]:
++        raise ValueError("invalid log sweep checkpoint step")
++    _validate_selections(
++        payload.get("selections", {}), payload.get("history", []), step,
++        LogObjectiveConfig.from_dict(row["objective_config"]), payload.get("best_step"),
++        payload.get("best_validation"), payload.get("best_state"),
++    )
++    streams = manifest["fixed_streams"]
++    split = payload.get("sample_split", {})
++    expected_pool = streams["training_pools"][row["sampling"]]
++    for key, expected in {
++        "seed": manifest["base_training"]["seed"], "data_seed": streams["data_seed"],
++        "train_samples": row["train_samples"],
++        "validation_samples": streams["validation_samples"],
++        "test_samples": streams["test_samples"],
++        "training_points_sha256": expected_pool["training_points_sha256"],
++        "training_pool": expected_pool["training_pool"],
++        "validation_points_sha256": streams["validation_points_sha256"],
++        "uniform_validation_points_sha256": streams["validation_uniform_points_sha256"],
++        "validation_uniform_samples": streams["validation_uniform_samples"],
++    }.items():
++        if split.get(key) != expected:
++            raise ValueError(f"log sweep checkpoint point stream differs in {key}")
++
++
++def _selected_fields(directory: Path, row: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
++    checkpoint = read_single_checkpoint(directory / "checkpoint.pt")
++    _check_checkpoint(checkpoint, row, manifest)
++    metrics = _read_json(directory / "metrics.json")
++    steps = manifest["base_training"]["steps"]
++    if not metrics.get("complete") or checkpoint["global_step"] != steps:
++        raise ValueError("completed log trial has an incomplete checkpoint")
++    for key, expected in {
++        "global_step": steps, "selected_step": checkpoint["best_step"],
++        "best_validation": checkpoint["best_validation"],
++        "dataset_fingerprint": manifest["dataset_fingerprint"],
++    }.items():
++        if metrics.get(key) != expected:
++            raise ValueError(f"log trial metrics disagree with checkpoint in {key}")
++    expected_config = {
++        "schema_version": 3, "family": FAMILY, "model": manifest["model"],
++        "training": manifest["base_training"], "objective": row["objective_config"],
++        "visualization": manifest["visualization"],
++    }
++    if _read_json(directory / "config.json") != expected_config:
++        raise ValueError("saved log trial configuration differs from its manifest")
++    if _read_json(directory / "sample_split.json") != checkpoint["sample_split"]:
++        raise ValueError("saved log trial sample split differs from its checkpoint")
++    validation, test = metrics["best_validation"], metrics.get("test")
++    if test is None or not math.isfinite(validation["log_rmse"]):
++        raise ValueError("completed log trial lacks finite validation log RMSE or final test")
++    streams = manifest["fixed_streams"]
++    if (
++        validation.get("sample_count") != streams["validation_samples"]
++        or validation.get("uniform_sample_count") != streams["validation_uniform_samples"]
++        or test.get("seed") != streams["data_seed"]
++        or test.get("sample_count") != streams["test_samples"]
++        or test.get("uniform_sample_count") != streams["test_uniform_samples"]
++        or not isinstance(test.get("uniform_test_points_sha256"), str)
++        or len(test["uniform_test_points_sha256"]) != 64
++    ):
++        raise ValueError("log trial evaluation does not match its common independent holdouts")
++    scheduled = [entry for entry in checkpoint["history"] if "validation" in entry]
++    selected = min(scheduled, key=lambda e: (e["validation"]["log_rmse"], e["global_step"]))
++    if selected["global_step"] != checkpoint["best_step"]:
++        raise ValueError("log trial was not selected by the first minimum validation log RMSE")
++    best = read_single_checkpoint(directory / "best.pt")
++    if (
++        best["kind"] != "inference" or best["global_step"] != checkpoint["best_step"]
++        or best.get("validation") != validation
++        or best.get("selection_metric") != "log_rmse"
++        or any(best.get(key) != checkpoint.get(key) for key in (
++            "model_config", "physics", "dtype", "dataset_fingerprint", "code_fingerprint",
++            "runtime", "objective_config",
++        ))
++        or not _state_equal(best["model_state"], checkpoint["best_state"])
++    ):
++        raise ValueError("best.pt differs from the validation-log-RMSE-selected checkpoint")
++    nll_selected = min(scheduled, key=lambda e: (e["validation"]["nll"], e["global_step"]))
++    for metric, filename, selected_entry in (
++        ("log_rmse", "best_by_log.pt", selected), ("nll", "best_by_nll.pt", nll_selected),
++    ):
++        alternative = read_single_checkpoint(directory / filename)
++        if (
++            alternative.get("kind") != "inference"
++            or alternative.get("selection_metric") != metric
++            or alternative.get("global_step") != selected_entry["global_step"]
++            or alternative.get("validation") != selected_entry["validation"]
++            or any(alternative.get(key) != best.get(key) for key in (
++                "model_config", "physics", "dtype", "dataset_fingerprint", "objective_config",
++            ))
++            or not _state_equal(alternative["model_state"],
++                                checkpoint["selections"][metric]["model_state"])
++        ):
++            raise ValueError(f"{filename} differs from its validation selection")
++        if metric == "log_rmse" and not _state_equal(alternative["model_state"], best["model_state"]):
++            raise ValueError("best_by_log.pt and best.pt weights disagree")
++    count = sum(value.numel() for name, value in best["model_state"].items()
++                if name.endswith("weight") or name.endswith("bias"))
++    split = checkpoint["sample_split"]
++    results = {
++        "global_step": steps, "selected_step": checkpoint["best_step"],
++        "processed_examples": steps * row["batch_size"],
++        "effective_passes": steps * row["batch_size"] / row["train_samples"],
++        "parameter_count": count, "checkpoint_bytes": (directory / "best.pt").stat().st_size,
++        "training_points_sha256": split["training_points_sha256"],
++        "validation_points_sha256": split["validation_points_sha256"],
++        "validation_uniform_points_sha256": split["uniform_validation_points_sha256"],
++        "test_uniform_points_sha256": test["uniform_test_points_sha256"],
++        "training_pool": split["training_pool"],
++        "nll_selected_step": nll_selected["global_step"],
++        "nll_selected_validation_nll": nll_selected["validation"]["nll"],
++        "nll_selected_validation_log_rmse": nll_selected["validation"]["log_rmse"],
++        "test_relative_ess": (test.get("proposal") or {}).get("relative_ess"),
++    }
++    for prefix, values in (("validation", validation), ("test", test)):
++        for key in ("nll", "log_mse", "log_rmse", "relative_rmse"):
++            results[f"{prefix}_{key}"] = values[key]
++        results[f"{prefix}_relative_rmse_status"] = values["relative_rmse_status"]
++        for output, source in (("kl", "forward_kl_estimate"),
++                               ("kl_standard_error", "forward_kl_standard_error"),
++                               ("hg_kl", "hg_forward_kl_estimate")):
++            results[f"{prefix}_{output}"] = values[source]
++    return results
++
++
++def _receipt_files(directory: Path, manifest: dict[str, Any]) -> list[str]:
++    names = {
++        "checkpoint.pt", "best.pt", "best_by_log.pt", "best_by_nll.pt", "metrics.json",
++        "config.json", "data_summary.json", "sample_split.json", "history.json",
++    }
++    if manifest["visualization"]["enabled"]:
++        names.update(("learning_curves.png", "plots/plots.json", "plots/comparison.png",
++                      "plots/training_scatter.npz"))
++        names.update(p.relative_to(directory).as_posix() for p in (directory / "plots").rglob("*")
++                     if p.is_file())
++    if manifest["diagnostics"]["enabled"]:
++        names.add("diagnostics/angular_diagnostics.json")
++        names.update(p.relative_to(directory).as_posix()
++                     for p in (directory / "diagnostics").rglob("*") if p.is_file())
++    return sorted(names)
++
++
++def _verify_receipt(directory: Path, row: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
++    receipt = _read_json(directory / _RECEIPT)
++    if receipt.get("schema") != LOG_SWEEP_SCHEMA or receipt.get("manifest_sha256") != (
++        _manifest_hash(manifest)
++    ):
++        raise ValueError("completed log trial belongs to a different sweep")
++    hashes = receipt.get("files_sha256", {})
++    if not set(_receipt_files(directory, manifest)) <= hashes.keys():
++        raise ValueError("completed log trial receipt lacks required artifacts")
++    for name, expected in hashes.items():
++        path = directory / name
++        if not path.resolve().is_relative_to(directory.resolve()):
++            raise ValueError("invalid file path in completed log trial receipt")
++        if not path.is_file() or _file_hash(path) != expected:
++            raise ValueError(f"completed log trial file changed or missing: {path}")
++    results = _selected_fields(directory, row, manifest)
++    if receipt.get("results") != results:
++        raise ValueError("completed log trial metrics differ from its receipt")
++    return {**results, "elapsed_seconds": receipt["elapsed_seconds"]}
++
++
++def _write_receipt(
++    directory: Path, row: dict[str, Any], manifest: dict[str, Any], elapsed: float,
++) -> dict[str, Any]:
++    results = _selected_fields(directory, row, manifest)
++    atomic_json(directory / _RECEIPT, {
++        "schema": LOG_SWEEP_SCHEMA, "manifest_sha256": _manifest_hash(manifest),
++        "files_sha256": {name: _file_hash(directory / name)
++                          for name in _receipt_files(directory, manifest)},
++        "results": results, "elapsed_seconds": elapsed,
++        "timing_scope": "recorded trial attempts including teacher setup/evaluation/plots",
++    })
++    return {**results, "elapsed_seconds": elapsed}
++
++
++def _pareto_ids(rows: list[dict[str, Any]]) -> list[str]:
++    complete = [row for row in rows if row["status"] == "complete"]
++    return [row["trial_id"] for row in complete if not any(
++        other["validation_log_rmse"] <= row["validation_log_rmse"]
++        and other["validation_kl"] <= row["validation_kl"]
++        and (other["validation_log_rmse"] < row["validation_log_rmse"]
++             or other["validation_kl"] < row["validation_kl"])
++        for other in complete
++    )]
++
++
++def _check_common_test_stream(rows: list[dict[str, Any]], additional: str | None = None) -> None:
++    hashes = {row["test_uniform_points_sha256"] for row in rows if row["status"] == "complete"}
++    if additional is not None:
++        hashes.add(additional)
++    if len(hashes) > 1:
++        raise ValueError("completed log trials used different uniform test streams")
++
++
++def _selection(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, Any]:
++    winner = min(rows, key=lambda row: (row["validation_log_rmse"], row["beta"], row["trial_id"]))
++    return {
++        "schema": LOG_SWEEP_SCHEMA, "manifest_sha256": _manifest_hash(manifest),
++        "selected_trial_id": winner["trial_id"], "selected_kind": winner["kind"],
++        "selected_beta": winner["beta"], "selected_nll_weight": winner["nll_weight"],
++        "selected_sampling": winner["sampling"],
++        "selected_validation_log_rmse": winner["validation_log_rmse"],
++        "selected_validation_kl": winner["validation_kl"],
++        "selected_step": winner["selected_step"], "run_directory": winner["run_directory"],
++        "rule": _SELECTION, "test_used": False, "total_loss_used": False,
++        "pareto_trial_ids": _pareto_ids(rows),
++    }
++
++
++_COLUMNS = (
++    "trial_id", "kind", "status", "beta", "nll_weight", "sampling", "selection_metric",
++    "learning_rate", "train_samples", "batch_size", "planned_steps", "global_step",
++    "selected_step", "processed_examples", "effective_passes", "validation_log_rmse",
++    "validation_log_mse", "validation_relative_rmse", "validation_nll", "validation_kl",
++    "validation_kl_standard_error", "test_log_rmse", "test_relative_rmse", "test_nll",
++    "test_kl", "test_kl_standard_error", "test_relative_ess", "nll_selected_step",
++    "nll_selected_validation_nll", "nll_selected_validation_log_rmse", "elapsed_seconds",
++    "parameter_count", "checkpoint_bytes", "training_points_sha256",
++    "validation_points_sha256", "validation_uniform_points_sha256", "test_uniform_points_sha256",
++    "validation_relative_rmse_status", "test_relative_rmse_status", "run_directory",
++)
++
++
++def _summary_plot(output: Path, summary: dict[str, Any]) -> None:
++    from matplotlib.backends.backend_agg import FigureCanvasAgg
++    from matplotlib.figure import Figure
++
++    figure = Figure(figsize=(13, 9), layout="constrained")
++    FigureCanvasAgg(figure)
++    axes = figure.subplots(2, 2)
++    complete = [row for row in summary["trials"] if row["status"] == "complete"]
++    beta_rows = sorted((r for r in complete if r["kind"] == "beta"), key=lambda r: r["beta"])
++    for ax, key, ylabel in (
++        (axes[0, 0], "validation_log_rmse", "Validation log PDF RMSE [nats]"),
++        (axes[0, 1], "validation_kl", "Validation forward KL [nats]"),
++    ):
++        if beta_rows:
++            ax.plot([r["beta"] for r in beta_rows], [r[key] for r in beta_rows], "o-",
++                    label="Mixture: NLL + beta log-MSE")
++            positive = [r["beta"] for r in beta_rows if r["beta"] > 0]
++            ax.set_xscale("symlog", linthresh=min(positive) if positive else 0.01)
++            ax.set_xticks([r["beta"] for r in beta_rows], [f"{r['beta']:g}" for r in beta_rows])
++        for row in complete:
++            if row["kind"] != "beta":
++                ax.axhline(row[key], linestyle="--", label=row["trial_id"])
++        ax.set_xlabel("Beta (zero included)")
++        ax.set_ylabel(ylabel)
++        if complete:
++            ax.legend(fontsize=8)
++    for row in complete:
++        axes[1, 0].scatter(row["validation_kl"], row["validation_log_rmse"], s=40)
++        axes[1, 0].annotate(row["trial_id"],
++                            (row["validation_kl"], row["validation_log_rmse"]), fontsize=8)
++    axes[1, 0].set_xlabel("Validation forward KL [nats]")
++    axes[1, 0].set_ylabel("Validation log PDF RMSE [nats]")
++    axes[1, 0].set_title("Both smaller is better; no test-based selection")
++    for row in summary["trials"]:
++        history_path = output / row["run_directory"] / "history.json"
++        if not history_path.is_file():
++            continue
++        values = [entry for entry in _read_json(history_path) if "validation" in entry]
++        if values:
++            axes[1, 1].plot([v["global_step"] for v in values],
++                            [v["validation"]["log_rmse"] for v in values],
++                            label=row["trial_id"])
++    axes[1, 1].set_xlabel("Optimizer updates")
++    axes[1, 1].set_ylabel("Current validation log PDF RMSE [nats]")
++    if axes[1, 1].lines:
++        axes[1, 1].legend(fontsize=8)
++    for ax in axes.flat:
++        ax.grid(alpha=0.25)
++    figure.suptitle(
++        "Single-condition log-density objective comparison\n"
++        "Common holdouts, fixed model/data size/update count; validation log RMSE selects weights",
++        fontsize=11,
++    )
++    buffer = io.BytesIO()
++    figure.savefig(buffer, format="png", dpi=150)
++    _atomic_bytes(output / "summary.png", buffer.getvalue())
++    figure.clear()
++
++
++def _write_summary(output: Path, summary: dict[str, Any]) -> None:
++    summary["pareto_trial_ids"] = _pareto_ids(summary["trials"])
++    atomic_json(output / "summary.json", summary)
++    buffer = io.StringIO(newline="")
++    writer = csv.DictWriter(buffer, fieldnames=_COLUMNS, extrasaction="ignore", lineterminator="\n")
++    writer.writeheader()
++    writer.writerows(summary["trials"])
++    _atomic_bytes(output / "summary.csv", buffer.getvalue().encode("utf-8-sig"))
++
++    def number(value: Any) -> str:
++        return "-" if value is None else f"{value:.6g}"
++
++    lines = [
++        "# Single-condition log-density loss sweep", "", f"Status: **{summary['status']}**.", "",
++        "All trials select checkpoints by the same independent validation log RMSE.",
++        "Beta changes the training objective; total losses across beta are not ranking scores.",
++        "Final test metrics, angular profiles and training errors do not select the winner.", "",
++        "| Trial | Status | Beta | NLL weight | Validation log RMSE | Validation KL | Best step | Seconds |",
++        "|---|---|---:|---:|---:|---:|---:|---:|",
++    ]
++    for row in summary["trials"]:
++        lines.append(
++            f"| [{row['trial_id']}]({row['run_directory']}/metrics.json) | {row['status']} | "
++            f"{row['beta']:g} | {row['nll_weight']:g} | {number(row.get('validation_log_rmse'))} | "
++            f"{number(row.get('validation_kl'))} | {row.get('selected_step', '-')} | "
++            f"{number(row.get('elapsed_seconds'))} |"
++        )
++    if summary.get("selection"):
++        selected = summary["selection"]
++        lines.extend(["", f"Validation log-RMSE winner: **{selected['selected_trial_id']}**.",
++                      f"Checkpoint: `{selected['run_directory']}/best.pt`."])
++    else:
++        lines.extend(["", "No final winner is declared until all planned trials are complete."])
++    lines.extend([
++        "", "Pareto set for validation KL and log RMSE: "
++        + (", ".join(f"`{name}`" for name in summary["pareto_trial_ids"]) or "none yet") + ".",
++        "", "![Beta comparison and validation histories](summary.png)", "",
++        "Each trial preserves best.pt (= best_by_log.pt), best_by_nll.pt and checkpoint.pt.",
++        "The NLL-selected alternative is reporting-only; its step/log RMSE/NLL are in CSV/JSON.",
++        "Mixture betas share the same actual pool; target_nll has an intentionally different pool.",
++        "Mixed training scatter shows all actual CDF and uniform queries with distinct labels.",
++        "Log RMSE uses natural log density ratios and uniform solid angle, without log1p or a floor.",
++        "KL Monte Carlo estimates may be negative. One condition/seed does not establish generality.",
++        "Elapsed seconds include setup/evaluation/plots and are not GPU kernel timings.",
++    ])
++    if summary.get("error"):
++        lines.extend(["", "## Stopped trial", "", summary["error"]])
++    _atomic_bytes(output / "summary.md", ("\n".join(lines) + "\n").encode("utf-8"))
++    _summary_plot(output, summary)
++
++
++def run_log_loss_sweep(
++    reference: RainbowReference,
++    model_config: SphereFlowConfig,
++    training_config: SingleTrainingConfig,
++    output_directory: str | Path,
++    *,
++    objective_config: LogObjectiveConfig | None = None,
++    sweep_config: LogSweepConfig | None = None,
++    make_plots: bool = True,
++    plot_config: RainbowPlotConfig | None = None,
++    diagnostic_config: AngularDiagnosticConfig | None = None,
++    diagnostics_enabled: bool = True,
++    callback: Callable[[dict[str, Any]], None] | None = None,
++    max_trials_this_run: int | None = None,
++    max_steps_this_trial: int | None = None,
++) -> dict[str, Any]:
++    """Train independent beta trials; verify immutable results before exact reuse.
++
++    A controlled step limit pauses within a trial without changing its planned
++    final update count. Rerun without that limit to complete the same experiment.
++    """
++    for name, value in (("max_trials_this_run", max_trials_this_run),
++                        ("max_steps_this_trial", max_steps_this_trial)):
++        if value is not None and (type(value) is not int or value < 0):
++            raise ValueError(f"{name} must be a nonnegative integer")
++    if type(make_plots) is not bool or type(diagnostics_enabled) is not bool:
++        raise ValueError("make_plots and diagnostics_enabled must be boolean")
++    objective = objective_config or LogObjectiveConfig()
++    sweep = sweep_config or LogSweepConfig()
++    plotting = plot_config or RainbowPlotConfig()
++    diagnostic = diagnostic_config or AngularDiagnosticConfig()
++    cfg = training_config
++    rows = _trial_plan(cfg, objective, sweep)
++    if cfg.tensorboard:
++        check_tensorboard()
++    if torch.device(cfg.device).type == "cuda" and cfg.deterministic:
++        workspace = os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
++        if workspace not in (":4096:8", ":16:8"):
++            raise ValueError("deterministic CUDA requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8")
++    device = _resolve_device(cfg.device)
++    _setup_runtime(cfg)
++    # Fail for a true-zero teacher before writing a manifest or any trial.
++    teacher_check = verify_positive_teacher(reference)
++    manifest = {
++        "schema": LOG_SWEEP_SCHEMA, "model": model_config.to_dict(),
++        "base_training": cfg.to_dict(), "base_objective": objective.to_dict(),
++        "sweep": sweep.to_dict(), "visualization": {"enabled": make_plots, **plotting.to_dict()},
++        "diagnostics": {"enabled": diagnostics_enabled, "configuration": diagnostic.to_dict()},
++        "dataset_fingerprint": reference.fingerprint(), "data_summary": reference.summary(),
++        "teacher_log_domain_check": teacher_check,
++        "training_code_fingerprint": _code_hash(), "sweep_code_sha256": _file_hash(Path(__file__)),
++        "plotting_code_sha256": _file_hash(Path(__file__).with_name("plotting.py")),
++        "diagnostic_code_sha256": _file_hash(Path(__file__).with_name("angular_diagnostics.py")),
++        "runtime": _runtime(device, cfg.dtype),
++        "fixed_streams": _fixed_streams(reference, model_config, cfg, objective, rows),
++        "selection": _SELECTION, "test_policy": "report only; never used for model selection",
++        "trial_objectives": {row["trial_id"]: row["objective_config"] for row in rows},
++    }
++    output = Path(output_directory)
++    manifest_path = output / "manifest.json"
++    if manifest_path.exists():
++        if _read_json(manifest_path) != manifest:
++            raise ValueError("log sweep data/configuration/code/runtime changed; use a new output directory")
++    else:
++        if output.exists() and any(output.iterdir()):
++            raise FileExistsError("log sweep output is nonempty without a manifest; choose a new folder")
++        output.mkdir(parents=True, exist_ok=True)
++        atomic_json(manifest_path, manifest)
++    # Verify *all* previously complete trials before updating any scientific
++    # result. A corrupt later trial must not allow earlier ones to be retrained.
++    for row in rows:
++        directory = output / row["run_directory"]
++        if (directory / _RECEIPT).is_file():
++            row.update(_verify_receipt(directory, row, manifest), status="complete")
++        elif (directory / "checkpoint.pt").is_file():
++            payload = read_single_checkpoint(directory / "checkpoint.pt")
++            _check_checkpoint(payload, row, manifest)
++            row.update(status="partial", global_step=payload["global_step"])
++        elif directory.exists() and any(directory.iterdir()):
++            raise FileExistsError(f"partial log trial has no resumable checkpoint: {directory}")
++    _check_common_test_stream(rows)
++    summary = {
++        "schema": LOG_SWEEP_SCHEMA, "manifest_sha256": _manifest_hash(manifest),
++        "status": "running", "trials": rows, "selection": None,
++        "selection_metric": "validation_log_rmse", "test_used_for_selection": False,
++        "total_loss_used_for_selection": False,
++        "scope": "single condition and fixed seed; synthetic inputs are not optical validation",
++    }
++    executed = 0
++
++    def notify(event: dict[str, Any]) -> None:
++        if callback is not None:
++            callback(event)
++
++    try:
++        for row in rows:
++            if row["status"] == "complete":
++                notify({"event": "trial_reused", "trial_id": row["trial_id"]})
++                continue
++            if max_trials_this_run is not None and executed >= max_trials_this_run:
++                summary["status"] = "paused"
++                break
++            directory = output / row["run_directory"]
++            checkpoint = directory / "checkpoint.pt"
++            resume = checkpoint if checkpoint.is_file() else None
++            row["status"] = "running"
++            _write_summary(output, summary)
++            notify({"event": "trial_resumed" if resume else "trial_started",
++                    "trial_id": row["trial_id"], "beta": row["beta"],
++                    "sampling": row["sampling"], "run_directory": str(directory)})
++            attempts_path = output / "attempts" / f"{row['trial_id']}.json"
++            attempts = _read_json(attempts_path) if attempts_path.exists() else []
++            started = time.perf_counter()
++            executed += 1
++            succeeded = False
++            try:
++                result = train_single_condition(
++                    reference, model_config, cfg, directory,
++                    objective_config=LogObjectiveConfig.from_dict(row["objective_config"]),
++                    resume=resume, max_steps_this_run=max_steps_this_trial,
++                    make_plots=make_plots, plot_config=plotting,
++                    callback=lambda event, name=row["trial_id"]: notify({**event, "trial_id": name}),
++                )
++                if result.complete:
++                    _check_common_test_stream(rows, result.metrics["test"]["uniform_test_points_sha256"])
++                if result.complete and diagnostics_enabled:
++                    evaluate_angular_diagnostics(
++                        result.model, reference, directory / "diagnostics",
++                        train_samples=cfg.train_samples, batch_size=cfg.batch_size,
++                        config=diagnostic, checkpoint_path=directory / "best.pt",
++                        objective_config=LogObjectiveConfig.from_dict(row["objective_config"]),
++                    )
++                succeeded = result.complete
++            finally:
++                attempts.append({"elapsed_seconds": time.perf_counter() - started,
++                                 "complete": succeeded, "resumed": resume is not None})
++                atomic_json(attempts_path, attempts)
++            row["global_step"] = result.global_step
++            if not result.complete:
++                row["status"] = "partial"
++                summary["status"] = "paused"
++                del result
++                break
++            elapsed = sum(attempt["elapsed_seconds"] for attempt in attempts)
++            row.update(_write_receipt(directory, row, manifest, elapsed), status="complete")
++            del result
++            notify({"event": "trial_completed", "trial_id": row["trial_id"],
++                    "validation_log_rmse": row["validation_log_rmse"],
++                    "validation_kl": row["validation_kl"]})
++            _write_summary(output, summary)
++        if all(row["status"] == "complete" for row in rows):
++            summary["status"] = "complete"
++            summary["selection"] = _selection(rows, manifest)
++            selection_path = output / "selection.json"
++            if selection_path.exists() and _read_json(selection_path) != summary["selection"]:
++                raise ValueError("saved log sweep selection differs from verified validation results")
++            if not selection_path.exists():
++                atomic_json(selection_path, summary["selection"])
++        _write_summary(output, summary)
++        return summary
++    except BaseException as error:
++        summary["status"] = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
++        summary["error"] = f"{type(error).__name__}: {error}"
++        for row in rows:
++            if row["status"] == "running":
++                row["status"] = summary["status"]
++        _write_summary(output, summary)
++        raise
++
++
++def replot_log_loss_sweep(
++    reference: RainbowReference, sweep_directory: str | Path, output_directory: str | Path,
++    *, device: str | None = None,
++) -> dict[str, Any]:
++    """Render verified completed weights in a new tree; never train or edit trials."""
++    source, output = Path(sweep_directory).resolve(), Path(output_directory).resolve()
++    manifest = _read_json(source / "manifest.json")
++    if manifest.get("schema") != LOG_SWEEP_SCHEMA:
++        raise ValueError("not a log-loss sweep manifest")
++    if reference.fingerprint() != manifest["dataset_fingerprint"]:
++        raise ValueError("replot teacher differs from the saved log sweep")
++    cfg = SingleTrainingConfig.from_dict(manifest["base_training"])
++    rows = _trial_plan(cfg, LogObjectiveConfig.from_dict(manifest["base_objective"]),
++                       LogSweepConfig.from_dict(manifest["sweep"]))
++    complete = []
++    for row in rows:
++        directory = source / row["run_directory"]
++        if output == directory or output.is_relative_to(directory) or directory.is_relative_to(output):
++            raise ValueError("replot output must be disjoint from every saved trial")
++        if (directory / _RECEIPT).is_file():
++            complete.append({**row, **_verify_receipt(directory, row, manifest)})
++    if not complete:
++        raise ValueError("no verified completed log trials to replot")
++    if output.exists() and any(output.iterdir()):
++        raise FileExistsError("replot output must be empty; choose a new directory")
++    replot_cfg = replace(cfg, device=device or cfg.device)
++    if torch.device(replot_cfg.device).type == "cuda" and replot_cfg.deterministic:
++        workspace = os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
++        if workspace not in (":4096:8", ":16:8"):
++            raise ValueError("deterministic CUDA requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8")
++    target_device = _resolve_device(device or cfg.device)
++    _setup_runtime(replot_cfg)
++    plot_values = {key: value for key, value in manifest["visualization"].items() if key != "enabled"}
++    plotting = RainbowPlotConfig.from_dict(plot_values)
++    diagnostic = AngularDiagnosticConfig.from_dict(manifest["diagnostics"]["configuration"])
++    output.mkdir(parents=True, exist_ok=True)
++    report = {
++        "schema": LOG_SWEEP_SCHEMA, "status": "running", "optimizer_updates": 0,
++        "source_manifest_sha256": _manifest_hash(manifest), "trials": [],
++        "runtime": _runtime(target_device, cfg.dtype),
++        "plotting_code_sha256": _file_hash(Path(__file__).with_name("plotting.py")),
++        "diagnostic_code_sha256": _file_hash(Path(__file__).with_name("angular_diagnostics.py")),
++        "sweep_code_sha256": _file_hash(Path(__file__)),
++    }
++    atomic_json(output / "replot.json", report)
++    for row in complete:
++        checkpoint = source / row["run_directory"] / "best.pt"
++        model, payload = load_single_checkpoint(checkpoint, device=target_device)
++        destination = output / row["trial_id"]
++        plot_rainbow_comparison(
++            model, reference, destination / "plots", config=plotting,
++            checkpoint_path=checkpoint, selected_step=payload["global_step"],
++            title=f"{row['trial_id']} | validation log RMSE selected, step {payload['global_step']}",
++        )
++        if manifest["diagnostics"]["enabled"]:
++            evaluate_angular_diagnostics(
++                model, reference, destination / "diagnostics", train_samples=cfg.train_samples,
++                batch_size=cfg.batch_size, config=diagnostic, checkpoint_path=checkpoint,
++                objective_config=LogObjectiveConfig.from_dict(row["objective_config"]),
++            )
++        report["trials"].append({"trial_id": row["trial_id"], "plot_directory": row["trial_id"],
++                                 "checkpoint_sha256": _file_hash(checkpoint),
++                                 "training_points_sha256": row["training_points_sha256"]})
++        atomic_json(output / "replot.json", report)
++        del model
++    report["status"] = "complete"
++    atomic_json(output / "replot.json", report)
++    return report
++
++
++def _read_base_config(path: Path, device: str | None):
++    values = _read_json(path)
++    if not isinstance(values, dict) or values.get("family") != FAMILY:
++        raise ValueError("base config must describe the Rainbow single-condition family")
++    allowed = {"schema_version", "family", "model", "training", "visualization"}
++    version = values.get("schema_version")
++    if type(version) is not int:
++        raise ValueError("base config schema_version must be an integer")
++    if version == 3:
++        allowed.add("objective")
++        if "objective" not in values:
++            raise ValueError("schema-3 base config requires an explicit objective")
++    elif version != 2:
++        raise ValueError("base config requires schema_version=2 or 3")
++    if set(values) - allowed or not {"model", "training"} <= values.keys():
++        raise ValueError("unknown/missing base config fields; objective requires schema_version=3")
++    model = SphereFlowConfig.from_dict(values["model"])
++    training_values = dict(values["training"])
++    if device is not None:
++        training_values["device"] = device
++    training = SingleTrainingConfig.from_dict(training_values)
++    visualization = dict(values.get("visualization", {}))
++    enabled = visualization.pop("enabled", True)
++    if type(enabled) is not bool:
++        raise ValueError("visualization.enabled must be boolean")
++    plotting = RainbowPlotConfig.from_dict(visualization)
++    objective = LogObjectiveConfig.from_dict(values["objective"]) if version == 3 else LogObjectiveConfig()
++    return model, training, objective, enabled, plotting
++
++
++def _read_sweep_config(path: Path):
++    values = _read_json(path)
++    if (
++        not isinstance(values, dict) or type(values.get("schema_version")) is not int
++        or values.get("schema_version") != 1
++        or set(values) != {"schema_version", "sweep", "diagnostics"}
++        or not isinstance(values["diagnostics"], dict)
++    ):
++        raise ValueError("log sweep config requires schema_version=1, sweep and diagnostics")
++    sweep = LogSweepConfig.from_dict(values["sweep"])
++    diagnostic = values["diagnostics"].copy()
++    enabled = diagnostic.pop("enabled", True)
++    if type(enabled) is not bool:
++        raise ValueError("diagnostics.enabled must be boolean")
++    return sweep, enabled, AngularDiagnosticConfig.from_dict(diagnostic)
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("mode", nargs="?", choices=("run", "plan", "replot"), default="run")
++    parser.add_argument("--record", required=True, type=Path)
++    parser.add_argument("--config", type=Path, default=Path("configs/rainbow_log_loss.json"))
++    parser.add_argument("--sweep-config", type=Path, default=Path("configs/rainbow_log_sweep.json"))
++    parser.add_argument("--output", required=True, type=Path, help="new/existing sweep directory")
++    parser.add_argument("--device", help="CUDA default from config; cpu is an explicit debug choice")
++    parser.add_argument("--no-plots", action="store_true")
++    parser.add_argument("--no-diagnostics", action="store_true")
++    parser.add_argument("--quiet", action="store_true")
++    parser.add_argument("--max-trials-this-run", type=int)
++    parser.add_argument("--max-steps-this-trial", type=int)
++    parser.add_argument("--plot-output", type=Path, help="replot only: new directory, disjoint from trials")
++    args = parser.parse_args(argv)
++    if args.mode == "replot":
++        destination = args.plot_output or args.output / "replots" / datetime.now(timezone.utc).strftime(
++            "%Y%m%d-%H%M%S-%f"
++        )
++        with RainbowReference(args.record) as reference:
++            report = replot_log_loss_sweep(reference, args.output, destination, device=args.device)
++        print(json.dumps({**report, "output_directory": str(destination.resolve())}, allow_nan=False))
++        return 0
++    if args.plot_output is not None:
++        parser.error("--plot-output applies only to replot")
++    model, training, objective, plot_enabled, plotting = _read_base_config(args.config, args.device)
++    sweep, diagnostic_enabled, diagnostic = _read_sweep_config(args.sweep_config)
++    if args.mode == "plan":
++        rows = _trial_plan(training, objective, sweep)
++        print(json.dumps({
++            "schema": LOG_SWEEP_SCHEMA, "status": "planned", "optimizer_updates": 0,
++            "planned_total_updates": len(rows) * training.steps,
++            "record": str(args.record.resolve()), "output": str(args.output.resolve()),
++            "model": model.to_dict(), "training": training.to_dict(), "trials": rows,
++            "selection": _SELECTION,
++            "checks": "configuration only; no CDF/GPU access, output creation or training",
++        }, indent=2, allow_nan=False))
++        return 0
++
++    def progress(event: dict[str, Any]) -> None:
++        if not args.quiet:
++            print(json.dumps(event, allow_nan=False), flush=True)
++
++    with RainbowReference(args.record) as reference:
++        summary = run_log_loss_sweep(
++            reference, model, training, args.output, objective_config=objective,
++            sweep_config=sweep, make_plots=plot_enabled and not args.no_plots, plot_config=plotting,
++            diagnostic_config=diagnostic, diagnostics_enabled=diagnostic_enabled and not args.no_diagnostics,
++            callback=progress, max_trials_this_run=args.max_trials_this_run,
++            max_steps_this_trial=args.max_steps_this_trial,
++        )
++    print(json.dumps({"status": summary["status"], "complete": summary["status"] == "complete",
++                      "output_directory": str(args.output.resolve()),
++                      "selection": summary["selection"]}, allow_nan=False))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/sweep_log_loss.bat b/sweep_log_loss.bat
+new file mode 100644
+index 0000000000000000000000000000000000000000..291db1c5845464170e4239bcefc2c2260b777cbb
+--- /dev/null
++++ b/sweep_log_loss.bat
+@@ -0,0 +1,118 @@
++@echo off
++setlocal EnableExtensions DisableDelayedExpansion
++
++rem Use exactly the same RECORD and Python environment as the working execute.bat.
++rem New output only: keep all prior NLL/capacity/encoding sweeps unchanged.
++rem run: target-NLL control plus six shared-pool beta trials.
++rem plan: print configuration and update counts without opening the CDF or GPU.
++rem replot: redraw completed best.pt weights into a new timestamped subtree.
++set "RECORD=..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800"
++set "CONFIG=configs\rainbow_log_loss.json"
++set "SWEEP_CONFIG=configs\rainbow_log_sweep.json"
++set "OUTPUT=runs\rainbow_log_loss_gpu"
++set "DEVICE=cuda:0"
++
++pushd "%~dp0"
++if not "%ERRORLEVEL%"=="0" exit /b 1
++if not "%~2"=="" goto :usage
++set "MODE=%~1"
++if "%MODE%"=="" set "MODE=run"
++if /i "%MODE%"=="run" goto :environment
++if /i "%MODE%"=="plan" goto :environment
++if /i "%MODE%"=="replot" goto :environment
++goto :usage
++
++:environment
++if not exist "environment.bat" goto :missing_environment
++if not exist "scripts\check_environment.py" goto :missing_environment
++call environment.bat
++if not "%ERRORLEVEL%"=="0" goto :failed
++if /i "%MODE%"=="plan" goto :plan
++echo Checking the shared Python and CUDA environment...
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% "scripts\check_environment.py" check --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++if not exist "%RECORD%\metadata.json" goto :missing_record
++if /i "%MODE%"=="replot" goto :replot
++if not exist "%CONFIG%" goto :missing_config
++if not exist "%SWEEP_CONFIG%" goto :missing_config
++
++echo Comparing beta using common validation log RMSE and independent training runs.
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow.log_sweep run ^
++    --record "%RECORD%" ^
++    --config "%CONFIG%" ^
++    --sweep-config "%SWEEP_CONFIG%" ^
++    --output "%OUTPUT%" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Summary: "%OUTPUT%\summary.md"
++echo Table: "%OUTPUT%\summary.csv"
++echo Plot: "%OUTPUT%\summary.png"
++echo Selection: "%OUTPUT%\selection.json"
++echo Monitor: call monitor.bat "%OUTPUT%"
++set "EXIT_CODE=0"
++goto :finish
++
++:plan
++if not exist "%CONFIG%" goto :missing_config
++if not exist "%SWEEP_CONFIG%" goto :missing_config
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow.log_sweep plan ^
++    --record "%RECORD%" ^
++    --config "%CONFIG%" ^
++    --sweep-config "%SWEEP_CONFIG%" ^
++    --output "%OUTPUT%" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++set "EXIT_CODE=0"
++goto :finish
++
++:replot
++if not exist "%OUTPUT%\manifest.json" goto :missing_sweep
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow.log_sweep replot ^
++    --record "%RECORD%" ^
++    --output "%OUTPUT%" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Revised plots are in a new directory under "%OUTPUT%\replots".
++echo Original trial checkpoints, metrics and plots were preserved.
++set "EXIT_CODE=0"
++goto :finish
++
++:missing_environment
++echo [ERROR] Keep this batch, environment.bat, and scripts\check_environment.py in one checkout.
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_record
++echo [ERROR] Missing "%RECORD%\metadata.json". Copy RECORD from your working execute.bat.
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_config
++echo [ERROR] Check CONFIG="%CONFIG%" and SWEEP_CONFIG="%SWEEP_CONFIG%".
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_sweep
++echo [ERROR] OUTPUT must contain manifest.json from this log-loss sweep.
++set "EXIT_CODE=1"
++goto :finish
++
++:usage
++echo Usage: sweep_log_loss.bat [run^|plan^|replot]
++echo No argument runs or exactly resumes the beta comparison.
++set "EXIT_CODE=2"
++goto :finish
++
++:failed
++set "EXIT_CODE=%ERRORLEVEL%"
++echo.
++echo [ERROR] Command failed with exit code %EXIT_CODE%. See the output above.
++echo Use the same interpreter selected in environment.bat; no automatic installation occurs.
++
++:finish
++popd
++echo.
++if not "%PHASEFLOW_PAUSE%"=="0" pause
++exit /b %EXIT_CODE%
+diff --git a/tests/test_log_launcher.py b/tests/test_log_launcher.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..87ebadfb447f94824dd7f84b6ad68dca20646b31
+--- /dev/null
++++ b/tests/test_log_launcher.py
+@@ -0,0 +1,49 @@
++"""Static Windows launch wiring and actual Python planning; not CMD execution."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++from phaseflow.log_sweep import main
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def test_default_plan_is_seven_fixed_capacity_trials(tmp_path, capsys):
++    output = tmp_path / "runs"
++    assert main([
++        "plan", "--record", str(tmp_path / "missing_cdf"),
++        "--config", str(ROOT / "configs/rainbow_log_loss.json"),
++        "--sweep-config", str(ROOT / "configs/rainbow_log_sweep.json"),
++        "--output", str(output),
++    ]) == 0
++    result = json.loads(capsys.readouterr().out)
++    assert result["planned_total_updates"] == 140000
++    assert len(result["trials"]) == 7
++    assert [row["beta"] for row in result["trials"] if row["kind"] == "beta"] == [
++        0.0, 0.01, 0.03, 0.1, 0.3, 1.0,
++    ]
++    assert result["model"]["num_coupling_layers"] == 16
++    assert result["model"]["num_bins"] == 64
++    assert result["model"]["hidden_features"] == [64, 64]
++    assert result["model"]["geometry_dtype"] == result["model"]["spline_dtype"] == "model"
++    assert result["training"]["dtype"] == "float32"
++    assert result["training"]["device"] == "cuda"
++    assert result["training"]["learning_rate"] == 0.001
++    assert result["training"]["train_samples"] == 262144
++    assert not output.exists()
++
++
++def test_batch_uses_shared_interpreter_cuda_preflight_and_standalone_modes():
++    source = (ROOT / "sweep_log_loss.bat").read_text(encoding="utf-8")
++    assert "setlocal EnableExtensions DisableDelayedExpansion" in source
++    assert "call environment.bat" in source
++    assert 'check_environment.py" check --device "%DEVICE%"' in source
++    assert 'set "DEVICE=cuda:0"' in source
++    assert 'pushd "%~dp0"' in source and "popd" in source
++    assert "pip install" not in source and ".venv" not in source
++    for mode in ("run", "plan", "replot"):
++        assert f"-m phaseflow.log_sweep {mode}" in source
++    assert 'if not "%ERRORLEVEL%"=="0" goto :failed' in source
++    assert 'exit /b %EXIT_CODE%' in source
+diff --git a/tests/test_log_sweep.py b/tests/test_log_sweep.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8acd479db87dd6c85b99f119d7279fd127bccc01
+--- /dev/null
++++ b/tests/test_log_sweep.py
+@@ -0,0 +1,204 @@
++"""Small synthetic CPU experiments; no Rainbow optics/CUDA claims."""
++
++from __future__ import annotations
++
++import json
++from dataclasses import replace
++
++import pytest
++from test_single_condition import assert_state_equal, smooth_teacher
++from test_sweep import configuration, model_configuration
++
++import phaseflow.log_sweep as sweep_module
++from phaseflow.log_objective import LogObjectiveConfig
++from phaseflow.log_sweep import LogSweepConfig, main, run_log_loss_sweep
++from phaseflow.plotting import RainbowPlotConfig
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import read_single_checkpoint
++
++
++def objective():
++    return LogObjectiveConfig(validation_uniform_samples=64, test_uniform_samples=64)
++
++
++def read_json(path):
++    return json.loads(path.read_text(encoding="utf-8"))
++
++
++def test_beta_selection_never_uses_total_loss_test_or_nll():
++    common = {"status": "complete", "kind": "beta", "nll_weight": 1,
++              "sampling": "target_uniform", "selected_step": 4}
++    rows = [
++        {**common, "trial_id": "a", "beta": 0.0, "validation_log_rmse": 0.4,
++         "validation_kl": 0.1, "total_loss": -1000, "test_log_rmse": 0.001,
++         "run_directory": "trials/a"},
++        {**common, "trial_id": "b", "beta": 0.1, "validation_log_rmse": 0.2,
++         "validation_kl": 0.3, "total_loss": 1000, "test_log_rmse": 100,
++         "run_directory": "trials/b"},
++    ]
++    chosen = sweep_module._selection(rows, {})
++    assert chosen["selected_trial_id"] == "b"
++    assert chosen["test_used"] is False and chosen["total_loss_used"] is False
++    assert chosen["pareto_trial_ids"] == ["a", "b"]
++    rows[0]["validation_log_rmse"] = 0.2
++    assert sweep_module._selection(rows, {})["selected_trial_id"] == "a"
++
++
++@pytest.mark.parametrize("changes", [
++    {"betas": []}, {"betas": [0, 0.0]}, {"betas": [float("nan")]},
++    {"betas": [-1]}, {"betas": [True]}, {"include_target_nll_control": 1},
++    {"include_pure_log_control": "false"}, {"unknown": True},
++])
++def test_invalid_sweep_configuration_is_rejected(changes):
++    with pytest.raises(ValueError):
++        LogSweepConfig.from_dict(changes)
++
++
++def test_distinct_close_betas_cannot_share_a_trial_directory():
++    rows = sweep_module._trial_plan(
++        configuration(), objective(),
++        LogSweepConfig(betas=(0.10000001, 0.10000002), include_target_nll_control=False),
++    )
++    assert len({row["run_directory"] for row in rows}) == 2
++
++
++def test_plan_preserves_saved_model_and_training_without_data_gpu_or_writes(tmp_path, capsys):
++    config = tmp_path / "base.json"
++    values = {
++        "schema_version": 2, "family": "rainbow_single_condition",
++        "model": model_configuration().to_dict(),
++        "training": configuration(device="cuda", steps=6).to_dict(),
++    }
++    config.write_text(json.dumps(values), encoding="utf-8")
++    sweep = tmp_path / "sweep.json"
++    sweep.write_text(json.dumps({"schema_version": 1, "sweep": {"betas": [0, 0.1],
++                                                                "include_pure_log_control": True},
++                                 "diagnostics": {"enabled": False}}), encoding="utf-8")
++    output = tmp_path / "not_created"
++    assert main(["plan", "--record", str(tmp_path / "missing_record"), "--config", str(config),
++                 "--sweep-config", str(sweep), "--output", str(output)]) == 0
++    plan = json.loads(capsys.readouterr().out)
++    assert plan["status"] == "planned" and plan["optimizer_updates"] == 0
++    assert plan["planned_total_updates"] == 24
++    assert plan["model"] == values["model"] and plan["training"] == values["training"]
++    assert not output.exists()
++    assert all(row["selection_metric"] == "log_rmse" for row in plan["trials"])
++    assert plan["trials"][0]["sampling"] == "target"
++    assert plan["trials"][-1]["nll_weight"] == 0
++    values["objective"] = objective().to_dict()
++    config.write_text(json.dumps(values), encoding="utf-8")
++    with pytest.raises(ValueError, match="schema_version=3"):
++        sweep_module._read_base_config(config, None)
++
++
++def test_actual_beta_runs_share_pool_holdouts_and_preserve_completed_artifacts(tmp_path, monkeypatch):
++    cfg, output = configuration(steps=2), tmp_path / "sweep"
++    plan = LogSweepConfig(betas=(0.0, 0.1), include_pure_log_control=True)
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        result = run_log_loss_sweep(
++            reference, model_configuration(), cfg, output, objective_config=objective(),
++            sweep_config=plan, make_plots=False, diagnostics_enabled=False,
++        )
++        assert result["status"] == "complete"
++        rows = result["trials"]
++        assert len(rows) == 4
++        mix = [row for row in rows if row["sampling"] == "target_uniform"]
++        assert len({row["training_points_sha256"] for row in mix}) == 1
++        assert rows[0]["training_points_sha256"] != mix[0]["training_points_sha256"]
++        assert len({row["validation_points_sha256"] for row in rows}) == 1
++        assert len({row["validation_uniform_points_sha256"] for row in rows}) == 1
++        assert len({row["test_uniform_points_sha256"] for row in rows}) == 1
++        winner = min(rows, key=lambda r: (r["validation_log_rmse"], r["beta"], r["trial_id"]))
++        assert result["selection"]["selected_trial_id"] == winner["trial_id"]
++        checkpoints = {output / row["run_directory"] / name for row in rows
++                       for name in ("checkpoint.pt", "best.pt", "best_by_nll.pt", "best_by_log.pt")}
++        original = {path: path.read_bytes() for path in checkpoints}
++
++        def forbidden(*args, **kwargs):
++            raise AssertionError("completed trial must not train again")
++
++        monkeypatch.setattr(sweep_module, "train_single_condition", forbidden)
++        again = run_log_loss_sweep(
++            reference, model_configuration(), cfg, output, objective_config=objective(),
++            sweep_config=plan, make_plots=False, diagnostics_enabled=False,
++        )
++        assert again == result
++        assert all(path.read_bytes() == value for path, value in original.items())
++        assert b"\r\n" not in (output / "summary.csv").read_bytes()
++        assert (output / "summary.png").read_bytes().startswith(b"\x89PNG")
++        before = (output / "summary.json").read_bytes()
++        damaged = output / rows[-1]["run_directory"] / "best_by_nll.pt"
++        damaged.write_bytes(b"damaged completion artifact")
++        with pytest.raises(ValueError, match="file changed or missing"):
++            run_log_loss_sweep(
++                reference, model_configuration(), cfg, output, objective_config=objective(),
++                sweep_config=plan, make_plots=False, diagnostics_enabled=False,
++            )
++        assert (output / "summary.json").read_bytes() == before
++
++
++def test_partial_trial_resumes_exactly_and_never_declares_early_winner(tmp_path, monkeypatch):
++    monkeypatch.setattr(sweep_module, "_summary_plot", lambda *args: None)
++    cfg = configuration(steps=4)
++    plan = LogSweepConfig(betas=(0.1,), include_target_nll_control=False)
++    output = tmp_path / "paused"
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        partial = run_log_loss_sweep(
++            reference, model_configuration(), cfg, output, objective_config=objective(),
++            sweep_config=plan, make_plots=False, diagnostics_enabled=False,
++            max_steps_this_trial=2,
++        )
++        assert partial["status"] == "paused" and partial["selection"] is None
++        assert partial["trials"][0]["status"] == "partial"
++        assert partial["trials"][0]["global_step"] == 2
++        assert not (output / "selection.json").exists()
++        saved = {name: (output / name).read_bytes() for name in ("manifest.json", "summary.json")}
++        with pytest.raises(ValueError, match="changed; use a new output"):
++            run_log_loss_sweep(
++                reference, model_configuration(), replace(cfg, learning_rate=0.01), output,
++                objective_config=objective(), sweep_config=plan, make_plots=False,
++                diagnostics_enabled=False,
++            )
++        assert all((output / name).read_bytes() == contents for name, contents in saved.items())
++        resumed = run_log_loss_sweep(
++            reference, model_configuration(), cfg, output, objective_config=objective(),
++            sweep_config=plan, make_plots=False, diagnostics_enabled=False,
++        )
++        full_path = tmp_path / "full"
++        full = run_log_loss_sweep(
++            reference, model_configuration(), cfg, full_path, objective_config=objective(),
++            sweep_config=plan, make_plots=False, diagnostics_enabled=False,
++        )
++    assert resumed["status"] == full["status"] == "complete"
++    assert resumed["selection"] == full["selection"]
++    relative = resumed["trials"][0]["run_directory"]
++    left = read_single_checkpoint(output / relative / "checkpoint.pt")
++    right = read_single_checkpoint(full_path / relative / "checkpoint.pt")
++    for name in ("model_state", "best_state", "optimizer_state"):
++        assert_state_equal(left[name], right[name])
++    assert sweep_module._state_equal(left["minibatch_rng_state"], right["minibatch_rng_state"])
++    assert left["history"] == right["history"]
++
++
++def test_real_mixture_plots_and_replot_do_not_change_completed_run(tmp_path):
++    cfg = configuration(steps=2, train_samples=32, batch_size=16)
++    plan = LogSweepConfig(betas=(0.1,), include_target_nll_control=False)
++    output = tmp_path / "sweep"
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        result = run_log_loss_sweep(
++            reference, model_configuration(), cfg, output, objective_config=objective(),
++            sweep_config=plan, plot_config=RainbowPlotConfig(dpi=40),
++            diagnostic_config=sweep_module.AngularDiagnosticConfig(dpi=40),
++        )
++        trial = output / result["trials"][0]["run_directory"]
++        assert (trial / "plots/comparison.png").is_file()
++        diagnosis = read_json(trial / "diagnostics/angular_diagnostics.json")
++        assert diagnosis["schema"] == "phaseflow.angular_diagnostics.v2"
++        files = {path: path.read_bytes() for path in trial.rglob("*") if path.is_file()}
++        report = sweep_module.replot_log_loss_sweep(
++            reference, output, output / "replots" / "test", device="cpu",
++        )
++        assert report["status"] == "complete" and report["optimizer_updates"] == 0
++        assert all(path.read_bytes() == contents for path, contents in files.items())
++        with pytest.raises(ValueError, match="disjoint"):
++            sweep_module.replot_log_loss_sweep(reference, output, trial / "plots2", device="cpu")

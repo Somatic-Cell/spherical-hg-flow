@@ -36,6 +36,33 @@ CDF サンプル点群，NF の PDF を同じ座標とアスペクト比で比�
 球面全体での密度の連続性や，論文中の全構成・全実験の再現を主張するものではありません．
 数式，データ契約と実装の対応は [単一条件の仕様](docs/RAINBOW_SINGLE_CONDITION.md) を参照してください．
 
+## 弱い散乱構造のための対数密度回帰
+
+schema 3 の明示的な `objective` を使うと，球面一様平均の log PDF 二乗誤差を NLL に
+追加できます．教師 / 球面一様の固定点を半分ずつ使い，それぞれの損失に正しい重要度重みを
+掛けます．独立検証の log RMSE と NLL で選んだ重みを別々に保存します．
+従来の schema 2 の NLL 学習も保持します．
+
+[数式・設定・単一実験の実行・ゼロ密度・保存と評価の仕様](docs/LOG_DENSITY_OBJECTIVE.md)
+を参照してください．提供設定は `configs/rainbow_log_loss.json` です．CUDA / FP32 が既定で，
+教師の値は実際に NF へ渡す精度の方向で評価します．物理モデルや保存 CDF は変更しません．
+
+### 全学習点を球面一様にする
+
+`configs/rainbow_log_uniform.json` は，262,144 点すべてを球面一様に生成する
+明示的な objective schema 2 の設定です．各方向で保存 CDF の PDF を評価し，
+重みなしの log PDF 二乗誤差を学習します．既定は NLL 係数 0，L=4，64×64，
+K=64，lr=0.003，2,000 更新です．`train_log_uniform.bat` の `RECORD` を指定して
+実行すると，学習後に全解像度の PDF 比較図・実際の全学習点・角度断面まで保存します．
+
+```bat
+call train_log_uniform.bat
+```
+
+過去の quick sweep の図だけを生成する場合は，`call sweep_log_loss_quick.bat replot`
+を使います．再学習は不要です．[全点一様の仕様と実行手順](docs/UNIFORM_LOG_TRAINING.md)
+に，混合点群との比較条件・再開・可視化の場所をまとめています．
+
 ## セットアップ
 
 Windows のバッチは **Python 3.14 / PyTorch 2.14.1 / CUDA 13.0 wheel** を対象とします．

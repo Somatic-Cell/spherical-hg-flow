@@ -83,7 +83,7 @@ The current primary workflow is the **single-condition Rainbow model** documente
 - Label synthetic fixtures as such. They validate the adapter and learning
   pipeline, not the Rainbow solver's physics, convergence, or real-data accuracy.
 - After completed training, visualize the selected weights together with the
-  exact stored-CDF PDF and CDF-generated point cloud. Keep all maps in the same
+  exact stored-CDF PDF and the actual configured fixed training pool. Keep all maps in the same
   recorded source frame, axes, extent and aspect. Share the two PDF maps' log
   color scale; mark true zero target density rather than flooring it. A scatter
   map in theta/azimuth coordinates is not an equal-area density estimate.
@@ -94,6 +94,52 @@ The current primary workflow is the **single-condition Rainbow model** documente
 - Report only actually executed platforms and measurements. CPU Python or host
   C++ tests do not establish CUDA training, NVCC compilation, OptiX integration,
   renderer correctness, or GPU sampling/evaluation speed.
+
+## Optional log-density objective (schema 3 / checkpoint 5)
+
+- `docs/LOG_DENSITY_OBJECTIVE.md` specifies the explicit extension authorized for
+  weak-scattering shape fidelity. Schema-2 training remains the original NLL
+  path. Never interpret a mixed query pool as samples from the target density.
+- The new objective uses target NLL plus beta times the squared log-density
+  ratio averaged under uniform solid angle. An equal target/uniform mixture
+  requires separate p/r and u/r weights, without minibatch self-normalization.
+  HG, the stored target, symmetry constraints and flow architecture are unchanged.
+- Check every stored cell for positive density before whole-sphere log metrics.
+  True zeros cause an explicit error; do not add epsilon, replace query points,
+  smooth the CDF or silently restrict the integration domain.
+- Independently evaluate target NLL/KL and uniform-solid-angle log errors.
+  Record the selected metric, preserve both NLL and log-RMSE selected weights,
+  and never compare raw composite loss across different beta values for selection.
+- Record query-source labels and both raw and actual-geometry pool identities.
+  Evaluate teacher labels at the actual geometry-cast regression points. Mixed
+  scatter plots show all entries and distinguish CDF and uniform components.
+- Minibatch total objective is not NLL. Report measured raw components even
+  when their coefficient is zero; do not display disabled placeholders as errors.
+- Read old checkpoints for inference/plots, but require matching objective,
+  version, input, code and runtime for exact continuation. The old CDF-only
+  sampling audit must explicitly reject the new pool contract.
+
+## Explicit all-uniform training queries (objective schema 2)
+
+- `docs/UNIFORM_LOG_TRAINING.md` specifies the user-requested all-uniform
+  alternative. Preserve objective schema 1's target and half-mixture behavior.
+  Objective schema 2 uses `sampling="uniform"` and `target_fraction=0.0`.
+- Generate every training point uniformly in solid angle using the existing
+  uniform training stream 5. Use no target/CDF training samples. Query the
+  unchanged stored PDF at each actual geometry-cast direction.
+- The log-density term is the ordinary unweighted mean of squared log ratios.
+  The default pure-log experiment sets the NLL coefficient to zero. If NLL is
+  enabled or reported, use the exact p/u weight; do not treat uniform points
+  as target-distributed, clip importance weights, or self-normalize them.
+- Keep independent target validation/test streams for NLL/KL and independent
+  uniform validation/test streams for log/relative errors. Pure log does not
+  remove the model's analytic normalization or alter its HG base.
+- Record actual source counts cdf=0/uniform=N, all source labels uniform, and
+  source_streams cdf=null/uniform=5. Historical stream registry entries are
+  not assertions that those streams contributed to the training pool.
+- Plot the complete actual uniform pool, label it as spherical-uniform queries,
+  and use training_samples.png for the new scatter. Retain old target/mixed
+  plot compatibility and never relabel them as all-uniform.
 
 ## Legacy v1 boundary
 

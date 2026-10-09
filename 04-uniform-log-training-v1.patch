@@ -1,0 +1,1433 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 52d18a42f97825e81c583579446b30c9d74f636a..70ab3905447adbd2618e4832ec0b0ebc44a3182e 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -83,7 +83,7 @@ The current primary workflow is the **single-condition Rainbow model** documente
+ - Label synthetic fixtures as such. They validate the adapter and learning
+   pipeline, not the Rainbow solver's physics, convergence, or real-data accuracy.
+ - After completed training, visualize the selected weights together with the
+-  exact stored-CDF PDF and CDF-generated point cloud. Keep all maps in the same
++  exact stored-CDF PDF and the actual configured fixed training pool. Keep all maps in the same
+   recorded source frame, axes, extent and aspect. Share the two PDF maps' log
+   color scale; mark true zero target density rather than flooring it. A scatter
+   map in theta/azimuth coordinates is not an equal-area density estimate.
+@@ -119,6 +119,28 @@ The current primary workflow is the **single-condition Rainbow model** documente
+   version, input, code and runtime for exact continuation. The old CDF-only
+   sampling audit must explicitly reject the new pool contract.
+ 
++## Explicit all-uniform training queries (objective schema 2)
++
++- `docs/UNIFORM_LOG_TRAINING.md` specifies the user-requested all-uniform
++  alternative. Preserve objective schema 1's target and half-mixture behavior.
++  Objective schema 2 uses `sampling="uniform"` and `target_fraction=0.0`.
++- Generate every training point uniformly in solid angle using the existing
++  uniform training stream 5. Use no target/CDF training samples. Query the
++  unchanged stored PDF at each actual geometry-cast direction.
++- The log-density term is the ordinary unweighted mean of squared log ratios.
++  The default pure-log experiment sets the NLL coefficient to zero. If NLL is
++  enabled or reported, use the exact p/u weight; do not treat uniform points
++  as target-distributed, clip importance weights, or self-normalize them.
++- Keep independent target validation/test streams for NLL/KL and independent
++  uniform validation/test streams for log/relative errors. Pure log does not
++  remove the model's analytic normalization or alter its HG base.
++- Record actual source counts cdf=0/uniform=N, all source labels uniform, and
++  source_streams cdf=null/uniform=5. Historical stream registry entries are
++  not assertions that those streams contributed to the training pool.
++- Plot the complete actual uniform pool, label it as spherical-uniform queries,
++  and use training_samples.png for the new scatter. Retain old target/mixed
++  plot compatibility and never relabel them as all-uniform.
++
+ ## Legacy v1 boundary
+ 
+ `docs/MODEL.md`, `docs/DATA_CONTRACT.md`, `docs/EXPORT_FORMAT.md`,
+diff --git a/README.md b/README.md
+index 22c943cdfcf6c4a7aa2d3cee4f35f692f2605487..86bc54ec66ad289dbb49837948b15bb7ec116eff 100644
+--- a/README.md
++++ b/README.md
+@@ -47,6 +47,22 @@ schema 3 の明示的な `objective` を使うと，球面一様平均の log PD
+ を参照してください．提供設定は `configs/rainbow_log_loss.json` です．CUDA / FP32 が既定で，
+ 教師の値は実際に NF へ渡す精度の方向で評価します．物理モデルや保存 CDF は変更しません．
+ 
++### 全学習点を球面一様にする
++
++`configs/rainbow_log_uniform.json` は，262,144 点すべてを球面一様に生成する
++明示的な objective schema 2 の設定です．各方向で保存 CDF の PDF を評価し，
++重みなしの log PDF 二乗誤差を学習します．既定は NLL 係数 0，L=4，64×64，
++K=64，lr=0.003，2,000 更新です．`train_log_uniform.bat` の `RECORD` を指定して
++実行すると，学習後に全解像度の PDF 比較図・実際の全学習点・角度断面まで保存します．
++
++```bat
++call train_log_uniform.bat
++```
++
++過去の quick sweep の図だけを生成する場合は，`call sweep_log_loss_quick.bat replot`
++を使います．再学習は不要です．[全点一様の仕様と実行手順](docs/UNIFORM_LOG_TRAINING.md)
++に，混合点群との比較条件・再開・可視化の場所をまとめています．
++
+ ## セットアップ
+ 
+ Windows のバッチは **Python 3.14 / PyTorch 2.14.1 / CUDA 13.0 wheel** を対象とします．
+diff --git a/configs/rainbow_log_uniform.json b/configs/rainbow_log_uniform.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8c2b043a28d7a5240ed5632d104ed8d2668ea0c
+--- /dev/null
++++ b/configs/rainbow_log_uniform.json
+@@ -0,0 +1,58 @@
++{
++  "schema_version": 3,
++  "family": "rainbow_single_condition",
++  "model": {
++    "num_coupling_layers": 4,
++    "num_bins": 64,
++    "hidden_features": [
++      64,
++      64
++    ],
++    "mirror_symmetry": true,
++    "min_bin_width": 1e-05,
++    "min_bin_height": 1e-05,
++    "min_derivative": 0.0001,
++    "activation": "silu",
++    "spline_dtype": "model",
++    "geometry_dtype": "model"
++  },
++  "training": {
++    "seed": 415,
++    "data_seed": 2026,
++    "device": "cuda",
++    "dtype": "float32",
++    "train_samples": 262144,
++    "validation_samples": 8192,
++    "test_samples": 16384,
++    "proposal_samples": 4096,
++    "batch_size": 1024,
++    "steps": 2000,
++    "learning_rate": 0.003,
++    "eval_every": 250,
++    "checkpoint_every": 250,
++    "eval_batch_size": 4096,
++    "grad_clip_norm": 10.0,
++    "deterministic": true,
++    "cpu_threads": 1,
++    "log_every": 50,
++    "tensorboard": true,
++    "train_monitor_samples": 2048
++  },
++  "objective": {
++    "schema_version": 2,
++    "nll_weight": 0.0,
++    "beta": 1.0,
++    "sampling": "uniform",
++    "target_fraction": 0.0,
++    "selection_metric": "log_rmse",
++    "validation_uniform_samples": 8192,
++    "test_uniform_samples": 16384,
++    "zero_policy": "error"
++  },
++  "visualization": {
++    "enabled": true,
++    "eval_batch_size": 4096,
++    "dpi": 160,
++    "write_pdf": false
++  }
++}
+diff --git a/docs/LOG_DENSITY_OBJECTIVE.md b/docs/LOG_DENSITY_OBJECTIVE.md
+index bb2e3c66b56a6eeca73a905c8182a1bd9c62acd3..8cda0be64c4a3606b7ce5fce9f3603b28a72fb57 100644
+--- a/docs/LOG_DENSITY_OBJECTIVE.md
++++ b/docs/LOG_DENSITY_OBJECTIVE.md
+@@ -78,6 +78,10 @@ epsilon，PDF floor，CDF の平滑化，点の再抽選，領域の除外は行
+ 
+ ## 設定と実行
+ 
++以下は objective schema 1 の混合点群の設定です．全学習点を球面一様にする
++objective schema 2 は，[全点一様の学習](UNIFORM_LOG_TRAINING.md) を参照してください．
++旧 schema 1 の比率・重み・乱数・結果の意味は保持します．
++
+ 従来の schema 2 は NLL 専用のままです．拡張は top-level `schema_version=3` と
+ `objective` を明示します．`model`，`training`，`visualization` は従来の設定です．
+ 
+diff --git a/docs/UNIFORM_LOG_TRAINING.md b/docs/UNIFORM_LOG_TRAINING.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..657730b5cec9aa5dd9cbce2df346231fd69e6521
+--- /dev/null
++++ b/docs/UNIFORM_LOG_TRAINING.md
+@@ -0,0 +1,158 @@
++# 全点を球面一様に生成する log PDF 回帰
++
++本設定は，固定した一条件の保存 CDF を教師として，全学習点を球面一様に生成し，
++その点での log PDF 二乗誤差を学習する経路です．混合点群を使う以前の pure_log と
++比較して，有限の学習点をどこへ配分するかの影響を調べます．
++
++HG 基底，円周・区間 RQS coupling，対称性，保存 CDF，FP32 の学習計算は既存仕様です．
++全点一様による halo の精度改善を実データで確認済みという意味ではありません．
++
++## サンプリングと目的関数
++
++学習方向は球面一様密度 `u=1/(4*pi)` から生成します．`cos(theta)` と方位角を
++一様に生成するので，`theta` の等間隔な角度図の上では面積当たり一様には見えません．
++source frame で作った方向を記録された NF frame へ回転し，実際の geometry dtype
++にした後の方向で教師 `p` を評価します．HG の確率座標を一様にした点ではありません．
++
++既定の損失は，次の単純平均です．
++
++$$
++\widehat L_{\log}=\frac1B\sum_{i=1}^{B}
++\left[\log q(\omega_i)-\log p(\omega_i)\right]^2,
++\qquad \omega_i\sim u.
++$$
++
++log 項に教師 PDF や混合分布の重要度重みは掛けません．すべて自然対数です．
++保存 CDF に真のゼロ密度セルがある場合は，従来の log 経路と同じく明示的に停止し，
++floor・平滑化・教師分布の変更は行いません．
++
++全点一様と半々の混合点群＋適切な重要度重みは，連続分布については同じ立体角平均の
++log 誤差を目的とします．一方，有限点群の配置と勾配推定のばらつきは異なります．
++同じ総点数なら，全点一様は一様生成点を二倍確保できます．これだけで物理角度上の
++knot の均等配置や微細構造の完全な再現を保証するわけではありません．
++
++## 明示的なバージョンと設定
++
++top-level の設定は従来どおり schema 3，objective 内だけ schema 2 を使います．
++
++```json
++"objective": {
++  "schema_version": 2,
++  "nll_weight": 0.0,
++  "beta": 1.0,
++  "sampling": "uniform",
++  "target_fraction": 0.0,
++  "selection_metric": "log_rmse",
++  "validation_uniform_samples": 8192,
++  "test_uniform_samples": 16384,
++  "zero_policy": "error"
++}
++```
++
++objective schema 1 は従来の target / target_uniform のままです．schema 2 は
++uniform / target_fraction=0 の組だけを受け入れます．以前の設定を黙って別の
++サンプリングへ読み替えません．この一様設定には単独の `train-rainbow` 経路を使い，
++混合点群による beta 比較用の `phaseflow.log_sweep` には渡しません．
++
++`nll_weight>0` を指定する場合の NLL 項は，数学的に正しい `p/u` 重みで計算します．
++この重みは混合方式の `p/r` と異なり上限 2 を持たないため，今回の既定では NLL を
++学習に加えません．学習ログの NLL 診断値には実測の `p/u` を使いますが，係数 0 の
++ときは勾配へ加えません．独立 validation/test の NLL/KL は引き続き CDF 点で測ります．
++log 誤差と相対誤差の独立評価は，学習と別 stream の球面一様点を使います．
++
++## 既定の比較条件
++
++| 項目 | 新しい単独実験 |
++|---|---|
++| モデル | L=4，hidden=64×64，K=64 |
++| 学習率・更新数 | lr=0.003，2,000 更新 |
++| 学習点 | 球面一様 262,144 点，CDF 由来 0 点 |
++| Minibatch | 1,024，固定 pool から復元抽出 |
++| 学習精度 | CUDA / FP32 |
++| Validation | CDF 8,192 点＋独立球面一様 8,192 点 |
++| Test | CDF 16,384 点＋独立球面一様 16,384 点 |
++| 重みの選択 | validation log RMSE |
++| 図 | 完了時に全解像度比較図と全実学習点を自動保存 |
++
++先に点群の配分だけを比較するため，前回の quick pure_log と同じ 2,000 更新に
++揃えます．学習率・モデル・点数・seed・評価点数を同時に変更しないでください．
++5,000 更新を調べる場合は，その更新数を最初から設定した別の出力先で比較します．
++
++同じ data seed では，一様点の最初の 131,072 点が，以前の混合 pool の一様成分と
++一致します．一様点をさらに 131,072 点追加した構成です．全点は既存の stream 5
++から生成し，CDF training stream 0 は呼びません．`sample_split.json` の
++`training_pool` に `cdf=0`，`uniform=262144`，`target_fraction=0` と実際の
++source streams を記録します．歴史的な `streams.train=0` は stream 名の登録情報で，
++新しい点群に CDF 点が含まれることを示すものではありません．
++
++## 実行と再開
++
++前回の log-density objective / beta sweep / quick 設定のパッチを適用した checkout に，
++今回の追加パッチを適用します．`train_log_uniform.bat` の `RECORD` を，動作している
++`execute.bat` の一条件のディレクトリに合わせてください．
++
++```bat
++call train_log_uniform.bat
++```
++
++新しい `runs\rainbow_log_uniform_gpu` に一試行を実行し，独立評価・全解像度の三図・
++角度断面まで保存します．各角度で元 CDF の PDF を照会するため，CDF レコード自体は
++引き続き必要です．環境は既存の `environment.bat` の Python と CUDA を使用します．
++
++途中で区切る場合：
++
++```bat
++call train_log_uniform.bat probe
++call train_log_uniform.bat
++```
++
++probe は最大 250 追加更新で止まり，後の通常実行が optimizer と RNG を再開します．
++通常実行は同じ出力先の `checkpoint.pt` があれば自動で再開します．既存の混合点群の
++run を新しい OUTPUT として指定しないでください．サンプラ，コード，設定を変えた
++実験は別の出力先へ開始し，既存の再現性確認を迂回しません．
++
++```bat
++call monitor.bat "runs\rainbow_log_uniform_gpu"
++```
++
++この監視は別の CMD から実行できます．`history.jsonl` と `learning_curves.png` も
++保存します．学習中の合成 loss は今回 log MSE と一致しますが，別の目的関数で学習した
++run と比較するときは，同じ独立評価点上の log RMSE / KL / 相対誤差を使います．
++
++## 可視化
++
++学習完了時の図は `runs\rainbow_log_uniform_gpu\plots` にあります．
++
++- `comparison.png`：保存 CDF の log PDF，実学習点群，NF の log PDF．
++- `training_samples.png`：今回の全一様学習点群を表示する単体図．
++- `plots.json` / `training_scatter.npz`：座標，色尺度，点数，生成元と実際の点群．
++
++点群は全 262,144 点を表示し，32,768 点などに間引きません．CDF の分布から
++生成した点群として表示することもしません．両 PDF は同じ記録座標，アスペクト比，
++対数色尺度を使います．`diagnostics` には既存の 120–150 度帯と方位 −90/0/90 度の
++断面が保存されます．
++
++学習途中の選択重みや完了済み重みを手動で描画する場合：
++
++```bat
++call train_log_uniform.bat plot
++```
++
++`best.pt` を使い，`plots_manual` に出力します．学習はしません．同じ手動描画を
++繰り返す場合，この手動描画先の図を更新します．自動生成の `plots` は別の場所です．
++
++### すでに終わった quick sweep の図を作る
++
++今回の一様学習とは独立して，既存結果は以下で描画できます．
++
++```bat
++call sweep_log_loss_quick.bat replot
++```
++
++`runs\rainbow_log_quick_gpu\replots\<timestamp>\<trial_id>\plots`
++に各試行の比較図を作ります．新しいパッチの適用前でも使える既存機能です．
++学習は行わず，既存の checkpoint・summary を変更しません．元の混合実験の点群は
++CDF 成分と一様成分を区別したまま描画し，全点一様だったかのように表示しません．
++
++図の log 色尺度は各比較図の教師と NF の間で共有します．別 run の画像を並べる際は，
++色バーの範囲も確認してください．異なる run の色バーまで固定する処理ではありません．
+diff --git a/src/phaseflow/angular_diagnostics.py b/src/phaseflow/angular_diagnostics.py
+index 1153333550a0867a680b21ebea0f85b99a617c8f..038ca3f9e7865f5a17e129e82822cac4f3f185b9 100644
+--- a/src/phaseflow/angular_diagnostics.py
++++ b/src/phaseflow/angular_diagnostics.py
+@@ -348,9 +348,10 @@ def evaluate_angular_diagnostics(
+     """Save exact target band mass, expected counts, and aligned PDF cuts.
+ 
+     This function consumes no train/validation/test samples and changes neither
+-    weights nor selection. Expected counts are N*p(R) and B*p(R), not observed
+-    counts in a particular fixed pool. The optional checkpoint identity records
+-    the caller-supplied file; the caller must pass the file used to load ``model``.
++    weights nor selection. Expected counts use the recorded training query
++    distribution, not observed counts in a particular fixed pool. The optional
++    checkpoint identity records the caller-supplied file; the caller must pass
++    the file used to load ``model``.
+     """
+     config = AngularDiagnosticConfig() if config is None else config
+     if objective_config is not None:
+@@ -374,8 +375,8 @@ def evaluate_angular_diagnostics(
+     low, high = _band_u(config.theta_band_degrees)
+     metrics = _reference_band_and_zeros(reference, low, high)
+     mass = metrics["reference_band_mass_exact"]
+-    mixture = objective_config is not None and objective_config.sampling == "target_uniform"
+-    target_fraction = 0.5 if mixture else 1.0
++    sampling = "target" if objective_config is None else objective_config.sampling
++    target_fraction = {"target": 1.0, "target_uniform": 0.5, "uniform": 0.0}[sampling]
+     uniform_mass = high - low
+     query_mass = target_fraction * mass + (1 - target_fraction) * uniform_mass
+     metrics.update(
+@@ -469,11 +470,17 @@ def evaluate_angular_diagnostics(
+         "expected_counts": {
+             "train_samples": train_samples,
+             "batch_size": batch_size,
+-            "method": (
+-                "N*(0.5*p(R)+0.5*u(R)) and B*(0.5*p(R)+0.5*u(R)); "
+-                "unconditional expectations, not observed counts" if mixture else
+-                "N*p(R) and B*p(R), not observed counts in a fixed pool"
+-            ),
++            "method": {
++                "target": "N*p(R) and B*p(R), not observed counts in a fixed pool",
++                "target_uniform": (
++                    "N*(0.5*p(R)+0.5*u(R)) and B*(0.5*p(R)+0.5*u(R)); "
++                    "unconditional expectations, not observed counts"
++                ),
++                "uniform": (
++                    "N*u(R) and B*u(R); uniform solid-angle queries, "
++                    "not observed counts in a fixed pool"
++                ),
++            }[sampling],
+             "observed_train_band_samples": None,
+             **({"sampling": objective_config.sampling,
+                 "target_fraction": target_fraction,
+diff --git a/src/phaseflow/log_objective.py b/src/phaseflow/log_objective.py
+index f97ac29dee7e0c20a01fbda500bc50a08c57e429..a2d235d6b448acb7d1c2b4e69fcc1cdf17642ca8 100644
+--- a/src/phaseflow/log_objective.py
++++ b/src/phaseflow/log_objective.py
+@@ -1,9 +1,10 @@
+ """Versioned, solid-angle log-density regression for a fixed Rainbow record.
+ 
+-The training query distribution is either the target (NLL control only) or an
+-equal mixture of the target and spherical uniform. Importance weights recover
+-the original target NLL and the *uniform-solid-angle* squared log-PDF error.
+-The target, HG coefficient, flow architecture and normalization are unchanged.
++The training query distribution is the target (NLL control only), an equal
++target/uniform mixture (objective schema 1), or spherical uniform alone (schema
++2). Appropriate importance weights recover the target NLL; the squared log-PDF
++error is always averaged under uniform solid angle. The target, HG coefficient,
++flow architecture and normalization are unchanged.
+ """
+ 
+ from __future__ import annotations
+@@ -35,8 +36,8 @@ class LogObjectiveConfig:
+     zero_policy: str = "error"
+ 
+     def __post_init__(self) -> None:
+-        if type(self.schema_version) is not int or self.schema_version != 1:
+-            raise ValueError("log objective schema_version must be 1")
++        if type(self.schema_version) is not int or self.schema_version not in (1, 2):
++            raise ValueError("log objective schema_version must be 1 or 2")
+         for name in ("nll_weight", "beta", "target_fraction"):
+             value = getattr(self, name)
+             if isinstance(value, bool) or not isinstance(value, (int, float)) or (
+@@ -46,12 +47,18 @@ class LogObjectiveConfig:
+             object.__setattr__(self, name, float(value))
+         if self.nll_weight == 0 and self.beta == 0:
+             raise ValueError("at least one log objective coefficient must be positive")
+-        if self.target_fraction != 0.5:
+-            raise ValueError("log objective target_fraction must be exactly 0.5")
+-        if self.sampling not in ("target", "target_uniform"):
+-            raise ValueError("log objective sampling must be target or target_uniform")
+-        if self.sampling == "target" and self.beta != 0:
+-            raise ValueError("target sampling is an NLL control and requires beta=0")
++        if self.schema_version == 1:
++            if self.target_fraction != 0.5:
++                raise ValueError("log objective target_fraction must be exactly 0.5")
++            if self.sampling not in ("target", "target_uniform"):
++                raise ValueError("log objective sampling must be target or target_uniform")
++            if self.sampling == "target" and self.beta != 0:
++                raise ValueError("target sampling is an NLL control and requires beta=0")
++        else:
++            if self.sampling != "uniform":
++                raise ValueError("log objective schema 2 requires sampling='uniform'")
++            if self.target_fraction != 0.0:
++                raise ValueError("uniform sampling requires target_fraction=0.0")
+         if self.selection_metric not in ("nll", "log_rmse"):
+             raise ValueError("log objective selection_metric must be nll or log_rmse")
+         for name in ("validation_uniform_samples", "test_uniform_samples"):
+@@ -210,8 +217,9 @@ def make_training_pool(
+     """Build the complete fixed pool; all beta candidates share its identity.
+ 
+     Call ``verify_positive_teacher`` once before preparing the new workflow.
+-    CDF and spherical-uniform points are interleaved, starting with CDF, so every
+-    even prefix is balanced. Labels are always evaluated at the returned points.
++    Mixed CDF/uniform points are interleaved, starting with CDF, so every even
++    prefix is balanced. Uniform-only pools use the same uniform stream and no
++    CDF sampling. Labels are always evaluated at the returned points.
+     """
+     # Delayed import avoids a trainer/objective import cycle and deliberately
+     # reuses the existing CDF RNG stream without changing its historical bytes.
+@@ -222,34 +230,41 @@ def make_training_pool(
+     objective.validate_training_count(count)
+     _count_and_seed(count, seed)
+     mixture = objective.sampling == "target_uniform"
+-    target_count = count // 2 if mixture else count
+-    uniform_count = count - target_count
+-    raw_p, label_p = _points(reference, target_count, seed, "train")
+-    components = np.zeros(count, dtype=np.uint8)
+-    if mixture:
+-        raw_u = _uniform_directions(reference, uniform_count, seed, "train")
+-        label_u = reference.log_prob(raw_u)
+-        raw = np.empty((count, 3), dtype=np.float64)
+-        raw_labels = np.empty(count, dtype=np.float64)
+-        raw[0::2], raw[1::2] = raw_p, raw_u
+-        raw_labels[0::2], raw_labels[1::2] = label_p, label_u
+-        components[1::2] = 1
++    uniform_only = objective.sampling == "uniform"
++    if uniform_only:
++        target_count, uniform_count = 0, count
++        raw = _uniform_directions(reference, count, seed, "train")
++        raw_labels = reference.log_prob(raw)
++        components = np.ones(count, dtype=np.uint8)
+     else:
+-        raw, raw_labels = raw_p, label_p
++        target_count = count // 2 if mixture else count
++        uniform_count = count - target_count
++        raw_p, label_p = _points(reference, target_count, seed, "train")
++        components = np.zeros(count, dtype=np.uint8)
++        if mixture:
++            raw_u = _uniform_directions(reference, uniform_count, seed, "train")
++            label_u = reference.log_prob(raw_u)
++            raw = np.empty((count, 3), dtype=np.float64)
++            raw_labels = np.empty(count, dtype=np.float64)
++            raw[0::2], raw[1::2] = raw_p, raw_u
++            raw_labels[0::2], raw_labels[1::2] = label_p, label_u
++            components[1::2] = 1
++        else:
++            raw, raw_labels = raw_p, label_p
+     if not np.isfinite(raw_labels).all():
+         raise FloatingPointError("log workflow requires positive teacher PDF at every raw query")
+     directions, log_p = _teacher_at_cast(reference, raw, geometry_dtype)
+     provenance = {
+         "schema": "phaseflow.training_pool.v1",
+         "sampling": objective.sampling,
+-        "target_fraction": 0.5 if mixture else 1.0,
++        "target_fraction": 0.0 if uniform_only else (0.5 if mixture else 1.0),
+         "density_measure": "solid_angle_sr",
+         "sample_count": count,
+         "component_counts": {"cdf": target_count, "uniform": uniform_count},
+         "component_codes": {"cdf": 0, "uniform": 1},
+-        "order": "interleaved_cdf_uniform" if mixture else "cdf",
++        "order": "uniform" if uniform_only else ("interleaved_cdf_uniform" if mixture else "cdf"),
+         "data_seed": seed,
+-        "source_streams": {"cdf": 0, "uniform": 5 if mixture else None},
++        "source_streams": {"cdf": None if uniform_only else 0, "uniform": 5 if uniform_count else None},
+         "rng": "numpy.PCG64(SeedSequence([data_seed,stream_id]))",
+         "uniforms": "52-bit open midpoint grid",
+         "geometry_dtype": directions.dtype.name,
+@@ -270,15 +285,17 @@ def loss_terms(
+     *,
+     report_components: bool = False,
+ ) -> dict[str, torch.Tensor]:
+-    """Compute the unbiased mixed-query objective in the model's log-PDF dtype.
++    """Compute the query-weighted objective in the model's log-PDF dtype.
+ 
+     Teacher labels/importance weights are detached. There is no minibatch weight
+     renormalization or device-to-host synchronization. The caller validates the
+     fixed teacher pool once and checks finite optimization blocks before saving.
+     Disabled terms return zero and are not evaluated (in particular, no 0*inf).
+-    ``report_components=True`` evaluates both raw terms for mixed positive
+-    teacher pools, including terms whose coefficient is zero. Such diagnostics
+-    never enter the loss through an inactive multiplication by zero.
++    ``report_components=True`` evaluates both raw terms for positive mixed or
++    uniform teacher pools, including terms whose coefficient is zero. Such
++    diagnostics never enter the loss through an inactive multiplication by zero.
++    For uniform-only queries, log MSE is an ordinary unweighted sample mean;
++    optional NLL uses p/u, without clipping its potentially unbounded weights.
+     """
+     if not isinstance(objective, LogObjectiveConfig):
+         raise ValueError("objective must be a LogObjectiveConfig")
+@@ -294,6 +311,19 @@ def loss_terms(
+         nll = -log_q.mean() if objective.nll_weight else zero
+         return {"loss": objective.nll_weight * nll, "nll": nll, "log_mse": zero}
+     log_u = teacher.new_full((), LOG_UNIFORM)
++    if objective.sampling == "uniform":
++        nll = (
++            -(torch.exp(teacher - log_u) * log_q).mean()
++            if objective.nll_weight or report_components else zero
++        )
++        log_mse = (
++            (log_q - teacher).square().mean()
++            if objective.beta or report_components else zero
++        )
++        loss = objective.nll_weight * nll if objective.nll_weight else zero
++        if objective.beta:
++            loss = loss + objective.beta * log_mse
++        return {"loss": loss, "nll": nll, "log_mse": log_mse}
+     # Shift each logaddexp to avoid cancellation in log p - log r when the
+     # density spans an extreme range. These are exactly p/r and u/r for the
+     # same r=(p+u)/2; neither weights nor minibatches are renormalized.
+diff --git a/src/phaseflow/plotting.py b/src/phaseflow/plotting.py
+index 7990500380ea8e47e0589c1298c8f092dbafa1c1..a54180d9d13ebe4c4fc855c319d9edd7ad726376 100644
+--- a/src/phaseflow/plotting.py
++++ b/src/phaseflow/plotting.py
+@@ -343,6 +343,8 @@ def plot_rainbow_comparison(
+     training_scatter = None
+     checkpoint_step = None
+     scatter_components = None
++    mixed_scatter = False
++    uniform_scatter = False
+     if scatter_mode == "training":
+         from .training_scatter import resolve_training_scatter
+ 
+@@ -361,7 +363,12 @@ def plot_rainbow_comparison(
+             selected_step = checkpoint_step
+         scatter_title = f"Fixed training pool (N = {scatter_metadata['sample_count']:,})"
+         if scatter_components is not None and np.any(scatter_components == 1):
+-            scatter_title = f"Mixed training pool (N = {scatter_metadata['sample_count']:,})"
++            mixed_scatter = bool(np.any(scatter_components == 0))
++            uniform_scatter = not mixed_scatter
++            pool_label = "Mixed" if mixed_scatter else "Spherical-uniform"
++            scatter_title = (
++                f"{pool_label} training pool (N = {scatter_metadata['sample_count']:,})"
++            )
+     else:
+         scatter_phi, scatter_theta = cdf_scatter_coordinates(
+             reference, samples=config.cdf_samples, seed=config.seed
+@@ -412,7 +419,6 @@ def plot_rainbow_comparison(
+             heading += f"\nValidation {metric_label}-selected model (step {selected_step})"
+         else:
+             heading += f"\nValidation-selected model (step {selected_step})"
+-    mixed_scatter = scatter_components is not None and np.any(scatter_components == 1)
+     chart_note = _CHART_NOTE if not mixed_scatter else (
+         "Equal angular scaling; this chart is not equal area. "
+         "Colored CDF and spherical-uniform groups form training queries from r."
+@@ -422,6 +428,19 @@ def plot_rainbow_comparison(
+         scatter_title,
+         "NF PDF evaluated at source cell centers",
+     )
++    scatter_chart_density = (
++        "r_per_sr * sin(theta); mixed training queries, not CDF-distributed samples"
++        if mixed_scatter else "p_per_sr * sin(theta); not p_per_sr alone"
++    )
++    if uniform_scatter:
++        chart_note = (
++            "Equal angular scaling; this chart is not equal area. "
++            "Every shown point is an actual spherical-uniform training query."
++        )
++        scatter_chart_density = (
++            "u_per_sr * sin(theta), u_per_sr=1/(4*pi); "
++            "spherical-uniform training queries, not CDF-distributed samples"
++        )
+ 
+     def draw_panel(ax: Axes, panel: int):
+         if panel == 1:
+@@ -494,7 +513,10 @@ def plot_rainbow_comparison(
+     # as either PDF canvas, including the space reserved for their colorbars.
+     single_size = (12.0, 7.4)
+     rect = [0.09, 0.19, 0.77, 0.77 * single_size[0] / 2 / single_size[1]]
+-    for panel, stem in enumerate(("reference_pdf", "cdf_samples", "nf_pdf")):
++    # Preserve historical CDF/mixed filenames for old runs. An all-uniform
++    # training pool must not acquire a filename claiming it contains CDF samples.
++    scatter_stem = "training_samples" if uniform_scatter else "cdf_samples"
++    for panel, stem in enumerate(("reference_pdf", scatter_stem, "nf_pdf")):
+         fig = Figure(figsize=single_size)
+         FigureCanvasAgg(fig)
+         ax = fig.add_axes(rect)
+@@ -584,10 +606,7 @@ def plot_rainbow_comparison(
+             "equal_area": False,
+             "density_measure": "solid_angle_sr",
+             "source_to_nf": reference.source_to_nf.tolist(),
+-            "scatter_chart_density": (
+-                "r_per_sr * sin(theta); mixed training queries, not CDF-distributed samples"
+-                if mixed_scatter else "p_per_sr * sin(theta); not p_per_sr alone"
+-            ),
++            "scatter_chart_density": scatter_chart_density,
+         },
+         "grid": {
+             "resolution": "full_native_cdf_cells_no_angular_downsampling",
+@@ -621,6 +640,8 @@ def plot_rainbow_comparison(
+             "density_floor": None,
+         },
+         "figures": {
++            "panel_titles": list(panel_titles),
++            "scatter_chart_note": chart_note,
+             "individual_size_inches": list(single_size),
+             "individual_axes_rectangle": rect,
+             "comparison_size_inches": [21.0, 6.2],
+diff --git a/src/phaseflow/single_condition.py b/src/phaseflow/single_condition.py
+index 8f28961ff155d0bbc9d24ab7bdd313478186082c..4b89de5fb7867117e0483aa323f81c33814e4fd9 100644
+--- a/src/phaseflow/single_condition.py
++++ b/src/phaseflow/single_condition.py
+@@ -727,14 +727,16 @@ def train_single_condition(
+     def monitor_metrics() -> dict[str, Any]:
+         if objective is None:
+             return _likelihood_metrics(model, reference, training_monitor, cfg.eval_batch_size)
+-        # This is a weighted mixed-pool monitor, not target-distributed NLL/KL.
++        # This monitor uses the saved query distribution. For uniform-only
++        # queries, log MSE has unit weights and the NLL diagnostic uses p/u;
++        # neither query pool is interpreted as target-distributed samples.
+         accumulated = torch.zeros(3, dtype=torch.float64, device=device)
+         directions, labels = training_monitor
+         for start in range(0, monitor_count, cfg.eval_batch_size):
+             end = min(start + cfg.eval_batch_size, monitor_count)
+             values = loss_terms(
+                 model.log_prob(directions[start:end]), labels[start:end], objective,
+-                report_components=objective.sampling == "target_uniform",
++                report_components=objective.sampling in ("target_uniform", "uniform"),
+             )
+             accumulated += torch.stack([
+                 values["loss"], values["nll"], values["log_mse"]
+@@ -746,7 +748,7 @@ def train_single_condition(
+             "sample_count": monitor_count,
+             "objective": "log_density",
+             "sampling": objective.sampling,
+-            "components_measured": objective.sampling == "target_uniform",
++            "components_measured": objective.sampling in ("target_uniform", "uniform"),
+             "beta": objective.beta,
+             "nll_weight": objective.nll_weight,
+             "scope": "weighted_fixed_training_pool_subset_not_independent_validation",
+@@ -901,8 +903,8 @@ def train_single_condition(
+                 entry.update(nll=float(values[2]),
+                              beta=objective.beta, nll_weight=objective.nll_weight,
+                              objective="log_density", sampling=objective.sampling,
+-                             components_measured=objective.sampling == "target_uniform")
+-                if objective.sampling == "target_uniform":
++                             components_measured=objective.sampling in ("target_uniform", "uniform"))
++                if objective.sampling in ("target_uniform", "uniform"):
+                     entry["log_mse"] = float(values[3])
+             history.append(entry)
+         pending.clear()
+@@ -938,7 +940,7 @@ def train_single_condition(
+             else:
+                 terms = loss_terms(
+                     log_q, training_labels[indices], objective,
+-                    report_components=objective.sampling == "target_uniform",
++                    report_components=objective.sampling in ("target_uniform", "uniform"),
+                 )
+                 loss = terms["loss"]
+             loss.backward()
+diff --git a/src/phaseflow/training_scatter.py b/src/phaseflow/training_scatter.py
+index 203949e30014e6d2a12c6dc5308f445f2e4bd83e..b78963562dcdb9a47abbd37384ab835dcbad2d57 100644
+--- a/src/phaseflow/training_scatter.py
++++ b/src/phaseflow/training_scatter.py
+@@ -8,7 +8,9 @@ memory. It neither changes training state nor requires the old runtime to run.
+ 
+ Version-5 log-density runs additionally record component labels and the teacher
+ log PDF evaluated at the actual dtype-cast points. Their raw and runtime pool
+-identities are both checked before any point is displayed.
++identities are both checked before any point is displayed. The recorded
++objective selects the historical CDF/mixed pool or an all-uniform query pool;
++replotting never substitutes one sampling distribution for another.
+ """
+ 
+ from __future__ import annotations
+@@ -336,7 +338,9 @@ def resolve_training_scatter(
+             ),
+             "objective": objective.to_dict(),
+         })
+-        # A mixed pool has two independent input streams, not one CDF stream.
++        # The component provenance identifies the streams actually used. Mixed
++        # pools use two; all-uniform pools use only the uniform stream and do
++        # not generate any CDF-distributed training points.
+         provenance.pop("stream_id")
+         provenance["band"]["observed_component_samples"] = {
+             name: int(np.count_nonzero(in_band & (components == code)))
+diff --git a/tests/test_uniform_log_objective.py b/tests/test_uniform_log_objective.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e9ac96f593939768b26fef630402facd6fd8913
+--- /dev/null
++++ b/tests/test_uniform_log_objective.py
+@@ -0,0 +1,221 @@
++"""Uniform-query arithmetic checks on synthetic cells, not optical validation."""
++
++from __future__ import annotations
++
++import math
++from dataclasses import replace
++
++import numpy as np
++import pytest
++import torch
++from test_rainbow import write_rainbow_fixture
++
++from phaseflow.log_objective import (
++    LOG_UNIFORM,
++    LogObjectiveConfig,
++    loss_terms,
++    make_training_pool,
++    make_uniform_points,
++)
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import _array_hash
++
++
++def uniform_config(**changes):
++    return replace(
++        LogObjectiveConfig(
++            schema_version=2, sampling="uniform", target_fraction=0.0,
++            nll_weight=0.0, beta=1.0,
++        ),
++        **changes,
++    )
++
++
++@pytest.mark.parametrize("changes", [
++    {"schema_version": 1}, {"schema_version": True}, {"schema_version": 3},
++    {"sampling": "target"}, {"sampling": "target_uniform"},
++    {"target_fraction": 0.5}, {"target_fraction": True},
++])
++def test_uniform_pool_requires_explicit_new_schema_and_zero_target_fraction(changes):
++    with pytest.raises(ValueError):
++        uniform_config(**changes)
++    # Old configs never acquire a new sampling interpretation by omission.
++    with pytest.raises(ValueError):
++        LogObjectiveConfig.from_dict({"sampling": "uniform", "target_fraction": 0.0})
++
++
++def test_uniform_schema_roundtrip_and_odd_point_counts():
++    config = uniform_config()
++    assert LogObjectiveConfig.from_dict(config.to_dict()) == config
++    assert config.to_dict()["target_fraction"] == 0.0
++    for count in (1, 137, 262145):
++        config.validate_training_count(count)
++    for count in (0, True, 4.0):
++        with pytest.raises(ValueError, match="positive integer"):
++            config.validate_training_count(count)
++    # Weighted NLL is available explicitly, including NLL-only controls.
++    uniform_config(nll_weight=1.0)
++    uniform_config(nll_weight=1.0, beta=0.0)
++    with pytest.raises(ValueError, match="coefficient"):
++        uniform_config(beta=0.0)
++
++
++def test_entire_training_pool_is_uniform_solid_angle_and_never_samples_cdf(tmp_path, monkeypatch):
++    import phaseflow.single_condition as trainer
++
++    edges = np.array([0.0, 0.005, 0.2, 0.9, 1.0])
++    masses = np.arange(1, 25, dtype=np.float64).reshape(6, 4)
++    masses /= masses.sum()
++    write_rainbow_fixture(tmp_path / "record", masses=masses, u_edges=edges, frame_rotation=0.41)
++
++    def forbidden_target_sampling(*args, **kwargs):
++        raise AssertionError("uniform training must not invoke the CDF sampler")
++
++    monkeypatch.setattr(trainer, "_points", forbidden_target_sampling)
++    with RainbowReference(tmp_path / "record") as reference:
++        pool = make_training_pool(reference, 80000, 182, uniform_config(), torch.float32)
++        source = pool.directions.astype(np.float64) @ reference.source_to_nf
++        np.testing.assert_allclose(np.linalg.norm(source, axis=1), 1, atol=5e-8, rtol=0)
++        mu = source[:, 2]
++        assert abs(mu.mean()) < 0.008
++        assert abs(np.square(mu).mean() - 1 / 3) < 0.005
++        histogram, _, _ = np.histogram2d(
++            np.arctan2(source[:, 1], source[:, 0]), (1 - mu) / 2,
++            bins=(np.linspace(-np.pi, np.pi, len(masses) + 1), edges),
++        )
++        expected = np.broadcast_to(len(source) * np.diff(edges) / len(masses), masses.shape)
++        assert np.sum(np.square(histogram - expected) / expected) < 65
++        assert np.max(np.abs(histogram / len(source) - masses)) > 0.04
++        np.testing.assert_array_equal(pool.log_p, reference.log_prob(pool.directions))
++        np.testing.assert_array_equal(pool.components, np.ones(len(source), dtype=np.uint8))
++        assert pool.directions.dtype == np.float32 and pool.log_p.dtype == np.float64
++        provenance = pool.provenance
++        assert provenance["sampling"] == "uniform"
++        assert provenance["target_fraction"] == 0.0
++        assert provenance["component_counts"] == {"cdf": 0, "uniform": len(source)}
++        assert provenance["order"] == "uniform"
++        assert provenance["source_streams"] == {"cdf": None, "uniform": 5}
++        assert provenance["runtime_points_sha256"] == _array_hash(
++            pool.directions, pool.log_p, pool.components
++        )
++
++
++def test_uniform_training_reuses_existing_uniform_stream_and_deterministic_prefix(tmp_path):
++    masses = np.array([[0.7, 0.1], [0.1, 0.1]])
++    write_rainbow_fixture(tmp_path / "record", masses=masses, u_edges=np.array([0, 0.3, 1]))
++    with RainbowReference(tmp_path / "record") as reference:
++        mixed = make_training_pool(reference, 256, 527, LogObjectiveConfig(), torch.float32)
++        uniform = make_training_pool(reference, 256, 527, uniform_config(), torch.float32)
++        prefix = make_training_pool(reference, 73, 527, uniform_config(), torch.float32)
++        weighted = make_training_pool(
++            reference, 256, 527, uniform_config(nll_weight=1.0, beta=0.1), torch.float32,
++        )
++        old_stream = make_uniform_points(reference, 256, 527, "train", torch.float32)
++        np.testing.assert_array_equal(uniform.directions, old_stream[0])
++        np.testing.assert_array_equal(uniform.log_p, old_stream[1])
++        np.testing.assert_array_equal(uniform.directions[:128], mixed.directions[1::2])
++        np.testing.assert_array_equal(uniform.log_p[:128], mixed.log_p[1::2])
++        np.testing.assert_array_equal(prefix.directions, uniform.directions[:73])
++        np.testing.assert_array_equal(prefix.log_p, uniform.log_p[:73])
++        assert uniform.provenance == weighted.provenance
++        raw = make_uniform_points(reference, 256, 527, "train", torch.float64)
++        assert uniform.provenance["raw_points_sha256"] == _array_hash(*raw, uniform.components)
++        # Validation/test retain their independent existing streams.
++        for stream in ("validation", "test"):
++            other = make_uniform_points(reference, 256, 527, stream, torch.float32)
++            assert not np.array_equal(other[0], uniform.directions)
++
++
++def test_uniform_teacher_requeries_actual_fp32_points_across_cell_boundary(tmp_path, monkeypatch):
++    import phaseflow.log_objective as module
++
++    write_rainbow_fixture(
++        tmp_path / "record", masses=np.array([[0.8, 0.2]]), u_edges=np.array([0.0, 0.1, 1.0]),
++    )
++    with RainbowReference(tmp_path / "record") as reference:
++        u = 0.1 - 1e-10
++        raw = np.tile([2 * math.sqrt(u * (1 - u)), 0.0, 1 - 2 * u], (3, 1))
++        raw_labels = reference.log_prob(raw)
++        actual_labels = reference.log_prob(raw.astype(np.float32))
++        assert np.all(raw_labels != actual_labels)
++        monkeypatch.setattr(module, "_uniform_directions", lambda *args: raw)
++        pool = make_training_pool(reference, 3, 12, uniform_config(), torch.float32)
++        np.testing.assert_array_equal(pool.log_p, actual_labels)
++        assert pool.provenance["raw_points_sha256"] == _array_hash(raw, raw_labels, pool.components)
++        assert pool.provenance["runtime_points_sha256"] == _array_hash(
++            raw.astype(np.float32), actual_labels, pool.components,
++        )
++
++
++@pytest.mark.parametrize("dtype,tolerance", [(torch.float32, 2e-6), (torch.float64, 2e-14)])
++def test_uniform_loss_and_gradients_match_exact_two_region_integrals(dtype, tolerance):
++    # Four equally weighted solid-angle queries: one in an area-1/4 region,
++    # three in the area-3/4 region. This quadrature is exact for this teacher.
++    area = torch.tensor([0.25, 0.75], dtype=dtype)
++    mass = torch.tensor([0.9, 0.1], dtype=dtype)
++    logits = torch.tensor([math.log(0.7), math.log(0.3)], dtype=dtype, requires_grad=True)
++    region_q = logits.log_softmax(0) - area.log() + LOG_UNIFORM
++    index = torch.tensor([0, 1, 1, 1])
++    log_q = region_q[index]
++    log_p = (mass.log() - area.log() + LOG_UNIFORM)[index].to(torch.float64).requires_grad_()
++    config = uniform_config(nll_weight=0.6, beta=0.35)
++    result = loss_terms(log_q, log_p, config)
++    expected_nll = -(mass * region_q).sum()
++    expected_log = (area * (logits.log_softmax(0) - mass.log()).square()).sum()
++    expected = config.nll_weight * expected_nll + config.beta * expected_log
++    for name, value in (("nll", expected_nll), ("log_mse", expected_log), ("loss", expected)):
++        torch.testing.assert_close(result[name], value, rtol=tolerance, atol=tolerance)
++        assert result[name].dtype == dtype
++    gradient, label_gradient = torch.autograd.grad(
++        result["loss"], (logits, log_p), retain_graph=True, allow_unused=True,
++    )
++    expected_gradient, = torch.autograd.grad(expected, logits)
++    torch.testing.assert_close(gradient, expected_gradient, rtol=tolerance, atol=tolerance)
++    assert label_gradient is None
++    # Plain averaging of NLL would incorrectly learn uniform sphere density.
++    assert abs(float((result["nll"] + log_q.mean()).detach())) > 0.5
++
++
++def test_pure_uniform_log_has_no_density_weight_and_skips_inactive_overflow():
++    log_q = torch.tensor([-2.0, -3.0], dtype=torch.float32, requires_grad=True)
++    # p/u would overflow FP32 at the first point. It is inactive for pure log.
++    log_p = torch.tensor([1000.0, -1000.0], dtype=torch.float64, requires_grad=True)
++    config = uniform_config(beta=0.3)
++    plain = loss_terms(log_q, log_p, config)
++    reported = loss_terms(log_q, log_p, config, report_components=True)
++    error = log_q - log_p.detach().float()
++    expected = config.beta * error.square().mean()
++    torch.testing.assert_close(plain["loss"], expected, rtol=0, atol=0)
++    torch.testing.assert_close(reported["loss"], expected, rtol=0, atol=0)
++    assert plain["nll"] == 0
++    assert torch.isinf(reported["nll"]) and reported["nll"] > 0
++    reported["loss"].backward()
++    torch.testing.assert_close(log_q.grad, 2 * config.beta * error / len(error))
++    assert torch.isfinite(log_q.grad).all() and log_q.grad.dtype == torch.float32
++    assert log_p.grad is None
++
++
++@pytest.mark.parametrize("nll_weight,beta", [(0.0, 1.0), (1.0, 0.0)])
++def test_reporting_inactive_uniform_components_measures_raw_terms(nll_weight, beta):
++    q = torch.tensor([-2.0, -3.0], dtype=torch.float32, requires_grad=True)
++    p = torch.tensor([-4.0, -2.0], dtype=torch.float64, requires_grad=True)
++    config = uniform_config(nll_weight=nll_weight, beta=beta)
++    report = loss_terms(q, p, config, report_components=True)
++    expected_nll = -(torch.exp(p.detach().float() - LOG_UNIFORM) * q).mean()
++    expected_log = (q - p.detach().float()).square().mean()
++    torch.testing.assert_close(report["nll"], expected_nll)
++    torch.testing.assert_close(report["log_mse"], expected_log)
++    torch.testing.assert_close(report["loss"], nll_weight * expected_nll + beta * expected_log)
++
++
++def test_uniform_nll_does_not_evaluate_or_multiply_an_inactive_infinite_log_error():
++    q = torch.tensor([-2.0, -3.0], dtype=torch.float32, requires_grad=True)
++    p = torch.full((2,), -1e30, dtype=torch.float64)
++    config = uniform_config(nll_weight=1.0, beta=0.0)
++    silent = loss_terms(q, p, config)
++    report = loss_terms(q, p, config, report_components=True)
++    assert silent["log_mse"] == 0
++    assert torch.isinf(report["log_mse"])
++    assert report["loss"] == 0
++    report["loss"].backward()
++    torch.testing.assert_close(q.grad, torch.zeros_like(q))
+diff --git a/tests/test_uniform_log_training.py b/tests/test_uniform_log_training.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a95fc5b172bd7098cd6ceb81a5ee38b8e0b7d8b4
+--- /dev/null
++++ b/tests/test_uniform_log_training.py
+@@ -0,0 +1,175 @@
++"""Uniform-query learning and workflow checks on a synthetic cell teacher.
++
++These CPU fixtures check integration, not Rainbow optics or CUDA performance.
++"""
++
++from __future__ import annotations
++
++import json
++import math
++
++import numpy as np
++import pytest
++import torch
++from test_log_training import _assert_equal, _model, _training
++from test_single_condition import smooth_teacher
++
++from phaseflow.cli import main
++from phaseflow.log_objective import LOG_UNIFORM, LogObjectiveConfig, make_training_pool
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import FAMILY, read_single_checkpoint, train_single_condition
++
++
++def _objective():
++    return LogObjectiveConfig(
++        schema_version=2, sampling="uniform", target_fraction=0.0,
++        nll_weight=0.0, beta=1.0,
++        validation_uniform_samples=2048, test_uniform_samples=2048,
++    )
++
++
++def test_uniform_log_training_improves_independent_shape_without_cdf_training_queries(
++    tmp_path, monkeypatch,
++):
++    import phaseflow.single_condition as trainer
++
++    original_points = trainer._points
++
++    def no_cdf_training(reference, count, seed, stream):
++        assert stream != "train", "uniform training must not sample the target CDF"
++        return original_points(reference, count, seed, stream)
++
++    monkeypatch.setattr(trainer, "_points", no_cdf_training)
++    config = _training(
++        train_samples=4096, validation_samples=2048, test_samples=2048,
++        batch_size=256, steps=100, eval_every=20, checkpoint_every=20,
++        eval_batch_size=512,
++    )
++    objective = _objective()
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        result = train_single_condition(
++            reference, _model(), config, tmp_path / "run",
++            objective_config=objective, make_plots=False,
++        )
++        initial, test = result.metrics["initial_validation"], result.metrics["test"]
++        assert result.complete
++        assert test["log_mse"] < 0.65 * initial["log_mse"]
++        assert test["base_g"] == reference.g
++        checkpoint = read_single_checkpoint(result.checkpoint_path)
++        split = checkpoint["sample_split"]
++        assert split["training_pool"]["component_counts"] == {"cdf": 0, "uniform": 4096}
++        assert split["training_pool"]["source_streams"] == {"cdf": None, "uniform": 5}
++        # Historical stream registry is unchanged; actual sources are recorded
++        # in the pool provenance, rather than relabelling the old CDF stream.
++        assert split["streams"]["train"] == 0
++        assert split["training_points_sha256"] != split["uniform_validation_points_sha256"]
++        first = checkpoint["history"][0]["train_monitor"]
++        assert first["sample_count"] == config.train_monitor_samples == 65
++        assert first["components_measured"]
++
++        # The initial residual is identity. Use the analytic HG density to
++        # check both the ordinary uniform log MSE and p/u-weighted NLL monitor.
++        pool = make_training_pool(reference, config.train_samples, config.data_seed,
++                                  objective, torch.float32)
++        mu = pool.directions[:65, 2].astype(np.float64)
++        g = reference.g
++        log_hg = (math.log1p(-g * g) + LOG_UNIFORM
++                  - 1.5 * np.log(1 + g * g - 2 * g * mu))
++        labels = pool.log_p[:65]
++        expected_nll = np.mean(-np.exp(labels - LOG_UNIFORM) * log_hg)
++        expected_log_mse = np.mean(np.square(log_hg - labels))
++        assert first["nll"] == pytest.approx(expected_nll, rel=3e-6, abs=3e-6)
++        assert first["log_mse"] == pytest.approx(expected_log_mse, rel=3e-6, abs=3e-6)
++        assert first["loss"] == first["log_mse"]
++        for event in checkpoint["history"]:
++            if "loss" in event:
++                assert event["components_measured"]
++                assert event["sampling"] == "uniform"
++                assert event["loss"] == event["log_mse"]
++                assert event["nll"] != 0.0
++
++
++@pytest.mark.parametrize("device", [
++    "cpu",
++    pytest.param("cuda:0", marks=[
++        pytest.mark.cuda,
++        pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable"),
++    ]),
++])
++def test_uniform_query_resume_is_exact_and_uses_resident_labels(tmp_path, monkeypatch, device):
++    import phaseflow.single_condition as trainer
++
++    original_terms, original_points = trainer.loss_terms, trainer._points
++    calls = []
++    queried = []
++
++    def checked_terms(log_q, log_p, objective, **kwargs):
++        assert log_q.device == log_p.device
++        assert log_q.device.type == torch.device(device).type
++        assert log_q.dtype == torch.float32
++        assert kwargs["report_components"] is True
++        calls.append(len(log_q))
++        return original_terms(log_q, log_p, objective, **kwargs)
++
++    def tracked_points(reference, count, seed, stream):
++        assert stream != "train"
++        queried.append(stream)
++        return original_points(reference, count, seed, stream)
++
++    monkeypatch.setattr(trainer, "loss_terms", checked_terms)
++    monkeypatch.setattr(trainer, "_points", tracked_points)
++    config = _training(device=device, train_samples=257)
++    objective = _objective()
++    with RainbowReference(smooth_teacher(tmp_path / "record")) as reference:
++        full = train_single_condition(reference, _model(), config, tmp_path / "full",
++                                      objective_config=objective, make_plots=False)
++        queried.clear()
++        partial = train_single_condition(
++            reference, _model(), config, tmp_path / "resumed",
++            objective_config=objective, make_plots=False, max_steps_this_run=3,
++        )
++        assert not partial.complete and partial.metrics["test"] is None
++        assert "test" not in queried
++        continued = train_single_condition(
++            reference, _model(), config, tmp_path / "resumed",
++            objective_config=objective, make_plots=False, resume=partial.checkpoint_path,
++        )
++        assert "test" in queried and calls
++        _assert_equal(read_single_checkpoint(full.checkpoint_path),
++                      read_single_checkpoint(continued.checkpoint_path))
++        assert full.metrics == continued.metrics
++        resumed_history = [json.loads(line) for line in
++                           (tmp_path / "resumed/history.jsonl").read_text().splitlines()]
++        assert resumed_history == read_single_checkpoint(continued.checkpoint_path)["history"]
++
++
++def test_uniform_cli_generates_all_three_maps_and_every_actual_training_point(tmp_path, capsys):
++    record = smooth_teacher(tmp_path / "record")
++    config = _training(steps=2, train_samples=129)
++    objective = _objective()
++    path, run = tmp_path / "config.json", tmp_path / "run"
++    path.write_text(json.dumps({
++        "schema_version": 3, "family": FAMILY, "model": _model().to_dict(),
++        "training": config.to_dict(), "objective": objective.to_dict(),
++        "visualization": {"enabled": True, "dpi": 40, "eval_batch_size": 64},
++    }), encoding="utf-8")
++    assert main(["train-rainbow", "--record", str(record), "--config", str(path),
++                 "--output", str(run), "--quiet"]) == 0
++    report = json.loads(capsys.readouterr().out)
++    assert report["complete"]
++    assert report["plots"] == str((run / "plots/plots.json").resolve())
++    for name in ("reference_pdf.png", "training_samples.png", "nf_pdf.png", "comparison.png"):
++        assert (run / "plots" / name).is_file()
++    assert (run / "learning_curves.png").is_file()
++    checkpoint = read_single_checkpoint(run / "checkpoint.pt")
++    with np.load(run / "plots/training_scatter.npz", allow_pickle=False) as scatter:
++        assert scatter["directions_nf"].shape == (config.train_samples, 3)
++        assert np.all(scatter["components"] == 1)
++        with RainbowReference(record) as reference:
++            pool = make_training_pool(reference, config.train_samples, config.data_seed,
++                                      objective, torch.float32)
++            np.testing.assert_array_equal(scatter["directions_nf"], pool.directions)
++            np.testing.assert_array_equal(scatter["teacher_log_pdf"], pool.log_p)
++    assert checkpoint["sample_split"]["training_points_sha256"] == (
++        pool.provenance["runtime_points_sha256"]
++    )
+diff --git a/tests/test_uniform_training_scatter.py b/tests/test_uniform_training_scatter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd1298fcdc47d1c02ea652709af885f1ac67663f
+--- /dev/null
++++ b/tests/test_uniform_training_scatter.py
+@@ -0,0 +1,168 @@
++"""All-uniform query provenance and plots; synthetic CPU fixtures only."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++
++import numpy as np
++import pytest
++from test_rainbow import write_rainbow_fixture
++from test_training_scatter import _configuration, _model_config
++
++from phaseflow.angular_diagnostics import AngularDiagnosticConfig, evaluate_angular_diagnostics
++from phaseflow.log_objective import LogObjectiveConfig, make_training_pool
++from phaseflow.plotting import RainbowPlotConfig, plot_rainbow_comparison
++from phaseflow.rainbow import RainbowReference
++from phaseflow.single_condition import train_single_condition
++
++
++def _positive_record(path):
++    masses = np.array([[1, 2, 3], [2, 1, 1], [3, 1, 2], [1, 2, 4]], dtype=np.float64)
++    masses /= masses.sum()
++    write_rainbow_fixture(
++        path, masses=masses, u_edges=np.array([0, 0.01, 0.78, 1]), frame_rotation=0.37,
++    )
++
++
++def _objective():
++    return LogObjectiveConfig(
++        schema_version=2, nll_weight=0, beta=1, sampling="uniform", target_fraction=0,
++        validation_uniform_samples=32, test_uniform_samples=32,
++    )
++
++
++@pytest.mark.parametrize("count", [137, 262144])
++def test_uniform_plot_uses_every_actual_query_without_cdf_sampling(
++    tmp_path, monkeypatch, count,
++):
++    from matplotlib.axes import Axes
++    from matplotlib.image import imread
++
++    _positive_record(tmp_path / "record")
++    seen = []
++    original = Axes.scatter
++
++    def observe(ax, x, y, *args, **kwargs):
++        seen.append((np.asarray(x).copy(), np.asarray(y).copy(), kwargs["label"]))
++        return original(ax, x, y, *args, **kwargs)
++
++    monkeypatch.setattr(Axes, "scatter", observe)
++    with RainbowReference(tmp_path / "record") as reference:
++        cfg, objective = _configuration(train_samples=count, steps=0), _objective()
++        run, plots = tmp_path / "run", tmp_path / "plots"
++        result = train_single_condition(
++            reference, _model_config(), cfg, run, objective_config=objective, make_plots=False,
++        )
++        original_run_hashes = {
++            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
++            for path in run.iterdir() if path.is_file()
++        }
++
++        def reject_target_sampling(*args, **kwargs):
++            raise AssertionError("All-uniform training-scatter regeneration must not sample the CDF")
++
++        # Target-distributed validation/test points are allowed during training.
++        # Regenerating this training pool and its maps must need no CDF samples.
++        monkeypatch.setattr(reference, "sample", reject_target_sampling)
++        manifest = plot_rainbow_comparison(
++            result.model, reference, plots, checkpoint_path=result.best_path,
++            config=RainbowPlotConfig(cdf_samples=1, dpi=30),
++        )
++        pool = make_training_pool(
++            reference, count, cfg.data_seed, objective, result.model.geometry_dtype,
++        )
++        scatter = manifest["scatter"]
++        assert scatter["sampling_distribution"] == "uniform"
++        assert scatter["component_counts"] == {"cdf": 0, "uniform": count}
++        assert scatter["source_streams"] == {"cdf": None, "uniform": 5}
++        assert scatter["sample_count"] == scatter["displayed_sample_count"] == count
++        assert scatter["downsampling"] is False and scatter["hash_verified"] is True
++        assert scatter["training_pool"] == pool.provenance
++        assert scatter["band"]["observed_component_samples"]["cdf"] == 0
++        assert scatter["band"]["observed_component_samples"]["uniform"] == (
++            scatter["band"]["observed_train_samples"]
++        )
++        assert manifest["objective"] == objective.to_dict()
++        assert manifest["configuration_usage"]["cdf_samples"] == "unused"
++        assert manifest["figures"]["panel_titles"][1] == (
++            f"Spherical-uniform training pool (N = {count:,})"
++        )
++        assert "Every shown point is an actual spherical-uniform" in (
++            manifest["figures"]["scatter_chart_note"]
++        )
++        assert "u_per_sr=1/(4*pi)" in manifest["coordinates"]["scatter_chart_density"]
++        assert manifest["coordinates"]["frame"] == "recorded_solver_source"
++        assert manifest["coordinates"]["axes_width_over_height"] == 2
++        assert manifest["coordinates"]["equal_area"] is False
++        assert manifest["grid"]["theta_count"] == reference.n_theta
++        assert manifest["grid"]["phi_count"] == reference.n_phi
++        assert manifest["grid"]["resolution"] == "full_native_cdf_cells_no_angular_downsampling"
++        assert manifest["color_scale"]["shared_between"] == ["reference_pdf", "nf_pdf"]
++        assert manifest["color_scale"]["normalization"] == "matplotlib.colors.LogNorm"
++        assert manifest["color_scale"]["density_floor"] is None
++        with np.load(plots / "training_scatter.npz", allow_pickle=False) as archive:
++            np.testing.assert_array_equal(archive["directions_nf"], pool.directions)
++            np.testing.assert_array_equal(archive["teacher_log_pdf"], reference.log_prob(pool.directions))
++            assert archive["directions_nf"].dtype == np.float32
++            assert archive["components"].dtype == np.uint8
++            assert np.all(archive["components"] == 1)
++            assert json.loads(archive["provenance_json"].item()) == scatter
++            source = pool.directions.astype(np.float64) @ reference.source_to_nf
++            phi = (np.arctan2(source[:, 1], source[:, 0]) + np.pi) % (2 * np.pi) - np.pi
++            theta = np.arctan2(np.hypot(source[:, 0], source[:, 1]), source[:, 2])
++            np.testing.assert_array_equal(archive["source_phi_degrees"], np.rad2deg(phi))
++            np.testing.assert_array_equal(archive["theta_degrees"], np.rad2deg(theta))
++            assert len(seen) == 2  # Individual and combined figure, one collection per figure.
++            for x, y, label in seen:
++                assert len(x) == len(y) == count
++                np.testing.assert_array_equal(x, archive["source_phi_degrees"])
++                np.testing.assert_array_equal(y, archive["theta_degrees"])
++                assert label == f"Spherical uniform (N = {count:,})"
++        assert original_run_hashes == {
++            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
++            for path in run.iterdir() if path.is_file()
++        }
++    assert set(manifest["files"]) == {"reference_pdf", "training_samples", "nf_pdf", "comparison"}
++    assert not (plots / "cdf_samples.png").exists()
++    shapes = []
++    for stem in ("reference_pdf", "training_samples", "nf_pdf"):
++        pixels = imread(plots / f"{stem}.png")
++        assert np.isfinite(pixels).all() and np.ptp(pixels[..., :3]) > 0.5
++        shapes.append(pixels.shape)
++    assert shapes[0] == shapes[1] == shapes[2]
++
++
++def test_uniform_angular_counts_use_solid_angle_instead_of_teacher_mass(tmp_path):
++    from matplotlib.image import imread
++
++    _positive_record(tmp_path / "record")
++    with RainbowReference(tmp_path / "record") as reference:
++        cfg, objective = _configuration(train_samples=137, steps=0), _objective()
++        result = train_single_condition(
++            reference, _model_config(), cfg, tmp_path / "run",
++            objective_config=objective, make_plots=False,
++        )
++        report = evaluate_angular_diagnostics(
++            result.model, reference, tmp_path / "diagnostics", train_samples=cfg.train_samples,
++            batch_size=cfg.batch_size, objective_config=objective,
++            checkpoint_path=result.best_path, config=AngularDiagnosticConfig(dpi=30),
++        )
++    # A full-azimuth spherical band's area fraction is (cos(low)-cos(high))/2.
++    expected_mass = (np.cos(np.deg2rad(120)) - np.cos(np.deg2rad(150))) / 2
++    assert abs(report["reference_band_mass_exact"] - expected_mass) > 0.01
++    assert report["uniform_band_mass_exact"] == pytest.approx(expected_mass)
++    assert report["training_query_band_mass"] == pytest.approx(expected_mass)
++    assert report["expected_train_band_samples"] == pytest.approx(cfg.train_samples * expected_mass)
++    assert report["expected_uniform_train_band_samples"] == pytest.approx(
++        cfg.train_samples * expected_mass
++    )
++    assert report["expected_minibatch_band_samples"] == pytest.approx(cfg.batch_size * expected_mass)
++    assert report["expected_cdf_train_band_samples"] == 0
++    counts = report["expected_counts"]
++    assert counts["sampling"] == "uniform" and counts["target_fraction"] == 0
++    assert counts["cdf_samples"] == 0 and counts["uniform_samples"] == cfg.train_samples
++    assert counts["observed_train_band_samples"] is None
++    assert counts["method"].startswith("N*u(R) and B*u(R)")
++    pixels = imread(tmp_path / "diagnostics/angular_profiles.png")
++    assert np.isfinite(pixels).all() and np.ptp(pixels[..., :3]) > 0.5
+diff --git a/train_log_uniform.bat b/train_log_uniform.bat
+new file mode 100644
+index 0000000000000000000000000000000000000000..db068f0e68b9f22b62b2c18eeeed4ef013571fda
+--- /dev/null
++++ b/train_log_uniform.bat
+@@ -0,0 +1,148 @@
++@echo off
++setlocal EnableExtensions DisableDelayedExpansion
++
++rem One pure-log fit: every training point is sampled uniformly in solid angle.
++rem Copy RECORD from your working execute.bat. Use a new OUTPUT for this experiment.
++rem The JSON config controls the model, point count, updates, and automatic full maps.
++set "RECORD=..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800"
++set "CONFIG=configs\rainbow_log_uniform.json"
++set "DIAGNOSTIC_CONFIG=configs\rainbow_sweep.json"
++set "OUTPUT=runs\rainbow_log_uniform_gpu"
++set "DEVICE=cuda:0"
++set "PROBE_STEPS=250"
++
++pushd "%~dp0"
++if not "%ERRORLEVEL%"=="0" exit /b 1
++if not "%~2"=="" goto :usage
++set "MODE=%~1"
++if "%MODE%"=="" set "MODE=run"
++if /i "%MODE%"=="run" goto :environment
++if /i "%MODE%"=="probe" goto :environment
++if /i "%MODE%"=="plot" goto :environment
++if /i "%MODE%"=="check" goto :environment
++goto :usage
++
++:environment
++if not exist "environment.bat" goto :missing_environment
++if not exist "scripts\check_environment.py" goto :missing_environment
++if not exist "%CONFIG%" goto :missing_config
++if not exist "%DIAGNOSTIC_CONFIG%" goto :missing_config
++call environment.bat
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo [1/3] Checking the shared Python and CUDA environment...
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% "scripts\check_environment.py" check --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++if /i "%MODE%"=="check" goto :checked
++if not exist "%RECORD%\metadata.json" goto :missing_record
++if /i "%MODE%"=="plot" goto :plot
++set "RUN_LIMITS="
++if /i "%MODE%"=="probe" set "RUN_LIMITS=--max-steps-this-run %PROBE_STEPS%"
++
++echo [2/3] Training with spherical-uniform query points and the configured objective...
++if /i "%MODE%"=="probe" echo Probe: at most %PROBE_STEPS% additional updates; the final plan stays fixed.
++if exist "%OUTPUT%\checkpoint.pt" goto :resume
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow train-rainbow ^
++    --record "%RECORD%" ^
++    --config "%CONFIG%" ^
++    --output "%OUTPUT%" ^
++    --device "%DEVICE%" %RUN_LIMITS%
++if not "%ERRORLEVEL%"=="0" goto :failed
++goto :after_training
++
++:resume
++echo Resuming the saved optimizer and random state from "%OUTPUT%\checkpoint.pt".
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow train-rainbow ^
++    --record "%RECORD%" ^
++    --config "%CONFIG%" ^
++    --output "%OUTPUT%" ^
++    --resume "%OUTPUT%\checkpoint.pt" ^
++    --device "%DEVICE%" %RUN_LIMITS%
++if not "%ERRORLEVEL%"=="0" goto :failed
++
++:after_training
++if /i "%MODE%"=="probe" goto :probe_done
++echo [3/3] Saving angular PDF profiles for the selected checkpoint...
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow diagnose-rainbow ^
++    --record "%RECORD%" ^
++    --run "%OUTPUT%" ^
++    --sweep-config "%DIAGNOSTIC_CONFIG%" ^
++    --output "%OUTPUT%\diagnostics" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Training, independent evaluation, full PDF maps, and angular profiles finished.
++echo Comparison: "%OUTPUT%\plots\comparison.png"
++echo Every actual training point: "%OUTPUT%\plots\training_samples.png"
++echo Metrics: "%OUTPUT%\metrics.json"
++echo Angular profiles: "%OUTPUT%\diagnostics"
++echo Monitor: call monitor.bat "%OUTPUT%"
++set "EXIT_CODE=0"
++goto :finish
++
++:probe_done
++echo.
++echo [DONE] Probe checkpoint saved. Run this batch without an argument to finish the plan and plots.
++echo Continue: call train_log_uniform.bat
++echo Preview selected weights now: call train_log_uniform.bat plot
++echo Monitor: call monitor.bat "%OUTPUT%"
++set "EXIT_CODE=0"
++goto :finish
++
++:plot
++if not exist "%OUTPUT%\best.pt" goto :missing_checkpoint
++echo Rendering the saved validation-selected checkpoint without optimizer updates...
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow plot-rainbow ^
++    --record "%RECORD%" ^
++    --checkpoint "%OUTPUT%\best.pt" ^
++    --output "%OUTPUT%\plots_manual" ^
++    --scatter training ^
++    --batch-size 4096 ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Saved "%OUTPUT%\plots_manual\comparison.png" and all actual training points.
++set "EXIT_CODE=0"
++goto :finish
++
++:checked
++echo [DONE] Shared Python and CUDA check passed.
++set "EXIT_CODE=0"
++goto :finish
++
++:missing_environment
++echo [ERROR] Keep this batch, environment.bat, and scripts\check_environment.py in one checkout.
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_record
++echo [ERROR] Missing "%RECORD%\metadata.json". Copy RECORD from your working execute.bat.
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_config
++echo [ERROR] Apply the full uniform-training patch and check CONFIG and DIAGNOSTIC_CONFIG.
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_checkpoint
++echo [ERROR] Missing "%OUTPUT%\best.pt". Run training or a probe before plotting.
++set "EXIT_CODE=1"
++goto :finish
++
++:usage
++echo Usage: train_log_uniform.bat [run^|probe^|plot^|check]
++echo No argument runs or resumes one fit with automatic full maps after completion.
++set "EXIT_CODE=2"
++goto :finish
++
++:failed
++set "EXIT_CODE=%ERRORLEVEL%"
++echo.
++echo [ERROR] Command failed with exit code %EXIT_CODE%. See the output above.
++echo Keep the original configuration for resume; changed experiments need a new OUTPUT.
++
++:finish
++popd
++echo.
++if not "%PHASEFLOW_PAUSE%"=="0" pause
++exit /b %EXIT_CODE%

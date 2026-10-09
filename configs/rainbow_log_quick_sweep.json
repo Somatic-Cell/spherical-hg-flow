@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "sweep": {
+    "betas": [
+      0,
+      0.1,
+      1
+    ],
+    "include_target_nll_control": false,
+    "include_pure_log_control": true
+  },
+  "diagnostics": {
+    "enabled": true,
+    "theta_band_degrees": [
+      120.0,
+      150.0
+    ],
+    "source_phi_degrees": [
+      -90.0,
+      0.0,
+      90.0
+    ],
+    "eval_batch_size": 4096,
+    "dpi": 140
+  }
+}

@@ -1,0 +1,379 @@
+diff --git a/configs/rainbow_log_quick.json b/configs/rainbow_log_quick.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..c775014ff65ac89c75dee723a01b6b582628876f
+--- /dev/null
++++ b/configs/rainbow_log_quick.json
+@@ -0,0 +1,58 @@
++{
++  "schema_version": 3,
++  "family": "rainbow_single_condition",
++  "model": {
++    "num_coupling_layers": 4,
++    "num_bins": 64,
++    "hidden_features": [
++      64,
++      64
++    ],
++    "mirror_symmetry": true,
++    "min_bin_width": 1e-05,
++    "min_bin_height": 1e-05,
++    "min_derivative": 0.0001,
++    "activation": "silu",
++    "spline_dtype": "model",
++    "geometry_dtype": "model"
++  },
++  "training": {
++    "seed": 415,
++    "data_seed": 2026,
++    "device": "cuda",
++    "dtype": "float32",
++    "train_samples": 262144,
++    "validation_samples": 8192,
++    "test_samples": 16384,
++    "proposal_samples": 4096,
++    "batch_size": 1024,
++    "steps": 2000,
++    "learning_rate": 0.003,
++    "eval_every": 250,
++    "checkpoint_every": 250,
++    "eval_batch_size": 4096,
++    "grad_clip_norm": 10.0,
++    "deterministic": true,
++    "cpu_threads": 1,
++    "log_every": 50,
++    "tensorboard": true,
++    "train_monitor_samples": 2048
++  },
++  "objective": {
++    "schema_version": 1,
++    "nll_weight": 1.0,
++    "beta": 0.1,
++    "sampling": "target_uniform",
++    "target_fraction": 0.5,
++    "selection_metric": "log_rmse",
++    "validation_uniform_samples": 8192,
++    "test_uniform_samples": 16384,
++    "zero_policy": "error"
++  },
++  "visualization": {
++    "enabled": false,
++    "eval_batch_size": 4096,
++    "dpi": 160,
++    "write_pdf": false
++  }
++}
+diff --git a/configs/rainbow_log_quick_sweep.json b/configs/rainbow_log_quick_sweep.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..70260e9e823a8df3e5b299c5c087a21ab1fb175d
+--- /dev/null
++++ b/configs/rainbow_log_quick_sweep.json
+@@ -0,0 +1,26 @@
++{
++  "schema_version": 1,
++  "sweep": {
++    "betas": [
++      0,
++      0.1,
++      1
++    ],
++    "include_target_nll_control": false,
++    "include_pure_log_control": true
++  },
++  "diagnostics": {
++    "enabled": true,
++    "theta_band_degrees": [
++      120.0,
++      150.0
++    ],
++    "source_phi_degrees": [
++      -90.0,
++      0.0,
++      90.0
++    ],
++    "eval_batch_size": 4096,
++    "dpi": 140
++  }
++}
+diff --git a/docs/LOG_LOSS_QUICK_SWEEP.md b/docs/LOG_LOSS_QUICK_SWEEP.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1cd0ba72e0f0ee56789de2d3297f28d64f7ef2b
+--- /dev/null
++++ b/docs/LOG_LOSS_QUICK_SWEEP.md
+@@ -0,0 +1,138 @@
++# 短時間の log-density loss 比較
++
++この追加設定は，既に提供した対数密度回帰と beta sweep の拡張を使います．
++`src/phaseflow/log_sweep.py` がある checkout に追加してください．
++Python の学習処理は変更せず，短い比較用の設定と BAT を追加します．
++
++## 比較する条件
++
++| 項目 | 従来の log-loss sweep 設定 | 今回の quick 設定 |
++|---|---:|---:|
++| Coupling layers | 16 | 4 |
++| Hidden features | 64 × 64 | 64 × 64 |
++| RQS bins | 64 | 64 |
++| 学習率 | 0.001 | 0.003 |
++| 一試行の optimizer 更新数 | 20,000 | 2,000 |
++| 固定学習 pool の点数 | 262,144 | 262,144 |
++| Minibatch | 1,024 | 1,024 |
++| Validation 点数：CDF / 球面一様 | 各 32,768 | 各 8,192 |
++| Test 点数：CDF / 球面一様 | 各 65,536 | 各 16,384 |
++| Proposal / ESS 点数 | 16,384 | 4,096 |
++| 途中評価 / checkpoint の間隔 | 100 更新 | 250 更新 |
++| スカラー記録の間隔 | 20 更新 | 50 更新 |
++| 学習 pool からの監視点数 | 8,192 | 2,048 |
++| 試行数 | 7 | 4 |
++| 全解像度 PDF マップと全学習点の図 | 自動生成 | `replot` で後から生成 |
++
++4 試行は次のとおりです．全試行が同じ初期重み・固定学習 pool・独立評価点を使います．
++
++| 試行 | NLL の係数 | log PDF 二乗誤差の係数 beta |
++|---|---:|---:|
++| 混合点群による NLL のみ | 1 | 0 |
++| NLL + log 誤差 | 1 | 0.1 |
++| NLL + log 誤差 | 1 | 1 |
++| log 誤差のみ | 0 | 1 |
++
++固定学習 pool は CDF からの 131,072 点と球面一様の 131,072 点，合計 262,144 点です．
++NLL は p/r，log 誤差は u/r の重要度重みを使います．beta=0 でもこの混合 pool を
++保持するため，この比較で変わるのは損失の係数です．CDF 点のみを用いる追加の NLL
++対照実験は今回は省きます．学習点数を減らしても，minibatch と更新数が同じなら
++学習中に評価する点の総数は減りません．まず弱い構造の教師点を残します．
++
++4 試行を完了すると合計 8,000 更新です．2,000 × 1,024 / 262,144 = 7.8125
++pool 相当の点数を処理しますが，minibatch は復元抽出なので，厳密な 7.8 epoch
++あるいは各点を同じ回数使う学習ではありません．
++
++HG・球面 RQS・対称性・固定 CDF の扱いは既存仕様を使います．CUDA / FP32 が既定です．
++AMP や FP16 計算への変更で短縮する設定ではありません．角度断面の診断，TensorBoard，
++`history.jsonl` と `learning_curves.png` は残します．
++
++## 実行方法
++
++1. 追加ファイルをリポジトリ直下へ展開するか，追加パッチを適用します．両方は不要です．
++2. `sweep_log_loss_quick.bat` の `RECORD` を，実行できている `execute.bat` と同じ
++   一条件のディレクトリに設定します．
++3. `OUTPUT` は新しい `runs\rainbow_log_quick_gpu` のままにするか，別の空の場所にします．
++   重い設定で実行済みの sweep のディレクトリは指定しません．
++
++設定を確認するだけの場合：
++
++```bat
++call sweep_log_loss_quick.bat plan
++```
++
++最初に 250 更新だけ実行し，手元の GPU で速度と loss を確認する場合：
++
++```bat
++call sweep_log_loss_quick.bat probe
++```
++
++これは一つの未完了試行を最大 250 **追加**更新で一時停止します．予定される最終更新数は
++2,000 のままです．同じ BAT を引数なしで実行すると，その checkpoint から継続し，
++残りの試行を順番に実行します．毎回 250 更新をやり直す動作ではありません．
++
++```bat
++call sweep_log_loss_quick.bat
++```
++
++最初の一試行を 2,000 更新まで完了させ，学習・最終評価・角度診断を含む時間を
++確認してから残りを実行することもできます．完了済み試行は再学習しません．
++
++```bat
++call sweep_log_loss_quick.bat first
++call sweep_log_loss_quick.bat
++```
++
++| モード | 動作 |
++|---|---|
++| 引数なし / `run` | 未完了の試行を再開し，4 試行を完了する |
++| `probe` | 一つの未完了試行を最大 250 追加更新して停止する |
++| `first` | 一つの未完了試行を完了して停止する |
++| `plan` | GPU 計算・CDF 読み込み・出力作成を行わず，試行計画を表示する |
++| `replot` | 完了済み試行から，全解像度マップと全学習点の図を新しい場所に作る |
++
++同じ `OUTPUT` で続ける間は，JSON 設定を変更しないでください．`probe` / `first` は
++実行を区切る指定なので変更できます．更新数や層数などを変えた別実験には新しい
++`OUTPUT` を使います．より長い学習への自動昇格や早期打ち切りは行いません．
++
++## 結果と時間の確認
++
++`runs\rainbow_log_quick_gpu` に `summary.md`，`summary.csv`，`summary.json`，
++`summary.png` が保存されます．未完了の比較から最良 beta を確定しません．
++試行を止めた場合も，各実行の秒数は `attempts\<trial_id>.json` に記録されます．
++完了試行の `elapsed_seconds` は再開前後の実行時間を合計した値です．
++
++その時間には各試行内の学習・評価・角度診断などを含みますが，sweep 共通の初期 CDF
++検証や共通データ準備，後日の `replot` などは含みません．`probe` の時間を単純に
++8 倍しても，一試行全体の厳密な予測にはなりません．GPU 実機での時間制限や速度保証を
++設けた設定ではなく，まず更新数を小さくして実測できる設定です．
++
++別の CMD ウィンドウで監視する場合：
++
++```bat
++call monitor.bat "runs\rainbow_log_quick_gpu"
++```
++
++完了済み試行の PDF と学習点を確認する場合：
++
++```bat
++call sweep_log_loss_quick.bat replot
++```
++
++図は `runs\rainbow_log_quick_gpu\replots` 内の新しいディレクトリに保存されます．
++既存の試行を上書きせず，保存 CDF の PDF，実際の混合学習 pool 全 262,144 点，
++NF の PDF を同じ記録座標で描きます．CDF 成分と一様成分を区別し，点群を
++32,768 点などへ間引くことはしません．この処理は**完了済み全試行**を対象とし，
++細かい CDF グリッドでは追加の時間がかかります．
++
++## この比較から判断できること
++
++目的は，小さいモデルと短い学習で，log 誤差を加える効果と NLL を残す効果の
++大きな傾向を調べることです．この条件だけで最終的なモデル容量や beta を確定しません．
++異なる beta の合成 loss 値を直接比較せず，独立 validation の log RMSE と KL，
++角度断面，後から生成する PDF マップを確認します．Test は選択に使いません．
++
++有望な候補が絞れた段階で，同じ条件・同じ更新数に揃えて比較を延長します．例えば
++上位の二候補を別実験として 5,000 更新で比較できますが，この BAT が自動で
++追加学習を行うことはありません．評価点数を減らした分，小さな順位差は慎重に扱い，
++最終確認では評価点数と独立 seed を増やします．
+diff --git a/sweep_log_loss_quick.bat b/sweep_log_loss_quick.bat
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f1bdb3926f1e4a903cb6cc9addb2a949348f62d
+--- /dev/null
++++ b/sweep_log_loss_quick.bat
+@@ -0,0 +1,133 @@
++@echo off
++setlocal EnableExtensions DisableDelayedExpansion
++
++rem Requires the previously supplied log-density objective and beta-sweep patches.
++rem Copy RECORD from your working execute.bat. Keep the new OUTPUT for this experiment.
++rem Four trials: mixed NLL, beta 0.1, beta 1, and pure log regression.
++rem Full native PDF maps are deferred to replot; scalar monitoring and angular cuts remain.
++set "RECORD=..\rainbow\datasets\drop_a1_i20_700nm_q1800x3600_c90x1800"
++set "CONFIG=configs\rainbow_log_quick.json"
++set "SWEEP_CONFIG=configs\rainbow_log_quick_sweep.json"
++set "OUTPUT=runs\rainbow_log_quick_gpu"
++set "DEVICE=cuda:0"
++set "PROBE_STEPS=250"
++
++pushd "%~dp0"
++if not "%ERRORLEVEL%"=="0" exit /b 1
++if not "%~2"=="" goto :usage
++set "MODE=%~1"
++if "%MODE%"=="" set "MODE=run"
++if /i "%MODE%"=="run" goto :environment
++if /i "%MODE%"=="probe" goto :environment
++if /i "%MODE%"=="first" goto :environment
++if /i "%MODE%"=="plan" goto :environment
++if /i "%MODE%"=="replot" goto :environment
++goto :usage
++
++:environment
++if not exist "environment.bat" goto :missing_environment
++if not exist "scripts\check_environment.py" goto :missing_environment
++if not exist "src\phaseflow\log_sweep.py" goto :missing_log_sweep
++call environment.bat
++if not "%ERRORLEVEL%"=="0" goto :failed
++if /i "%MODE%"=="plan" goto :plan
++echo Checking the shared Python and CUDA environment...
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% "scripts\check_environment.py" check --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++if not exist "%RECORD%\metadata.json" goto :missing_record
++if /i "%MODE%"=="replot" goto :replot
++if not exist "%CONFIG%" goto :missing_config
++if not exist "%SWEEP_CONFIG%" goto :missing_config
++set "RUN_LIMITS="
++if /i "%MODE%"=="probe" set "RUN_LIMITS=--max-trials-this-run 1 --max-steps-this-trial %PROBE_STEPS%"
++if /i "%MODE%"=="first" set "RUN_LIMITS=--max-trials-this-run 1"
++
++echo Quick comparison: L=4, H=64x64, K=64, lr=0.003, 2000 updates per trial.
++if /i "%MODE%"=="probe" echo Probe: at most %PROBE_STEPS% additional updates in one unfinished trial.
++if /i "%MODE%"=="first" echo First: complete at most one unfinished trial.
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow.log_sweep run ^
++    --record "%RECORD%" ^
++    --config "%CONFIG%" ^
++    --sweep-config "%SWEEP_CONFIG%" ^
++    --output "%OUTPUT%" ^
++    --device "%DEVICE%" %RUN_LIMITS%
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Requested execution finished. A probe or first run may leave pending trials.
++echo Summary: "%OUTPUT%\summary.md"
++echo Table: "%OUTPUT%\summary.csv"
++echo Per-attempt timing in seconds: "%OUTPUT%\attempts"
++echo Monitor: call monitor.bat "%OUTPUT%"
++echo Continue: call sweep_log_loss_quick.bat
++echo Full maps after completed trials: call sweep_log_loss_quick.bat replot
++set "EXIT_CODE=0"
++goto :finish
++
++:plan
++if not exist "%CONFIG%" goto :missing_config
++if not exist "%SWEEP_CONFIG%" goto :missing_config
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow.log_sweep plan ^
++    --record "%RECORD%" ^
++    --config "%CONFIG%" ^
++    --sweep-config "%SWEEP_CONFIG%" ^
++    --output "%OUTPUT%" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++set "EXIT_CODE=0"
++goto :finish
++
++:replot
++if not exist "%OUTPUT%\manifest.json" goto :missing_sweep
++"%PHASEFLOW_PYTHON%" %PHASEFLOW_PYTHON_ARGS% -m phaseflow.log_sweep replot ^
++    --record "%RECORD%" ^
++    --output "%OUTPUT%" ^
++    --device "%DEVICE%"
++if not "%ERRORLEVEL%"=="0" goto :failed
++echo.
++echo [DONE] Full native maps and every actual training point were requested for completed trials.
++echo New results are under "%OUTPUT%\replots".
++set "EXIT_CODE=0"
++goto :finish
++
++:missing_environment
++echo [ERROR] Keep this batch, environment.bat, and scripts\check_environment.py in one checkout.
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_log_sweep
++echo [ERROR] Apply the log-density objective and beta-sweep patches before this add-on.
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_record
++echo [ERROR] Missing "%RECORD%\metadata.json". Copy RECORD from your working execute.bat.
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_config
++echo [ERROR] Check CONFIG="%CONFIG%" and SWEEP_CONFIG="%SWEEP_CONFIG%".
++set "EXIT_CODE=1"
++goto :finish
++
++:missing_sweep
++echo [ERROR] OUTPUT must contain manifest.json from this quick log-loss sweep.
++set "EXIT_CODE=1"
++goto :finish
++
++:usage
++echo Usage: sweep_log_loss_quick.bat [run^|probe^|first^|plan^|replot]
++echo No argument runs or exactly resumes the quick comparison.
++set "EXIT_CODE=2"
++goto :finish
++
++:failed
++set "EXIT_CODE=%ERRORLEVEL%"
++echo.
++echo [ERROR] Command failed with exit code %EXIT_CODE%. See the output above.
++echo Use the interpreter selected in environment.bat.
++
++:finish
++popd
++echo.
++if not "%PHASEFLOW_PAUSE%"=="0" pause
++exit /b %EXIT_CODE%

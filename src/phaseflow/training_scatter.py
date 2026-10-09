@@ -5,6 +5,12 @@ not the device tensor itself. Regeneration is accepted only when that complete
 pool hash agrees. Directions are then cast exactly as in the saved training
 configuration. This is verified regeneration, not a claim to read archived GPU
 memory. It neither changes training state nor requires the old runtime to run.
+
+Version-5 log-density runs additionally record component labels and the teacher
+log PDF evaluated at the actual dtype-cast points. Their raw and runtime pool
+identities are both checked before any point is displayed. The recorded
+objective selects the historical CDF/mixed pool or an all-uniform query pool;
+replotting never substitutes one sampling distribution for another.
 """
 
 from __future__ import annotations
@@ -41,6 +47,8 @@ class TrainingScatter:
     source_phi_degrees: NDArray[np.float64]
     theta_degrees: NDArray[np.float64]
     provenance: dict[str, Any]
+    components: NDArray[np.uint8] | None = None
+    teacher_log_pdf: NDArray[np.float64] | None = None
 
 
 def _file_hash(path: Path) -> str:
@@ -86,7 +94,7 @@ def _state_equal(left: Any, right: Any) -> bool:
 
 
 def _identity(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    identity = {
         "path": str(path),
         "sha256": _file_hash(path),
         "kind": payload["kind"],
@@ -94,6 +102,9 @@ def _identity(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "global_step": payload["global_step"],
         "code_fingerprint": payload["code_fingerprint"],
     }
+    if payload["checkpoint_version"] == 5 and payload["kind"] == "inference":
+        identity["selection_metric"] = payload["selection_metric"]
+    return identity
 
 
 def resolve_training_scatter(
@@ -128,15 +139,30 @@ def resolve_training_scatter(
             raise ValueError(f"Training scatter requires the saved checkpoint: {path}")
     plotted = read_single_checkpoint(plotted_path)
     training = plotted if plotted_path == training_path else read_single_checkpoint(training_path)
-    if training["kind"] != "training" or training["checkpoint_version"] != 4:
-        raise ValueError("Training scatter requires a version-4 training checkpoint.pt")
+    version = training["checkpoint_version"]
+    if training["kind"] != "training" or version not in (4, 5):
+        raise ValueError("Training scatter requires a version-4 or version-5 training checkpoint.pt")
     required = {"training_config", "sample_split", "best_state", "best_step", "best_validation"}
     if not required <= training.keys():
         raise ValueError("Training checkpoint is missing fixed-pool or selection provenance")
     config_path, split_path = run / "config.json", run / "sample_split.json"
     saved_config, saved_split = _read_object(config_path), _read_object(split_path)
-    if saved_config.get("schema_version") != 2 or saved_config.get("family") != FAMILY:
-        raise ValueError("Training scatter requires a saved schema-2 single-condition config")
+    expected_schema = 3 if version == 5 else 2
+    if saved_config.get("schema_version") != expected_schema or saved_config.get("family") != FAMILY:
+        raise ValueError(
+            f"Training scatter requires a saved schema-{expected_schema} single-condition config"
+        )
+    objective = None
+    if version == 5:
+        from .log_objective import LogObjectiveConfig
+
+        if not {"objective_config", "selections"} <= training.keys():
+            raise ValueError("Log-density checkpoint is missing objective or selection provenance")
+        if saved_config.get("objective") != training["objective_config"] or (
+            plotted.get("objective_config") != training["objective_config"]
+        ):
+            raise ValueError("Saved log-density objective differs from the plotted checkpoint")
+        objective = LogObjectiveConfig.from_dict(training["objective_config"])
     if saved_config.get("training") != training["training_config"]:
         raise ValueError("Saved training configuration differs from checkpoint.pt")
     if saved_split != training["sample_split"]:
@@ -176,11 +202,25 @@ def resolve_training_scatter(
     ):
         raise ValueError("Invalid saved best checkpoint step")
     if plotted["kind"] == "inference":
-        if plotted["global_step"] != training["best_step"] or not _state_equal(
-            plotted["model_state"], training["best_state"]
+        if version == 5:
+            selection_metric = plotted.get("selection_metric")
+            selection = training["selections"].get(selection_metric)
+            if selection_metric not in ("nll", "log_rmse") or not isinstance(selection, dict):
+                raise ValueError("Inference checkpoint has no matching recorded selection metric")
+            if not {"model_state", "step", "validation"} <= selection.keys():
+                raise ValueError("Recorded selection is missing state, step or validation")
+            best_state, best_step = selection["model_state"], selection["step"]
+            best_validation = selection["validation"]
+        else:
+            best_state, best_step = training["best_state"], training["best_step"]
+            best_validation = training["best_validation"]
+        if type(best_step) is not int or not 0 <= best_step <= training["global_step"]:
+            raise ValueError("Invalid saved selection checkpoint step")
+        if plotted["global_step"] != best_step or not _state_equal(
+            plotted["model_state"], best_state
         ):
             raise ValueError("Inference checkpoint differs from the recorded best state or step")
-        if plotted.get("validation") != training["best_validation"]:
+        if plotted.get("validation") != best_validation:
             raise ValueError("Inference checkpoint differs from the recorded best validation")
         scope = "validation_selected_checkpoint"
     else:
@@ -204,8 +244,23 @@ def resolve_training_scatter(
     recorded_hash = saved_split.get("training_points_sha256")
     if not isinstance(recorded_hash, str) or len(recorded_hash) != 64:
         raise ValueError("Saved training pool is missing its SHA-256 identity")
-    directions, log_pdf = _points(reference, cfg.train_samples, data_seed, "train")
-    regenerated_hash = _array_hash(directions, log_pdf)
+    components, teacher_log_pdf, pool_provenance = None, None, None
+    if version == 5:
+        from .log_objective import make_training_pool
+
+        pool = make_training_pool(
+            reference, cfg.train_samples, data_seed, objective,
+            geometry_dtype=model.geometry_dtype,
+        )
+        if pool.provenance != saved_split.get("training_pool"):
+            raise ValueError("Regenerated training pool differs from saved component provenance")
+        directions, log_pdf = pool.directions, pool.log_p
+        components, teacher_log_pdf = pool.components, pool.log_p
+        pool_provenance = pool.provenance
+        regenerated_hash = _array_hash(directions, log_pdf, components)
+    else:
+        directions, log_pdf = _points(reference, cfg.train_samples, data_seed, "train")
+        regenerated_hash = _array_hash(directions, log_pdf)
     if regenerated_hash != recorded_hash:
         raise ValueError(
             "Regenerated fixed training pool does not match training_points_sha256; "
@@ -263,4 +318,35 @@ def resolve_training_scatter(
             "count_scope": "actual dtype-cast fixed pool; not an expected count",
         },
     }
-    return TrainingScatter(cast_directions, source_phi_degrees, theta_degrees, provenance)
+    if version == 5:
+        provenance.update({
+            "schema": "phaseflow.training_scatter.v2",
+            "sampling_distribution": pool_provenance["sampling"],
+            "training_pool": pool_provenance,
+            "component_counts": pool_provenance["component_counts"],
+            "component_codes": pool_provenance["component_codes"],
+            "source_streams": pool_provenance["source_streams"],
+            "pool_hash_covers": (
+                "actual training geometry directions, FP64 teacher_log_pdf evaluated at "
+                "those directions, and uint8 component labels; raw FP64 pool hash is also verified"
+            ),
+            "components_sha256": _array_hash(components),
+            "teacher_log_pdf_sha256": _array_hash(teacher_log_pdf),
+            "precision_provenance": (
+                "Regenerated raw and runtime pool hashes agree with the saved run. Each "
+                "plotted direction and teacher label matches the actual training geometry dtype."
+            ),
+            "objective": objective.to_dict(),
+        })
+        # The component provenance identifies the streams actually used. Mixed
+        # pools use two; all-uniform pools use only the uniform stream and do
+        # not generate any CDF-distributed training points.
+        provenance.pop("stream_id")
+        provenance["band"]["observed_component_samples"] = {
+            name: int(np.count_nonzero(in_band & (components == code)))
+            for name, code in pool_provenance["component_codes"].items()
+        }
+    return TrainingScatter(
+        cast_directions, source_phi_degrees, theta_degrees, provenance,
+        components=components, teacher_log_pdf=teacher_log_pdf,
+    )

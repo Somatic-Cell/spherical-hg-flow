@@ -26,8 +26,20 @@ def check_tensorboard() -> None:
 
 def _scalar_values(entry: dict[str, Any]) -> dict[str, float]:
     values = {}
+    log_objective = entry.get("objective") == "log_density" or "log_mse" in entry
+    if log_objective:
+        for key, tag in (
+            ("loss", "loss/total"),
+            ("nll", "nll/train_minibatch"),
+            ("log_mse", "log_mse/train_minibatch"),
+            ("beta", "objective/beta"),
+            ("nll_weight", "objective/nll_weight"),
+        ):
+            if key in entry:
+                values[tag] = entry[key]
+    elif "loss" in entry:
+        values["nll/train_minibatch"] = entry["loss"]
     for key, tag in (
-        ("loss", "nll/train_minibatch"),
         ("gradient_norm_before_clip", "optimizer/gradient_norm_before_clip"),
         ("learning_rate", "optimizer/learning_rate"),
         ("examples_seen", "budget/examples_seen"),
@@ -39,13 +51,25 @@ def _scalar_values(entry: dict[str, Any]) -> dict[str, float]:
         if key not in entry:
             continue
         metric = entry[key]
-        values[f"nll/{prefix}"] = metric["nll"]
-        values[f"kl/{prefix}"] = metric["forward_kl_estimate"]
-        values[f"kl_standard_error/{prefix}"] = metric["forward_kl_standard_error"]
-        values[f"nll_improvement_over_hg/{prefix}"] = metric["nll_improvement_over_hg"]
+        for name, tag in (
+            ("nll", "nll"),
+            ("forward_kl_estimate", "kl"),
+            ("forward_kl_standard_error", "kl_standard_error"),
+            ("nll_improvement_over_hg", "nll_improvement_over_hg"),
+            ("log_mse", "log_mse"),
+            ("log_rmse", "log_rmse"),
+            ("relative_rmse", "relative_rmse"),
+            ("loss", "loss"),
+        ):
+            if name in metric and metric[name] is not None:
+                values[f"{tag}/{prefix}"] = metric[name]
         if key == "validation":
-            values["nll/hg_validation"] = metric["hg_nll"]
-            values["kl/hg_validation"] = metric["hg_forward_kl_estimate"]
+            for name, tag in (
+                ("hg_nll", "nll"), ("hg_forward_kl_estimate", "kl"),
+                ("hg_log_mse", "log_mse"), ("hg_log_rmse", "log_rmse"),
+            ):
+                if name in metric:
+                    values[f"{tag}/hg_validation"] = metric[name]
     return values
 
 
@@ -170,13 +194,19 @@ def plot_training_history(
     history = read_history(history_path)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig = Figure(figsize=(11, 8), layout="constrained")
+    log_objective = any(
+        entry.get("objective") == "log_density" or "log_mse" in entry
+        or "log_mse" in entry.get("validation", {})
+        for entry in history
+    )
+    fig = Figure(figsize=(11, 12 if log_objective else 8), layout="constrained")
     FigureCanvasAgg(fig)
-    axes = fig.subplots(2, 2)
+    axes = fig.subplots(3 if log_objective else 2, 2)
     updates = [entry for entry in history if "loss" in entry]
     if updates:
         axes[0, 0].plot(
-            [e["global_step"] for e in updates], [e["loss"] for e in updates],
+            [e["global_step"] for e in updates],
+            [e["nll"] if log_objective else e["loss"] for e in updates],
             color="0.65", alpha=0.55, linewidth=0.6, label="Training minibatch (raw)",
         )
     for key, label, color in (
@@ -188,25 +218,63 @@ def plot_training_history(
             continue
         steps = [e["global_step"] for e in entries]
         axes[0, 0].plot(steps, [e[key]["nll"] for e in entries], color=color, label=label)
-        axes[0, 1].errorbar(
-            steps, [e[key]["forward_kl_estimate"] for e in entries],
-            yerr=[1.96 * e[key]["forward_kl_standard_error"] for e in entries],
-            color=color, marker=".", capsize=2, label=label,
-        )
+        kl_entries = [
+            e for e in entries
+            if {"forward_kl_estimate", "forward_kl_standard_error"} <= e[key].keys()
+        ]
+        if kl_entries:
+            axes[0, 1].errorbar(
+                [e["global_step"] for e in kl_entries],
+                [e[key]["forward_kl_estimate"] for e in kl_entries],
+                yerr=[1.96 * e[key]["forward_kl_standard_error"] for e in kl_entries],
+                color=color, marker=".", capsize=2, label=label,
+            )
     validation = [entry for entry in history if "validation" in entry]
     if validation:
         first = validation[0]["validation"]
-        axes[0, 0].axhline(first["hg_nll"], color="#7570b3", ls="--", label="HG validation")
-        axes[0, 1].axhline(
-            first["hg_forward_kl_estimate"], color="#7570b3", ls="--", label="HG validation",
-        )
+        if "hg_nll" in first:
+            axes[0, 0].axhline(first["hg_nll"], color="#7570b3", ls="--", label="HG validation")
+        if "hg_forward_kl_estimate" in first:
+            axes[0, 1].axhline(
+                first["hg_forward_kl_estimate"], color="#7570b3", ls="--", label="HG validation",
+            )
     axes[0, 0].set_ylabel("NLL (nats / sample, density per sr)")
     axes[0, 1].set_ylabel("Forward KL estimate (nats)")
     axes[0, 1].set_title("Error bars: +/- 1.96 Monte Carlo SE")
     axes[0, 1].axhline(0, color="0.5", linewidth=0.5)
+    if log_objective:
+        if updates:
+            steps = [e["global_step"] for e in updates]
+            axes[1, 0].plot(
+                steps, [e["loss"] for e in updates], color="0.3", alpha=0.65,
+                linewidth=0.6, label="Total minibatch objective",
+            )
+            if all({"beta", "nll_weight", "nll", "log_mse"} <= e.keys() for e in updates):
+                axes[1, 0].plot(
+                    steps, [e["nll_weight"] * e["nll"] for e in updates],
+                    alpha=0.6, linewidth=0.6, label="Weighted NLL term",
+                )
+                axes[1, 0].plot(
+                    steps, [e["beta"] * e["log_mse"] for e in updates],
+                    alpha=0.6, linewidth=0.6, label="Weighted log MSE term",
+                )
+        axes[1, 0].set_ylabel("Composite objective (not NLL)")
+        for key, label, color in (
+            ("train_monitor", "Fixed training subset", "#1f77b4"),
+            ("validation", "Independent spherical-uniform validation", "#d95f02"),
+        ):
+            entries = [e for e in history if "log_mse" in e.get(key, {})]
+            if entries:
+                axes[1, 1].plot(
+                    [e["global_step"] for e in entries],
+                    [e[key].get("log_rmse", e[key]["log_mse"] ** 0.5) for e in entries],
+                    color=color, label=label,
+                )
+        axes[1, 1].set_ylabel("Solid-angle log PDF RMSE (nats)")
+        axes[1, 1].set_title("Uniform-sphere measure; no density floor")
     for key, ax, label in (
-        ("gradient_norm_before_clip", axes[1, 0], "Gradient norm before clipping"),
-        ("learning_rate", axes[1, 1], "Learning rate"),
+        ("gradient_norm_before_clip", axes[-1, 0], "Gradient norm before clipping"),
+        ("learning_rate", axes[-1, 1], "Learning rate"),
     ):
         entries = [entry for entry in history if key in entry]
         if entries:
@@ -217,12 +285,19 @@ def plot_training_history(
         ax.grid(alpha=0.2)
         if ax.get_legend_handles_labels()[0]:
             ax.legend(fontsize=8)
-    fig.suptitle("Single CDF training history")
+    fig.suptitle("Single CDF log-density training history" if log_objective else (
+        "Single CDF training history"
+    ))
     fig.savefig(output, dpi=dpi)
     fig.clear()
-    return {
+    result = {
         "history": str(Path(history_path).resolve()), "output": str(output.resolve()),
         "last_step": history[-1]["global_step"], "events": len(history),
         "loss_axis": "linear; no clipping or smoothing",
         "error_bars": "1.96 Monte Carlo SE, not variability across training seeds",
     }
+    if log_objective:
+        result["objective"] = "log_density"
+        result["loss_components"] = ["nll", "log_mse", "total_composite_objective"]
+        result["log_error_measure"] = "uniform_solid_angle; natural logarithms"
+    return result

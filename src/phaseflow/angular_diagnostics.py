@@ -343,15 +343,23 @@ def evaluate_angular_diagnostics(
     batch_size: int,
     config: AngularDiagnosticConfig | None = None,
     checkpoint_path: str | Path | None = None,
+    objective_config=None,
 ) -> dict[str, Any]:
     """Save exact target band mass, expected counts, and aligned PDF cuts.
 
     This function consumes no train/validation/test samples and changes neither
-    weights nor selection. Expected counts are N*p(R) and B*p(R), not observed
-    counts in a particular fixed pool. The optional checkpoint identity records
-    the caller-supplied file; the caller must pass the file used to load ``model``.
+    weights nor selection. Expected counts use the recorded training query
+    distribution, not observed counts in a particular fixed pool. The optional
+    checkpoint identity records the caller-supplied file; the caller must pass
+    the file used to load ``model``.
     """
     config = AngularDiagnosticConfig() if config is None else config
+    if objective_config is not None:
+        from .log_objective import LogObjectiveConfig
+
+        if not isinstance(objective_config, LogObjectiveConfig):
+            raise ValueError("objective_config must be a LogObjectiveConfig or None")
+        objective_config.validate_training_count(train_samples)
     if not isinstance(config, AngularDiagnosticConfig):
         raise ValueError("config must be an AngularDiagnosticConfig")
     for name, value in (("train_samples", train_samples), ("batch_size", batch_size)):
@@ -367,11 +375,22 @@ def evaluate_angular_diagnostics(
     low, high = _band_u(config.theta_band_degrees)
     metrics = _reference_band_and_zeros(reference, low, high)
     mass = metrics["reference_band_mass_exact"]
+    sampling = "target" if objective_config is None else objective_config.sampling
+    target_fraction = {"target": 1.0, "target_uniform": 0.5, "uniform": 0.0}[sampling]
+    uniform_mass = high - low
+    query_mass = target_fraction * mass + (1 - target_fraction) * uniform_mass
     metrics.update(
-        expected_train_band_samples=train_samples * mass,
-        expected_minibatch_band_samples=batch_size * mass,
+        expected_train_band_samples=train_samples * query_mass,
+        expected_minibatch_band_samples=batch_size * query_mass,
         hg_band_probability_width=_hg_band_probability(reference.g, low, high),
     )
+    if objective_config is not None:
+        metrics.update(
+            uniform_band_mass_exact=uniform_mass,
+            training_query_band_mass=query_mass,
+            expected_cdf_train_band_samples=train_samples * target_fraction * mass,
+            expected_uniform_train_band_samples=train_samples * (1 - target_fraction) * uniform_mass,
+        )
     if not all(math.isfinite(value) for value in metrics.values()):
         raise FloatingPointError("nonfinite angular diagnostic statistic")
     profiles = _profiles(model, reference, config)
@@ -402,7 +421,8 @@ def evaluate_angular_diagnostics(
     serialized = json.dumps(configuration, sort_keys=True, separators=(",", ":"), allow_nan=False)
     model_config = getattr(model, "config", None)
     report: dict[str, Any] = {
-        "schema": ANGULAR_DIAGNOSTICS_SCHEMA,
+        "schema": (ANGULAR_DIAGNOSTICS_SCHEMA if objective_config is None
+                   else "phaseflow.angular_diagnostics.v2"),
         **metrics,
         "scope": "report_only_same_condition_no_model_selection",
         "source_kind": "synthetic_fixture" if synthetic else "rainbow_cdf_record",
@@ -450,8 +470,23 @@ def evaluate_angular_diagnostics(
         "expected_counts": {
             "train_samples": train_samples,
             "batch_size": batch_size,
-            "method": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+            "method": {
+                "target": "N*p(R) and B*p(R), not observed counts in a fixed pool",
+                "target_uniform": (
+                    "N*(0.5*p(R)+0.5*u(R)) and B*(0.5*p(R)+0.5*u(R)); "
+                    "unconditional expectations, not observed counts"
+                ),
+                "uniform": (
+                    "N*u(R) and B*u(R); uniform solid-angle queries, "
+                    "not observed counts in a fixed pool"
+                ),
+            }[sampling],
             "observed_train_band_samples": None,
+            **({"sampling": objective_config.sampling,
+                "target_fraction": target_fraction,
+                "cdf_samples": int(train_samples * target_fraction),
+                "uniform_samples": int(train_samples * (1 - target_fraction))}
+               if objective_config is not None else {}),
         },
         "profiles": {
             "requested_source_phi_degrees": profiles["requested_source_phi_degrees"].tolist(),
